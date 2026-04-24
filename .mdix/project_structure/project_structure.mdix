@@ -1,0 +1,120 @@
+// =============================================================================
+// TEMPLATE: MSX — MidStroke eXchange
+// Use with: mdix-scaffold generate --template .mdix/project_structure/project_structure.mdix
+// Mappings: project_name, description, author, github_user
+// Sibling dep: ../mbfa must exist (path dependency)
+//
+// MSX is a vector image format co-designed with DixScript and MBFA.
+// .msx source files ARE valid DixScript — QuickFuncs serve as a
+// parametric shape/component system. The compiled binary uses MBFA
+// multi-fold compression on typed element streams.
+// =============================================================================
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext)            { return { name = name, ext = ext, content = "" } }
+  ~fc<object>(name, ext, content)  { return { name = name, ext = ext, content = content } }
+  ~fremote<object>(name, ext, url) { return { name = name, ext = ext, content = "remote::" + url } }
+  ~gitkeep<object>()               { return { name = ".gitkeep", ext = "", content = "" } }
+  ~hidden<object>(seg)             { return { segment = seg } }
+)
+
+@DATA(
+  project_name = "msx"
+  description  = "MSX — MidStroke eXchange vector format co-designed with DixScript and MBFA"
+  author       = "MidManStudio"
+  github_user  = "Mid-D-Man"
+
+  hidden_dirs::
+    hidden("github")
+    hidden("vscode")
+
+  post_hooks::
+    "echo 'MSX scaffold complete. Ensure ../mbfa exists as a sibling directory.'"
+    "echo 'Run: cargo test -- --nocapture'"
+
+  // ── VS Code ────────────────────────────────────────────────────────────────
+  vscode::
+    fc("extensions", "json", "{\n  \"recommendations\": [\n    \"rust-lang.rust-analyzer\",\n    \"tamasfe.even-better-toml\"\n  ]\n}\n")
+    fc("settings",   "json", "{\n  \"rust-analyzer.cargo.features\": \"all\",\n  \"editor.formatOnSave\": true\n}\n")
+
+  // ── Source ─────────────────────────────────────────────────────────────────
+  // All Rust stubs — full implementations provided as standalone code blocks.
+  src::
+    f("lib",        "rs")   // Public API: parse_msx, render_svg, compile, decode
+    f("main",       "rs")   // CLI: render | compile | info | roundtrip | validate
+    f("header",     "rs")   // MSX binary header constants + serialise/parse
+    f("ast",        "rs")   // Vector scene graph: Scene, Element enum, Canvas
+    f("primitives", "rs")   // Point, Rect, Size, ViewBox value types
+    f("color",      "rs")   // Color, Paint, LinearGradient, RadialGradient, Stop
+    f("path",       "rs")   // PathCommand enum + d-string parser + serialiser
+    f("transform",  "rs")   // Transform enum + Matrix2D
+    f("style",      "rs")   // Style struct (fill, stroke, opacity, cap, join …)
+    f("parser",     "rs")   // DixScript-MSX recursive-descent parser + evaluator
+    f("compiler",   "rs")   // Scene → binary MSX (typed element streams)
+    f("renderer",   "rs")   // Scene → SVG string (pixel-perfect)
+    f("encoder",    "rs")   // Low-level binary encoding helpers
+    f("decoder",    "rs")   // Low-level binary decoding helpers
+
+  // ── Integration tests ──────────────────────────────────────────────────────
+  tests::
+    f("roundtrip", "rs")
+    gitkeep()
+
+  // ── Criterion benchmarks ───────────────────────────────────────────────────
+  benches::
+    f("compare", "rs")
+
+  // ── Example .msx source files (real DixScript) ────────────────────────────
+  examples::
+    fc("basic_shapes", "msx", "// basic_shapes.msx\n// Run: msx render examples/basic_shapes.msx -o basic_shapes.svg\n\n@CONFIG(\n  version -> \"1.0.0\"\n)\n\n@QUICKFUNCS(\n  ~s<object>(fill, stroke, sw) {\n    return { fill = fill, stroke = stroke, stroke_width = sw, opacity = 1.0 }\n  }\n  ~rect<object>(x, y, w, h, style) {\n    return { type = \"rect\", x = x, y = y, width = w, height = h, style = style }\n  }\n  ~rect_r<object>(x, y, w, h, rx, style) {\n    return { type = \"rect\", x = x, y = y, width = w, height = h, rx = rx, style = style }\n  }\n  ~circle<object>(cx, cy, r, style) {\n    return { type = \"circle\", cx = cx, cy = cy, r = r, style = style }\n  }\n  ~ellipse<object>(cx, cy, rx, ry, style) {\n    return { type = \"ellipse\", cx = cx, cy = cy, rx = rx, ry = ry, style = style }\n  }\n  ~line<object>(x1, y1, x2, y2, style) {\n    return { type = \"line\", x1 = x1, y1 = y1, x2 = x2, y2 = y2, style = style }\n  }\n)\n\n@DATA(\n  scene: { width = 600, height = 400, background = \"#1a1a2e\" }\n\n  elements::\n    rect(40, 40, 160, 100, s(\"#e94560\", \"#c0392b\", 2))\n    rect_r(240, 40, 140, 100, 12, s(\"#0f3460\", \"#16213e\", 3))\n    circle(520, 90, 60, s(\"#533483\", \"#7d3c98\", 2))\n    ellipse(160, 280, 120, 55, s(\"#e94560\", \"none\", 0))\n    line(350, 200, 580, 370, s(\"none\", \"#f5a623\", 3))\n)\n")
+    fc("parametric",   "msx", "// parametric.msx — reusable components via QuickFuncs\n// This is what makes MSX different from raw SVG.\n\n@CONFIG(\n  version -> \"1.0.0\"\n)\n\n@ENUMS(\n  Variant { Primary = 0, Success = 1, Warning = 2, Danger = 3 }\n)\n\n@QUICKFUNCS(\n  ~canvas<object>(w, h, bg) {\n    return { width = w, height = h, background = bg }\n  }\n\n  // Pill badge: rounded rect + centred label — one call, zero duplication\n  ~badge<object>(x, y, label, bg_color) {\n    return {\n      type     = \"group\"\n      elements = [\n        { type = \"rect\", x = x, y = y, width = 90, height = 30, rx = 15,\n          style = { fill = bg_color, stroke = \"none\", stroke_width = 0, opacity = 1.0 } }\n        { type = \"text\", x = x + 45, y = y + 20, content = label,\n          style = { fill = \"#ffffff\", font_size = 12, text_anchor = \"middle\",\n                    font_weight = \"bold\", stroke = \"none\", stroke_width = 0, opacity = 1.0 } }\n      ]\n    }\n  }\n\n  // Checkmark icon — parametric size and colour\n  ~icon_check<object>(cx, cy, size, color) {\n    let half = size * 0.5;\n    return {\n      type  = \"path\"\n      d     = $\"M {cx - half * 0.7} {cy} L {cx - half * 0.1} {cy + half * 0.7} L {cx + half * 0.8} {cy - half * 0.6}\"\n      style = { fill = \"none\", stroke = color, stroke_width = size * 0.12,\n                stroke_linecap = \"round\", stroke_linejoin = \"round\",\n                opacity = 1.0 }\n    }\n  }\n\n  // Card: background rect + optional top-accent bar\n  ~card<object>(x, y, w, h, accent) {\n    return {\n      type     = \"group\"\n      elements = [\n        { type = \"rect\", x = x, y = y, width = w, height = h, rx = 8,\n          style = { fill = \"#ffffff\", stroke = \"#e0e0e0\", stroke_width = 1, opacity = 1.0 } }\n        { type = \"rect\", x = x, y = y, width = w, height = 4, rx = 2,\n          style = { fill = accent, stroke = \"none\", stroke_width = 0, opacity = 1.0 } }\n      ]\n    }\n  }\n)\n\n@DATA(\n  scene: canvas(700, 420, \"#f4f5f7\")\n\n  elements::\n    badge(40,  30, \"primary\",   \"#007bff\")\n    badge(150, 30, \"success\",   \"#28a745\")\n    badge(260, 30, \"warning\",   \"#ffc107\")\n    badge(370, 30, \"danger\",    \"#dc3545\")\n\n    card(40,  90, 180, 140, \"#007bff\")\n    card(250, 90, 180, 140, \"#28a745\")\n    card(460, 90, 180, 140, \"#dc3545\")\n\n    icon_check(130, 220, 56, \"#28a745\")\n    icon_check(340, 220, 56, \"#007bff\")\n    icon_check(550, 220, 56, \"#dc3545\")\n)\n")
+    fc("path_demo",    "msx", "// path_demo.msx — SVG path commands in MSX source format\n\n@CONFIG(\n  version -> \"1.0.0\"\n)\n\n@DATA(\n  scene: { width = 500, height = 500, background = \"#0d1117\" }\n\n  elements::\n    // Triangle via absolute LineTo\n    { type = \"path\"\n      d = \"M 50 450 L 250 50 L 450 450 Z\"\n      style = { fill = \"#3498db\", stroke = \"#2980b9\", stroke_width = 3, opacity = 0.9 } }\n\n    // Organic blob via cubic beziers\n    { type = \"path\"\n      d = \"M 250 120 C 340 60 440 140 420 240 C 400 340 300 420 210 390 C 120 360 80 260 100 180 C 120 100 160 180 250 120 Z\"\n      style = { fill = \"none\", stroke = \"#e74c3c\", stroke_width = 4, opacity = 1.0 } }\n\n    // Arc demo — semicircle\n    { type = \"path\"\n      d = \"M 120 380 A 130 130 0 0 1 380 380\"\n      style = { fill = \"none\", stroke = \"#f5a623\", stroke_width = 5, opacity = 1.0 } }\n\n    // Quad bezier S-curve\n    { type = \"path\"\n      d = \"M 60 260 Q 150 180 250 260 Q 350 340 440 260\"\n      style = { fill = \"none\", stroke = \"#2ecc71\", stroke_width = 3, opacity = 0.8 } }\n)\n")
+    fc("gradients",    "msx", "// gradients.msx — linear and radial gradient fills\n// NOTE: gradient refs use the defs system\n\n@CONFIG(\n  version -> \"1.0.0\"\n)\n\n@DATA(\n  scene: { width = 600, height = 400, background = \"#ffffff\" }\n\n  defs::\n    { type = \"linear_gradient\", id = \"sunset\",\n      x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,\n      stops = [\n        { offset = 0.0,  color = \"#f7971e\", opacity = 1.0 }\n        { offset = 1.0,  color = \"#ffd200\", opacity = 1.0 }\n      ] }\n    { type = \"radial_gradient\", id = \"ocean\",\n      cx = 0.5, cy = 0.5, r = 0.5,\n      stops = [\n        { offset = 0.0,  color = \"#4facfe\", opacity = 1.0 }\n        { offset = 1.0,  color = \"#00f2fe\", opacity = 1.0 }\n      ] }\n\n  elements::\n    { type = \"rect\", x = 40,  y = 60, width = 220, height = 140,\n      style = { fill = \"url(#sunset)\", stroke = \"none\", stroke_width = 0, opacity = 1.0 } }\n    { type = \"circle\", cx = 450, cy = 130, r = 100,\n      style = { fill = \"url(#ocean)\", stroke = \"none\", stroke_width = 0, opacity = 1.0 } }\n)\n")
+    gitkeep()
+
+  // ── Corpus ─────────────────────────────────────────────────────────────────
+  corpus.synthetic::
+    gitkeep()
+
+  corpus.icons::
+    gitkeep()
+
+  corpus.illustrations::
+    gitkeep()
+
+  // ── Scripts ────────────────────────────────────────────────────────────────
+  scripts::
+    fc("gen_corpus.sh",    "", "#!/usr/bin/env bash\n# gen_corpus.sh — generate synthetic MSX test corpus\nset -euo pipefail\n\nBIN=./target/release/msx\n[ -f \"$BIN\" ] || cargo build --release\nmkdir -p corpus/synthetic\n\necho 'Generating MSX synthetic corpus...'\n\nfor COUNT in 10 50 100 500 2000; do\n  OUT=\"corpus/synthetic/circles_${COUNT}.msx\"\n  python3 - \"$OUT\" <<PYEOF\nimport random, sys\nrandom.seed(int('${COUNT}'))\nn = int('${COUNT}')\nlines = ['@CONFIG( version -> \"1.0.0\" )']\nlines.append('@DATA(')\nlines.append('  scene: { width = 1000, height = 1000, background = \"#ffffff\" }')\nlines.append('  elements::')\nfor _ in range(n):\n    x = random.randint(5, 990)\n    y = random.randint(5, 990)\n    r = random.randint(3, 40)\n    c = f'#{random.randint(0, 0xFFFFFF):06x}'\n    o = round(random.uniform(0.4, 1.0), 2)\n    lines.append(f'    {{ type = \"circle\", cx = {x}, cy = {y}, r = {r}, style = {{ fill = \"{c}\", stroke = \"none\", stroke_width = 0, opacity = {o} }} }}')\nlines.append(')')\nwith open(sys.argv[1], 'w') as f:\n    f.write('\\n'.join(lines) + '\\n')\nprint(f'Wrote {sys.argv[1]}')\nPYEOF\ndone\n\necho 'Corpus ready in corpus/synthetic/'\n")
+    fc("verify_corpus.sh", "", "#!/usr/bin/env bash\n# verify_corpus.sh — roundtrip every .msx in corpus/ through binary and back\nset -euo pipefail\n\nBIN=./target/release/msx\n[ -f \"$BIN\" ] || cargo build --release\n\nPASS=0; FAIL=0\n\nfor src in corpus/**/*.msx; do\n  FILE=$(basename \"${src%.msx}\")\n  if \"$BIN\" roundtrip \"$src\" 2>/dev/null; then\n    echo \"PASS  $FILE\"\n    PASS=$((PASS + 1))\n  else\n    echo \"FAIL  $FILE\"\n    FAIL=$((FAIL + 1))\n  fi\ndone\n\necho\necho \"Results: $PASS passed, $FAIL failed\"\n[ \"$FAIL\" -eq 0 ] || exit 1\n")
+
+  // ── Docs ───────────────────────────────────────────────────────────────────
+  docs::
+    f("format-spec",   "md")
+    f("benchmarks",    "md")
+    f("msx-dixscript", "md")
+
+  // ── CI ─────────────────────────────────────────────────────────────────────
+  github.workflows::
+    f("ci",    "yml")
+    f("pages", "yml")
+
+  github.pages::
+    f("generate_report", "py")
+
+  // ── Manifest seed ──────────────────────────────────────────────────────────
+  mdix.project_structure::
+    gitkeep()
+
+  // ── Root ───────────────────────────────────────────────────────────────────
+  root::
+    f("README",    "md")
+    f("Cargo",     "toml")
+    fremote("LICENSE", "", "https://raw.githubusercontent.com/nicklockwood/MIT-License/master/MIT-License")
+    fc(".gitignore", "", "target/\n*.lock\n.env\n.DS_Store\n**/.DS_Store\ncorpus/**/*_compiled.msx\ncorpus/**/*.svg\n")
+)
