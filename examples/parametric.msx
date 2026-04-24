@@ -1,0 +1,73 @@
+// parametric.msx — reusable components via QuickFuncs
+// This is what makes MSX different from raw SVG.
+
+@CONFIG(
+  version -> "1.0.0"
+)
+
+@ENUMS(
+  Variant { Primary = 0, Success = 1, Warning = 2, Danger = 3 }
+)
+
+@QUICKFUNCS(
+  ~canvas<object>(w, h, bg) {
+    return { width = w, height = h, background = bg }
+  }
+
+  // Pill badge: rounded rect + centred label — one call, zero duplication
+  ~badge<object>(x, y, label, bg_color) {
+    return {
+      type     = "group"
+      elements = [
+        { type = "rect", x = x, y = y, width = 90, height = 30, rx = 15,
+          style = { fill = bg_color, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+        { type = "text", x = x + 45, y = y + 20, content = label,
+          style = { fill = "#ffffff", font_size = 12, text_anchor = "middle",
+                    font_weight = "bold", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ]
+    }
+  }
+
+  // Checkmark icon — parametric size and colour
+  ~icon_check<object>(cx, cy, size, color) {
+    let half = size * 0.5;
+    return {
+      type  = "path"
+      d     = $"M {cx - half * 0.7} {cy} L {cx - half * 0.1} {cy + half * 0.7} L {cx + half * 0.8} {cy - half * 0.6}"
+      style = { fill = "none", stroke = color, stroke_width = size * 0.12,
+                stroke_linecap = "round", stroke_linejoin = "round",
+                opacity = 1.0 }
+    }
+  }
+
+  // Card: background rect + optional top-accent bar
+  ~card<object>(x, y, w, h, accent) {
+    return {
+      type     = "group"
+      elements = [
+        { type = "rect", x = x, y = y, width = w, height = h, rx = 8,
+          style = { fill = "#ffffff", stroke = "#e0e0e0", stroke_width = 1, opacity = 1.0 } }
+        { type = "rect", x = x, y = y, width = w, height = 4, rx = 2,
+          style = { fill = accent, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ]
+    }
+  }
+)
+
+@DATA(
+  scene: canvas(700, 420, "#f4f5f7")
+
+  elements::
+    badge(40,  30, "primary",   "#007bff")
+    badge(150, 30, "success",   "#28a745")
+    badge(260, 30, "warning",   "#ffc107")
+    badge(370, 30, "danger",    "#dc3545")
+
+    card(40,  90, 180, 140, "#007bff")
+    card(250, 90, 180, 140, "#28a745")
+    card(460, 90, 180, 140, "#dc3545")
+
+    icon_check(130, 220, 56, "#28a745")
+    icon_check(340, 220, 56, "#007bff")
+    icon_check(550, 220, 56, "#dc3545")
+)

@@ -1,0 +1,56 @@
+@CONFIG(
+  version    -> "1.0.0"
+  generated  -> "2026-04-24T18:45:27Z"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@DATA(
+  template      = ".mdix/project_structure/project_structure.mdix"
+  template_hash = "235727917695"
+  last_run      = "2026-04-24T18:45:27Z"
+  new_this_run  = 36
+  overridden    = 0
+  skipped       = 1
+  deleted       = 0
+  renamed       = 0
+  updated       = 0
+
+  created_files::
+    ".vscode/extensions.json"
+    ".vscode/settings.json"
+    "Cargo.toml"
+    "LICENSE"
+    "README.md"
+    "benches/compare.rs"
+    "corpus/icons/.gitkeep"
+    "corpus/illustrations/.gitkeep"
+    "corpus/synthetic/.gitkeep"
+    "docs/benchmarks.md"
+    "docs/format-spec.md"
+    "docs/msx-dixscript.md"
+    "examples/.gitkeep"
+    "examples/basic_shapes.msx"
+    "examples/gradients.msx"
+    "examples/parametric.msx"
+    "examples/path_demo.msx"
+    "mdix/project_structure/.gitkeep"
+    "scripts/gen_corpus.sh"
+    "scripts/verify_corpus.sh"
+    "src/ast.rs"
+    "src/color.rs"
+    "src/compiler.rs"
+    "src/decoder.rs"
+    "src/encoder.rs"
+    "src/header.rs"
+    "src/lib.rs"
+    "src/main.rs"
+    "src/parser.rs"
+    "src/path.rs"
+    "src/primitives.rs"
+    "src/renderer.rs"
+    "src/style.rs"
+    "src/transform.rs"
+    "tests/.gitkeep"
+    "tests/roundtrip.rs"
+)

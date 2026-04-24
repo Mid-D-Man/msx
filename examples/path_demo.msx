@@ -1,0 +1,30 @@
+// path_demo.msx — SVG path commands in MSX source format
+
+@CONFIG(
+  version -> "1.0.0"
+)
+
+@DATA(
+  scene: { width = 500, height = 500, background = "#0d1117" }
+
+  elements::
+    // Triangle via absolute LineTo
+    { type = "path"
+      d = "M 50 450 L 250 50 L 450 450 Z"
+      style = { fill = "#3498db", stroke = "#2980b9", stroke_width = 3, opacity = 0.9 } }
+
+    // Organic blob via cubic beziers
+    { type = "path"
+      d = "M 250 120 C 340 60 440 140 420 240 C 400 340 300 420 210 390 C 120 360 80 260 100 180 C 120 100 160 180 250 120 Z"
+      style = { fill = "none", stroke = "#e74c3c", stroke_width = 4, opacity = 1.0 } }
+
+    // Arc demo — semicircle
+    { type = "path"
+      d = "M 120 380 A 130 130 0 0 1 380 380"
+      style = { fill = "none", stroke = "#f5a623", stroke_width = 5, opacity = 1.0 } }
+
+    // Quad bezier S-curve
+    { type = "path"
+      d = "M 60 260 Q 150 180 250 260 Q 350 340 440 260"
+      style = { fill = "none", stroke = "#2ecc71", stroke_width = 3, opacity = 0.8 } }
+)
