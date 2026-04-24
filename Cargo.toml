@@ -1,1 +1,26 @@
 # Auto-generated config
+[package]
+name = "msx"
+version = "0.1.0"
+edition = "2021"
+authors = ["MidManStudio"]
+description = "MSX — MidStroke eXchange vector format built on DixScript and MBFA"
+license = "MIT"
+
+[[bin]]
+name = "msx"
+path = "src/main.rs"
+
+[lib]
+name = "msx"
+path = "src/lib.rs"
+
+[dependencies]
+mbfa = { path = "../mbfa" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name    = "compare"
+harness = false
