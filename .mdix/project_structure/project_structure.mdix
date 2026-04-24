@@ -99,13 +99,6 @@
     f("benchmarks",    "md")
     f("msx-dixscript", "md")
 
-  // ── CI ─────────────────────────────────────────────────────────────────────
-  github.workflows::
-    f("ci",    "yml")
-    f("pages", "yml")
-
-  github.pages::
-    f("generate_report", "py")
 
   // ── Manifest seed ──────────────────────────────────────────────────────────
   mdix.project_structure::
