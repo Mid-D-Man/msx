@@ -1,0 +1,252 @@
+# msx/.github/workflows/pages.yml
+name: MSX — Test, Bench, Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages:    write
+  id-token: write
+
+concurrency:
+  group:   pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-report:
+    runs-on: ubuntu-latest
+    if: ${{ vars.AUTO_RUN_ENABLED != 'false' || github.event_name == 'workflow_dispatch' }}
+    environment:
+      name: github-pages
+      url:  ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout MSX
+        uses: actions/checkout@v4
+
+      - name: Checkout MBFA (sibling path dependency)
+        run: |
+          git clone --depth 1 "https://github.com/Mid-D-Man/mbfa.git" \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+          git config --global --add safe.directory \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+
+      - name: Checkout DixScript (sibling path dependency)
+        run: |
+          PARENT=$(dirname "$GITHUB_WORKSPACE")
+          git clone --depth 1 "https://github.com/Mid-D-Man/DixScript-Rust.git" \
+            "$PARENT/DixScript-Rust"
+          git config --global --add safe.directory "$PARENT/DixScript-Rust"
+          ln -s "$PARENT/DixScript-Rust/dixscript" "$PARENT/dixscript"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ../mbfa/target
+            ../DixScript-Rust/target
+          key: msx-pages-${{ hashFiles('Cargo.toml') }}
+          restore-keys: msx-pages-
+
+      # ── Lint ─────────────────────────────────────────────────────────────────
+      - name: Clippy
+        run: mkdir -p results && cargo clippy -- -D warnings 2>&1 | tee results/clippy.txt || true
+
+      # ── Tests ─────────────────────────────────────────────────────────────────
+      - name: Create results dir
+        run: mkdir -p results
+
+      - name: Run tests (debug)
+        run: cargo test 2>&1 | tee results/test_debug.txt
+
+      - name: Run tests (release)
+        run: cargo test --release 2>&1 | tee results/test_release.txt
+
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Build release binary
+        run: cargo build --release
+
+      # ── Benchmarks ────────────────────────────────────────────────────────────
+      # Criterion --output-format bencher emits one-liner bench: N ns/iter lines
+      # which generate_report.py:parse_bench() consumes.  measurement-time 5 and
+      # sample-size 20 keep the total suite under 10 minutes.
+      - name: Run criterion benchmarks
+        timeout-minutes: 12
+        run: |
+          cargo bench --bench compare -- \
+            --output-format bencher \
+            --measurement-time 5 \
+            --sample-size 20 \
+            | tee results/bench_raw.txt || true
+          echo "Bench lines: $(grep -c 'bench:' results/bench_raw.txt || echo 0)"
+
+      # ── Example rendering + corpus stats ──────────────────────────────────────
+      # For every .msx file in examples/:
+      #   1. Compile (source → MBFA binary) and record binary size
+      #   2. Render  (source → SVG)         and record SVG size
+      #   3. Roundtrip test                 to verify decode integrity
+      - name: Render examples and collect corpus stats
+        run: |
+          BIN=./target/release/msx
+          mkdir -p results/svgs
+          {
+            printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
+            for src in examples/*.msx; do
+              [ -f "$src" ] || continue
+              stem=$(basename "${src%.msx}")
+              src_bytes=$(wc -c < "$src")
+
+              # Compile to MBFA-compressed binary
+              if "$BIN" compile "$src" -o "/tmp/${stem}.msx" 2>/dev/null; then
+                bin_bytes=$(wc -c < "/tmp/${stem}.msx")
+              else
+                echo "  WARN: compile failed for $stem" >&2
+                bin_bytes=0
+              fi
+
+              # Render source directly to SVG
+              if "$BIN" render "$src" -o "results/svgs/${stem}.svg" 2>/dev/null; then
+                svg_bytes=$(wc -c < "results/svgs/${stem}.svg")
+              else
+                echo "  WARN: render failed for $stem" >&2
+                svg_bytes=0
+              fi
+
+              denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
+              bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
+              svg_pct=$(awk "BEGIN{printf \"%.1f\",$svg_bytes/$denom*100}")
+
+              # Roundtrip: source → binary → SVG must be pixel-perfect
+              "$BIN" roundtrip "$src" 2>/dev/null && rt="PASS" || rt="FAIL"
+
+              printf '%s,%d,%d,%d,%s,%s,%s\n' \
+                "$stem" "$src_bytes" "$bin_bytes" "$svg_bytes" \
+                "$bin_pct" "$svg_pct" "$rt"
+
+              rm -f "/tmp/${stem}.msx"
+            done
+          } | tee results/corpus.csv
+
+      # ── Build examples.json for the report ────────────────────────────────────
+      # Combines rendered SVG content, source text, and compression stats into a
+      # single JSON so the Python report generator stays stateless.
+      - name: Build examples.json
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, glob
+
+          # Read corpus stats into a lookup dict
+          stats = {}
+          try:
+              with open('results/corpus.csv') as f:
+                  for line in f.readlines()[1:]:   # skip header
+                      parts = line.strip().split(',')
+                      if len(parts) >= 7:
+                          stats[parts[0]] = {
+                              'source_bytes': int(parts[1]),
+                              'binary_bytes': int(parts[2]),
+                              'svg_bytes':    int(parts[3]),
+                              'bin_pct':      float(parts[4]),
+                              'svg_pct':      float(parts[5]),
+                              'pass':         parts[6] == 'PASS',
+                          }
+          except Exception as e:
+              print(f"WARN: could not read corpus.csv: {e}")
+
+          results = []
+          for svg_path in sorted(glob.glob('results/svgs/*.svg')):
+              stem     = os.path.splitext(os.path.basename(svg_path))[0]
+              src_path = f'examples/{stem}.msx'
+
+              if not os.path.exists(src_path):
+                  continue
+
+              with open(svg_path, 'r', errors='replace') as f:
+                  svg_content = f.read()
+              with open(src_path, 'r', errors='replace') as f:
+                  source = f.read()
+
+              row = stats.get(stem, {})
+              entry = {
+                  'name':         stem,
+                  'source':       source,
+                  'svg':          svg_content,
+                  'source_bytes': row.get('source_bytes', os.path.getsize(src_path)),
+                  'binary_bytes': row.get('binary_bytes', 0),
+                  'svg_bytes':    row.get('svg_bytes',    os.path.getsize(svg_path)),
+                  'bin_pct':      row.get('bin_pct', 0.0),
+                  'svg_pct':      row.get('svg_pct', 0.0),
+                  'pass':         row.get('pass', False),
+              }
+              results.append(entry)
+              print(f"  {stem}: {entry['source_bytes']}B src "
+                    f"→ {entry['binary_bytes']}B bin "
+                    f"→ {entry['svg_bytes']}B svg "
+                    f"({'PASS' if entry['pass'] else 'FAIL'})")
+
+          with open('results/examples.json', 'w') as f:
+              json.dump(results, f)
+          print(f"examples.json: {len(results)} example(s)")
+          PYEOF
+
+      # ── Report generation ─────────────────────────────────────────────────────
+      - name: Generate HTML report
+        run: |
+          python3 .github/pages/generate_report.py \
+            --build    "${{ github.run_number }}" \
+            --commit   "${GITHUB_SHA:0:8}" \
+            --branch   "${{ github.ref_name }}" \
+            --tests-d  results/test_debug.txt \
+            --tests-r  results/test_release.txt \
+            --bench    results/bench_raw.txt \
+            --corpus   results/corpus.csv \
+            --examples results/examples.json \
+            --out      site/index.html
+
+      # ── Pages deployment ──────────────────────────────────────────────────────
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # ── Step summary ──────────────────────────────────────────────────────────
+      - name: Publish Step Summary
+        run: |
+          echo "## MSX Build #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ github.ref_name }}\`  Commit: \`${GITHUB_SHA:0:8}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Example compression table" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat results/corpus.csv >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Benchmark extract" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep 'bench:' results/bench_raw.txt | head -40 \
+            >> $GITHUB_STEP_SUMMARY || echo "(no bench output yet)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "🔗 [View full visual report](${{ steps.deployment.outputs.page_url }})" \
+            >> $GITHUB_STEP_SUMMARY
