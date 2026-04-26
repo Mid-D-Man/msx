@@ -91,7 +91,6 @@ fn parse_canvas(data: &DixData) -> Result<Canvas, String> {
 fn parse_defs(data: &DixData) -> Result<Vec<Def>, String> {
     let mut defs = Vec::new();
 
-    // Count defs: DixData flattens arrays as defs[0].type, defs[1].type …
     let mut i = 0;
     loop {
         let prefix = format!("defs[{}]", i);
@@ -141,7 +140,6 @@ fn parse_stops(data: &DixData, prefix: &str) -> Result<Vec<Stop>, String> {
     let mut i = 0;
     loop {
         let stop_prefix = format!("{}[{}]", prefix, i);
-        // DixData may store the stop as an object at stops[i]
         if !data.exists(&format!("{}.offset", stop_prefix)) &&
            !data.exists(&format!("{}.color",  stop_prefix)) { break; }
 
@@ -152,7 +150,6 @@ fn parse_stops(data: &DixData, prefix: &str) -> Result<Vec<Stop>, String> {
 
         let mut color = Color::parse(&color_str)
             .unwrap_or(Color::BLACK);
-        // Apply opacity to alpha channel
         color.a = (opacity * 255.0).round() as u8;
 
         stops.push(Stop::new(offset, color));
@@ -259,13 +256,11 @@ fn parse_element(data: &DixData, prefix: &str) -> Result<Element, String> {
 // ── Transform parsing ─────────────────────────────────────────────────────────
 
 fn parse_optional_transform(data: &DixData, prefix: &str) -> Option<Transform> {
-    // String form: transform = "translate(10 20)"
     if let Ok(s) = data.get::<String>(&format!("{}.transform", prefix)) {
         let t = Transform::parse_svg(&s);
         if !t.is_none() { return Some(t); }
     }
 
-    // Object form: transform.type, transform.x/y/angle etc.
     let ttype: String = data.get(&format!("{}.transform.type", prefix)).ok()?;
 
     let t = match ttype.as_str() {
@@ -361,7 +356,6 @@ fn parse_style(data: &DixData, prefix: &str) -> Style {
         s.display_none = v == "none";
     }
 
-    // stroke_dasharray — stored as array of floats
     let mut da: Vec<f64> = Vec::new();
     let mut j = 0;
     loop {
@@ -386,7 +380,6 @@ fn parse_point_array(data: &DixData, prefix: &str) -> Result<Vec<Point>, String>
     let mut points = Vec::new();
     let mut i = 0;
     loop {
-        // Each point stored as points[i][0] and points[i][1]
         let xkey = format!("{}[{}][0]", prefix, i);
         let ykey = format!("{}[{}][1]", prefix, i);
         if !data.exists(&xkey) { break; }
@@ -404,8 +397,11 @@ fn parse_point_array(data: &DixData, prefix: &str) -> Result<Vec<Point>, String>
 mod tests {
     use super::*;
 
+    // All raw strings that embed "#colour" values use r##"..."## so the
+    // "#" inside colour literals does not accidentally close the raw string.
+
     fn simple_circle_src() -> &'static str {
-        r#"
+        r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 200, height = 200, background = "#ffffff" }
@@ -413,11 +409,11 @@ mod tests {
     { type = "circle", cx = 100, cy = 100, r = 50,
       style = { fill = "#ff0000", stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"#
+"##
     }
 
     fn simple_rect_src() -> &'static str {
-        r#"
+        r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 400, height = 300, background = "#1a1a2e" }
@@ -425,7 +421,7 @@ mod tests {
     { type = "rect", x = 10, y = 20, width = 100, height = 50,
       style = { fill = "#4a9eff", stroke = "#ffffff", stroke_width = 2.0, opacity = 0.9 } }
 )
-"#
+"##
     }
 
     #[test]
@@ -495,7 +491,7 @@ mod tests {
 
     #[test]
     fn parse_path_d_string() {
-        let src = r#"
+        let src = r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 500, height = 500, background = "#000000" }
@@ -503,7 +499,7 @@ mod tests {
     { type = "path", d = "M 50 450 L 250 50 L 450 450 Z",
       style = { fill = "#3498db", stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"#;
+"##;
         let scene = parse_scene(src).unwrap();
         if let Element::Path(p) = &scene.elements[0] {
             assert_eq!(p.commands.len(), 4);
@@ -514,7 +510,7 @@ mod tests {
 
     #[test]
     fn parse_group_with_children() {
-        let src = r#"
+        let src = r##"
 @CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~badge<object>(x, y) {
@@ -534,7 +530,7 @@ mod tests {
   elements::
     badge(10, 10)
 )
-"#;
+"##;
         let scene = parse_scene(src).unwrap();
         assert_eq!(scene.elements.len(), 1);
         if let Element::Group(g) = &scene.elements[0] {
@@ -548,7 +544,7 @@ mod tests {
 
     #[test]
     fn parse_text_element() {
-        let src = r#"
+        let src = r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 300, height = 100, background = "#ffffff" }
@@ -557,7 +553,7 @@ mod tests {
       style = { fill = "#000000", font_size = 18, text_anchor = "middle",
                 stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"#;
+"##;
         let scene = parse_scene(src).unwrap();
         if let Element::Text(t) = &scene.elements[0] {
             assert_eq!(t.content, "Hello MSX");
@@ -571,18 +567,17 @@ mod tests {
 
     #[test]
     fn no_elements_gives_empty_scene() {
-        let src = r#"
+        let src = r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 100, height = 100, background = "#000000" }
   elements::
 )
-"#;
-        // DixScript may error on empty array — just check we handle it
+"##;
         let result = parse_scene(src);
         match result {
             Ok(scene) => assert_eq!(scene.elements.len(), 0),
-            Err(_) => {} // acceptable — empty array may not parse
+            Err(_) => {}
         }
     }
 }
