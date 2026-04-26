@@ -298,8 +298,10 @@ fn roundtrip_radial_gradient() {
 
 #[test]
 fn roundtrip_many_elements_compression_ratio() {
-    let mut src = r##"
-@CONFIG( version -> "1.0.0" )
+    let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e",
+                  "#f5a623", "#a78bfa", "#ef4444", "#3b82f6", "#10b981"];
+    let mut src = String::from(
+r#"@CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~dot<object>(cx, cy, r, color) {
     return { type = "circle", cx = cx, cy = cy, r = r,
@@ -307,18 +309,16 @@ fn roundtrip_many_elements_compression_ratio() {
   }
 )
 @DATA(
-  scene: { width = 1000, height = 1000, background = "#ffffff" }
+  scene = { width = 1000, height = 1000, background = #ffffff }
   elements::
-"##.to_string();
-
-    let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e",
-                  "#f5a623", "#a78bfa", "#ef4444", "#3b82f6", "#10b981"];
-    for i in 0..200 {
+"#);
+    for i in 0..200usize {
         let x = (i % 20) * 50 + 25;
         let y = (i / 20) * 50 + 25;
         let r = 15 + (i % 5) * 3;
+        // colors injected as bare hex (DixScript HexColor type)
         let c = colors[i % colors.len()];
-        src.push_str(&format!("    dot({}, {}, {}, \"{}\")\n", x, y, r, c));
+        src.push_str(&format!("    dot({}, {}, {}, {})\n", x, y, r, c));
     }
     src.push(')');
 
@@ -328,13 +328,7 @@ fn roundtrip_many_elements_compression_ratio() {
     let scene_b = decode(&binary).expect("decode 200 circles");
     let svg_b   = render(&scene_b);
 
-    assert_eq!(normalise_svg(&svg_a), normalise_svg(&svg_b),
-        "200 circles roundtrip SVG mismatch");
-
-    let ratio = binary.len() as f64 / svg_a.len() as f64 * 100.0;
-    println!("[200 circles] binary={}B svg={}B ratio={:.1}%",
-        binary.len(), svg_a.len(), ratio);
-
+    assert_eq!(normalise_svg(&svg_a), normalise_svg(&svg_b));
     assert!(binary.len() < svg_a.len(),
         "compressed binary ({} B) should be smaller than SVG ({} B)",
         binary.len(), svg_a.len());
