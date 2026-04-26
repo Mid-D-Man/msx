@@ -28,16 +28,14 @@ pub fn render_to(out: &mut String, scene: &Scene) {
     };
 
     out.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}"{}>
-"#,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\"{}>\n",
         w, h, viewbox_attr
     ));
 
     // Background rect
     let bg = scene.canvas.background.to_svg_hex();
     out.push_str(&format!(
-        r#"<rect width="{}" height="{}" fill="{}"/>
-"#,
+        "<rect width=\"{}\" height=\"{}\" fill=\"{}\"/>\n",
         w, h, bg
     ));
 
@@ -118,13 +116,13 @@ fn escape_xml(s: &str) -> String {
 fn render_rect(out: &mut String, e: &Rect, depth: usize) {
     let ind = indent(depth);
     let mut s = format!(
-        r#"{}<rect x="{}" y="{}" width="{}" height="{}""#,
+        "{}<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"",
         ind,
         fmt_f64(e.x), fmt_f64(e.y),
         fmt_f64(e.width), fmt_f64(e.height),
     );
-    if let Some(rx) = e.rx { s.push_str(&format!(r#" rx="{}""#, fmt_f64(rx))); }
-    if let Some(ry) = e.ry { s.push_str(&format!(r#" ry="{}""#, fmt_f64(ry))); }
+    if let Some(rx) = e.rx { s.push_str(&format!(" rx=\"{}\"", fmt_f64(rx))); }
+    if let Some(ry) = e.ry { s.push_str(&format!(" ry=\"{}\"", fmt_f64(ry))); }
     s.push_str(&id_attr(&e.id));
     s.push_str(&transform_attr(&e.transform));
     s.push_str(&style_attrs(&e.style));
@@ -135,20 +133,19 @@ fn render_rect(out: &mut String, e: &Rect, depth: usize) {
 fn render_circle(out: &mut String, e: &Circle, depth: usize) {
     let ind = indent(depth);
     out.push_str(&format!(
-        r#"{}<circle cx="{}" cy="{}" r="{}"{}{}{}/>"#,
+        "{}<circle cx=\"{}\" cy=\"{}\" r=\"{}\"{}{}{}/>\n",
         ind,
         fmt_f64(e.cx), fmt_f64(e.cy), fmt_f64(e.r),
         id_attr(&e.id),
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn render_ellipse(out: &mut String, e: &Ellipse, depth: usize) {
     let ind = indent(depth);
     out.push_str(&format!(
-        r#"{}<ellipse cx="{}" cy="{}" rx="{}" ry="{}"{}{}{}/>"#,
+        "{}<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\"{}{}{}/>\n",
         ind,
         fmt_f64(e.cx), fmt_f64(e.cy),
         fmt_f64(e.rx), fmt_f64(e.ry),
@@ -156,13 +153,12 @@ fn render_ellipse(out: &mut String, e: &Ellipse, depth: usize) {
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn render_line(out: &mut String, e: &Line, depth: usize) {
     let ind = indent(depth);
     out.push_str(&format!(
-        r#"{}<line x1="{}" y1="{}" x2="{}" y2="{}"{}{}{}/>"#,
+        "{}<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"{}{}{}/>\n",
         ind,
         fmt_f64(e.x1), fmt_f64(e.y1),
         fmt_f64(e.x2), fmt_f64(e.y2),
@@ -170,33 +166,30 @@ fn render_line(out: &mut String, e: &Line, depth: usize) {
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn render_polyline(out: &mut String, e: &Polyline, depth: usize) {
     let ind     = indent(depth);
     let pts_str = points_to_str(&e.points);
     out.push_str(&format!(
-        r#"{}<polyline points="{}"{}{}{}/>"#,
+        "{}<polyline points=\"{}\"{}{}{}/>\n",
         ind, pts_str,
         id_attr(&e.id),
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn render_polygon(out: &mut String, e: &Polyline, depth: usize) {
     let ind     = indent(depth);
     let pts_str = points_to_str(&e.points);
     out.push_str(&format!(
-        r#"{}<polygon points="{}"{}{}{}/>"#,
+        "{}<polygon points=\"{}\"{}{}{}/>\n",
         ind, pts_str,
         id_attr(&e.id),
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn points_to_str(pts: &[crate::primitives::Point]) -> String {
@@ -210,19 +203,18 @@ fn render_path(out: &mut String, e: &Path, depth: usize) {
     let ind = indent(depth);
     let d   = commands_to_d(&e.commands);
     out.push_str(&format!(
-        r#"{}<path d="{}"{}{}{}/>"#,
+        "{}<path d=\"{}\"{}{}{}/>\n",
         ind, d,
         id_attr(&e.id),
         transform_attr(&e.transform),
         style_attrs(&e.style),
     ));
-    out.push('\n');
 }
 
 fn render_text(out: &mut String, e: &Text, depth: usize) {
     let ind = indent(depth);
     out.push_str(&format!(
-        r#"{}<text x="{}" y="{}"{}{}{}>{}",
+        "{}<text x=\"{}\" y=\"{}\"{}{}{}>{}</text>\n",
         ind,
         fmt_f64(e.x), fmt_f64(e.y),
         id_attr(&e.id),
@@ -230,7 +222,6 @@ fn render_text(out: &mut String, e: &Text, depth: usize) {
         style_attrs(&e.style),
         escape_xml(&e.content),
     ));
-    out.push_str("</text>\n");
 }
 
 fn render_group(out: &mut String, e: &Group, depth: usize) {
@@ -241,8 +232,7 @@ fn render_group(out: &mut String, e: &Group, depth: usize) {
     };
 
     out.push_str(&format!(
-        r#"{}<g{}{}{}>
-"#,
+        "{}<g{}{}{}>\n",
         ind,
         id_attr(&e.id),
         transform_attr(&e.transform),
@@ -259,20 +249,18 @@ fn render_group(out: &mut String, e: &Group, depth: usize) {
 fn render_use(out: &mut String, e: &Use, depth: usize) {
     let ind = indent(depth);
     out.push_str(&format!(
-        r#"{}<use href="{}" x="{}" y="{}"{}{}/>"#,
+        "{}<use href=\"{}\" x=\"{}\" y=\"{}\"{}{}/>\n",
         ind,
         escape_xml(&e.href),
         fmt_f64(e.x), fmt_f64(e.y),
         id_attr(&e.id),
         transform_attr(&e.transform),
     ));
-    out.push('\n');
 }
 
 // ── Capacity estimation ───────────────────────────────────────────────────────
 
 fn estimate_capacity(scene: &Scene) -> usize {
-    // SVG header ~120 bytes + ~80 bytes per top-level element (rough estimate)
     120 + scene.elements.len() * 80 + scene.defs.len() * 150
 }
 
@@ -320,7 +308,7 @@ mod tests {
     #[test]
     fn renders_background_rect() {
         let svg = render(&circle_scene());
-        assert!(svg.contains(r#"<rect width="200" height="200" fill="#ffffff"/>"#));
+        assert!(svg.contains("<rect width=\"200\" height=\"200\" fill=\"#ffffff\"/>"));
     }
 
     #[test]
@@ -335,7 +323,7 @@ mod tests {
     #[test]
     fn renders_circle_fill_color() {
         let svg = render(&circle_scene());
-        assert!(svg.contains(r#"fill="#ff0000""#));
+        assert!(svg.contains("fill=\"#ff0000\""));
     }
 
     #[test]
@@ -418,4 +406,4 @@ mod tests {
         let svg = render(&scene);
         assert!(svg.contains("5 &lt; 10 &amp; x &gt; 0"));
     }
-}
+    }
