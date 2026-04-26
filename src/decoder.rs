@@ -57,8 +57,6 @@ pub fn read_point(data: &[u8], cursor: &mut usize) -> io::Result<(f64, f64)> {
 
 // ── String pool ───────────────────────────────────────────────────────────────
 
-/// Deserialise the string pool from the payload.
-/// Layout: `[u16 count] ([u16 byte_len][utf8 bytes])*`
 pub fn read_string_pool(data: &[u8], cursor: &mut usize) -> io::Result<Vec<String>> {
     let count = read_u16(data, cursor)? as usize;
     let mut pool = Vec::with_capacity(count);
@@ -225,13 +223,30 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         s.stroke_miterlimit  = Some(read_f32(data, cursor)?);
     }
     if flags & (1 << 5) != 0 {
-        let fs_x100       = read_u16(data, cursor)?;
-        s.font_size       = Some(fs_x100 as f64 / 100.0);
-        let ff_idx        = read_u16(data, cursor)?;
-        let ff            = lookup_string(pool, ff_idx)?.to_string();
-        s.font_family     = if ff.is_empty() { None } else { Some(ff) };
-        s.font_weight     = Some(FontWeight::from_byte(read_u8(data, cursor)?));
-        s.text_anchor     = Some(TextAnchor::from_byte(read_u8(data, cursor)?));
+        let fs_x100   = read_u16(data, cursor)?;
+        s.font_size   = Some(fs_x100 as f64 / 100.0);
+
+        let ff_idx    = read_u16(data, cursor)?;
+        let ff        = lookup_string(pool, ff_idx)?.to_string();
+        s.font_family = if ff.is_empty() { None } else { Some(ff) };
+
+        // font_weight: 0 = None, 1 = Normal, 2 = Bold, 3..11 = Numeric
+        // Matches the +1 offset written by write_style.
+        let fw_byte   = read_u8(data, cursor)?;
+        s.font_weight = if fw_byte == 0 {
+            None
+        } else {
+            Some(FontWeight::from_byte(fw_byte - 1))
+        };
+
+        // text_anchor: 0 = None, 1 = Start, 2 = Middle, 3 = End
+        // Matches the +1 offset written by write_style.
+        let ta_byte   = read_u8(data, cursor)?;
+        s.text_anchor = if ta_byte == 0 {
+            None
+        } else {
+            Some(TextAnchor::from_byte(ta_byte - 1))
+        };
     }
     if flags & (1 << 6) != 0 {
         let count         = read_u16(data, cursor)? as usize;
@@ -273,9 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_none_roundtrip() {
-        roundtrip_paint(Paint::None);
-    }
+    fn paint_none_roundtrip() { roundtrip_paint(Paint::None); }
 
     #[test]
     fn paint_color_roundtrip() {
@@ -288,9 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_current_color_roundtrip() {
-        roundtrip_paint(Paint::CurrentColor);
-    }
+    fn paint_current_color_roundtrip() { roundtrip_paint(Paint::CurrentColor); }
 
     #[test]
     fn transform_translate_roundtrip() {
@@ -375,6 +386,48 @@ mod tests {
 
         assert!((back.font_size.unwrap() - 14.0).abs() < 0.01);
         assert_eq!(back.font_family.as_deref(), Some("sans-serif"));
+        assert_eq!(back.font_weight, Some(crate::style::FontWeight::Bold));
         assert_eq!(back.text_anchor, Some(crate::style::TextAnchor::Middle));
     }
-}
+
+    #[test]
+    fn style_font_weight_none_roundtrips_as_none() {
+        // When font_weight is None but font_size is set (bit 5 active),
+        // the roundtrip must NOT convert None → Some(Normal).
+        let mut style = Style::empty();
+        style.font_size   = Some(18.0);
+        style.text_anchor = Some(crate::style::TextAnchor::Middle);
+        // font_weight intentionally None
+
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+
+        assert_eq!(back.font_weight, None,
+            "font_weight None must survive encode→decode unchanged");
+        assert_eq!(back.text_anchor, Some(crate::style::TextAnchor::Middle));
+        assert!((back.font_size.unwrap() - 18.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn style_text_anchor_none_roundtrips_as_none() {
+        // When text_anchor is None but font_size is set (bit 5 active),
+        // the roundtrip must NOT convert None → Some(Start).
+        let mut style = Style::empty();
+        style.font_size   = Some(12.0);
+        style.font_weight = Some(crate::style::FontWeight::Bold);
+        // text_anchor intentionally None
+
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+
+        assert_eq!(back.text_anchor, None,
+            "text_anchor None must survive encode→decode unchanged");
+        assert_eq!(back.font_weight, Some(crate::style::FontWeight::Bold));
+    }
+    }
