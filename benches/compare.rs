@@ -10,12 +10,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 // ── Shared pre-built fixtures ─────────────────────────────────────────────────
-// DixScript is called ONCE here. All benchmarks reuse these.
 
-static SCENE_10: OnceLock<Scene>    = OnceLock::new();
+static SCENE_10: OnceLock<Scene>     = OnceLock::new();
 static SCENE_BADGES: OnceLock<Scene> = OnceLock::new();
-static SCENE_50: OnceLock<Scene>    = OnceLock::new();
-static SCENE_200: OnceLock<Scene>   = OnceLock::new();
 
 fn scene_10() -> &'static Scene {
     SCENE_10.get_or_init(|| parse_scene(MSX_CIRCLES_10).expect("scene_10"))
@@ -40,14 +37,20 @@ const MSX_CIRCLES_10: &str = r#"
 @DATA(
   scene = { width = 600, height = 400, background = #1a1a2e }
   elements::
-    dot(60,  200, 40, #e94560)  dot(140, 200, 35, #533483)
-    dot(220, 200, 45, #0f3460)  dot(300, 200, 30, #4a9eff)
-    dot(380, 200, 50, #22c55e)  dot(460, 200, 25, #f5a623)
-    dot(520, 200, 40, #a78bfa)  dot(100, 100, 30, #ef4444)
-    dot(300, 100, 45, #3b82f6)  dot(500, 100, 35, #10b981)
+    dot(60,  200, 40, #e94560)
+    dot(140, 200, 35, #533483)
+    dot(220, 200, 45, #0f3460)
+    dot(300, 200, 30, #4a9eff)
+    dot(380, 200, 50, #22c55e)
+    dot(460, 200, 25, #f5a623)
+    dot(520, 200, 40, #a78bfa)
+    dot(100, 100, 30, #ef4444)
+    dot(300, 100, 45, #3b82f6)
+    dot(500, 100, 35, #10b981)
 )
 "#;
 
+// NOTE: objects inside array literals require commas between them in DixScript.
 const MSX_BADGES: &str = r#"
 @CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
@@ -56,7 +59,7 @@ const MSX_BADGES: &str = r#"
       type = "group"
       elements = [
         { type = "rect", x = x, y = y, width = 90, height = 30, rx = 15,
-          style = { fill = color, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+          style = { fill = color, stroke = "none", stroke_width = 0, opacity = 1.0 } },
         { type = "text", x = x + 45, y = y + 20, content = label,
           style = { fill = #ffffff, font_size = 12, text_anchor = "middle",
                     font_weight = "bold", stroke = "none", stroke_width = 0, opacity = 1.0 } }
@@ -101,7 +104,7 @@ r#"@CONFIG( version -> "1.0.0" )
     s
 }
 
-// ── SVG string builders (no MSX at all — pure baseline) ──────────────────────
+// ── SVG string builders (pure baseline — no MSX) ─────────────────────────────
 
 fn svg_circles(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
@@ -150,9 +153,9 @@ fn svg_circles_10() -> String { svg_circles(10) }
 
 // ── Pre-compiled binaries ─────────────────────────────────────────────────────
 
-static BIN_10_MBFA: OnceLock<Vec<u8>>  = OnceLock::new();
-static BIN_10_RAW:  OnceLock<Vec<u8>>  = OnceLock::new();
-static BIN_BADGES:  OnceLock<Vec<u8>>  = OnceLock::new();
+static BIN_10_MBFA: OnceLock<Vec<u8>> = OnceLock::new();
+static BIN_10_RAW:  OnceLock<Vec<u8>> = OnceLock::new();
+static BIN_BADGES:  OnceLock<Vec<u8>> = OnceLock::new();
 
 fn bin_10_mbfa() -> &'static [u8] {
     BIN_10_MBFA.get_or_init(|| compile(scene_10(), true).unwrap())
@@ -164,7 +167,7 @@ fn bin_badges() -> &'static [u8] {
     BIN_BADGES.get_or_init(|| compile(scene_badges(), true).unwrap())
 }
 
-// ── 1. compile: Scene → binary ───────────────────────────────────────────────
+// ── 1. compile: Scene → binary ────────────────────────────────────────────────
 
 fn bench_compile(c: &mut Criterion) {
     let mut g = c.benchmark_group("compile");
@@ -181,7 +184,6 @@ fn bench_compile(c: &mut Criterion) {
         b.iter(|| compile(black_box(scene_badges()), true).unwrap())
     });
 
-    // Size stats (printed, not timed)
     let svg_10  = render(scene_10());
     let svg_bdg = render(scene_badges());
     println!(
@@ -225,15 +227,12 @@ fn bench_render(c: &mut Criterion) {
     g.measurement_time(Duration::from_secs(5));
     g.sample_size(50);
 
-    // MSX render
     g.bench_function("msx_circles_10", |b| {
         b.iter(|| render(black_box(scene_10())))
     });
     g.bench_function("msx_badges", |b| {
         b.iter(|| render(black_box(scene_badges())))
     });
-
-    // SVG string build baseline — same data, no MSX involved
     g.bench_function("svg_build_circles_10", |b| {
         b.iter(|| svg_circles_10())
     });
@@ -263,8 +262,6 @@ fn bench_decode_render(c: &mut Criterion) {
             render(&scene)
         })
     });
-
-    // Baseline: SVG string build (no binary decode needed)
     g.bench_function("svg_build_circles_10_baseline", |b| {
         b.iter(|| svg_circles_10())
     });
@@ -275,14 +272,13 @@ fn bench_decode_render(c: &mut Criterion) {
     g.finish();
 }
 
-// ── 5. scale: n=10/50/100/200 — decode+render vs SVG build ───────────────────
+// ── 5. scale: n=10/50/100/200 ─────────────────────────────────────────────────
 
 fn bench_scale(c: &mut Criterion) {
     let mut g = c.benchmark_group("scale");
     g.measurement_time(Duration::from_secs(5));
     g.sample_size(20);
 
-    // Pre-build scenes at startup (DixScript called once each)
     let scenes: Vec<(usize, Vec<u8>)> = [10usize, 50, 100, 200].iter().map(|&n| {
         let s = scene_n(n);
         let b = compile(&s, true).unwrap();
@@ -291,10 +287,8 @@ fn bench_scale(c: &mut Criterion) {
 
     for (n, bin) in &scenes {
         let svg = svg_circles(*n);
-
         g.throughput(Throughput::Elements(*n as u64));
 
-        // MSX decode+render
         let bin_ref = bin.clone();
         g.bench_with_input(
             BenchmarkId::new("msx_decode_render", n),
@@ -307,7 +301,6 @@ fn bench_scale(c: &mut Criterion) {
             },
         );
 
-        // SVG string build baseline
         let n_cap = *n;
         g.bench_with_input(
             BenchmarkId::new("svg_build", n),
@@ -315,7 +308,6 @@ fn bench_scale(c: &mut Criterion) {
             |b, _| b.iter(|| svg_circles(black_box(n_cap))),
         );
 
-        // Size comparison
         println!(
             "[scale n={:3}]  msx_binary={:5}B  svg={:5}B  ratio={:.1}%  savings={}B",
             n, bin.len(), svg.len(),
