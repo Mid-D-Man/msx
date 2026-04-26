@@ -141,9 +141,10 @@ impl Paint {
         let s = s.trim();
         if s == "none" || s.is_empty() { return Paint::None; }
         if s == "currentColor"         { return Paint::CurrentColor; }
+        // Preserve the full "url(#id)" string — SVG needs it verbatim as the
+        // fill/stroke attribute value (e.g. fill="url(#sunset)").
         if s.starts_with("url(") && s.ends_with(')') {
-            let id = s[4..s.len() - 1].to_string();
-            return Paint::Ref(id);
+            return Paint::Ref(s.to_string());
         }
         Color::parse(s).map(Paint::Color).unwrap_or(Paint::None)
     }
@@ -289,6 +290,8 @@ mod tests {
 
     #[test]
     fn paint_parse_url() {
+        // The full "url(#id)" string must be preserved — SVG uses it verbatim
+        // as the fill/stroke attribute value.
         let p = Paint::parse("url(#sunset)");
         assert_eq!(p, Paint::Ref("url(#sunset)".to_string()));
     }
