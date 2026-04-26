@@ -1,14 +1,5 @@
 // benches/compare.rs
 //! Criterion benchmarks: MSX parse/compile/render vs equivalent SVG.
-//!
-//! What we measure:
-//!   1. MSX source parse + render (source → SVG, no binary step)
-//!   2. MSX compile  (source → binary)
-//!   3. MSX decode   (binary → Scene)
-//!   4. MSX render   (Scene → SVG string)
-//!   5. SVG baseline (write the same SVG manually — no parse, just string build)
-//!   6. SVG parse    (parse SVG text back — using quick-xml for fair comparison)
-//!   7. Compression ratio comparison: MSX binary vs raw SVG size
 
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
@@ -18,8 +9,7 @@ use std::time::Duration;
 
 // ── Test scenes ───────────────────────────────────────────────────────────────
 
-/// 10 circles — small scene
-const CIRCLES_10_MSX: &str = r#"
+const CIRCLES_10_MSX: &str = r##"
 @CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~dot<object>(cx, cy, r, color) {
@@ -36,10 +26,8 @@ const CIRCLES_10_MSX: &str = r#"
     dot(520, 200, 40, "#a78bfa")  dot(100, 100, 30, "#ef4444")
     dot(300, 100, 45, "#3b82f6")  dot(500, 100, 35, "#10b981")
 )
-"#;
+"##;
 
-/// Equivalent SVG produced by hand (no MSX involved).
-/// This is the baseline — what you'd write or generate without MSX.
 fn circles_10_svg() -> String {
     let circles = [
         (60,  200, 40, "#e94560"), (140, 200, 35, "#533483"),
@@ -50,14 +38,14 @@ fn circles_10_svg() -> String {
     ];
 
     let mut svg = String::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">
-<rect width="600" height="400" fill="#1a1a2e"/>
-"#
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"400\" \
+         viewBox=\"0 0 600 400\">\n\
+         <rect width=\"600\" height=\"400\" fill=\"#1a1a2e\"/>\n"
     );
     for (cx, cy, r, color) in &circles {
         svg.push_str(&format!(
-            r#"<circle cx="{}" cy="{}" r="{}" fill="{}" stroke="none" stroke-width="0" opacity="0.9"/>
-"#,
+            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" \
+             stroke=\"none\" stroke-width=\"0\" opacity=\"0.9\"/>\n",
             cx, cy, r, color
         ));
     }
@@ -65,8 +53,7 @@ fn circles_10_svg() -> String {
     svg
 }
 
-/// Parametric badge component scene — tests QuickFuncs evaluation
-const BADGES_MSX: &str = r#"
+const BADGES_MSX: &str = r##"
 @CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~badge<object>(x, y, label, color) {
@@ -92,7 +79,7 @@ const BADGES_MSX: &str = r#"
     badge(460, 80, "info",    "#17a2b8")
     badge(570, 80, "dark",    "#343a40")
 )
-"#;
+"##;
 
 fn badges_svg() -> String {
     let badges = [
@@ -104,18 +91,20 @@ fn badges_svg() -> String {
         (570, "dark",    "#343a40"),
     ];
     let mut svg = String::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200">
-<rect width="700" height="200" fill="#f4f5f7"/>
-"#
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"700\" height=\"200\" \
+         viewBox=\"0 0 700 200\">\n\
+         <rect width=\"700\" height=\"200\" fill=\"#f4f5f7\"/>\n"
     );
     for (x, label, color) in &badges {
         let y = 80;
         svg.push_str(&format!(
-            r#"<g>
-  <rect x="{}" y="{}" width="90" height="30" rx="15" fill="{}" stroke="none" stroke-width="0" opacity="1"/>
-  <text x="{}" y="{}" fill="#ffffff" font-size="12" text-anchor="middle" font-weight="bold" stroke="none" stroke-width="0" opacity="1">{}</text>
-</g>
-"#,
+            "<g>\n  \
+             <rect x=\"{}\" y=\"{}\" width=\"90\" height=\"30\" rx=\"15\" \
+             fill=\"{}\" stroke=\"none\" stroke-width=\"0\" opacity=\"1\"/>\n  \
+             <text x=\"{}\" y=\"{}\" fill=\"#ffffff\" font-size=\"12\" \
+             text-anchor=\"middle\" font-weight=\"bold\" stroke=\"none\" \
+             stroke-width=\"0\" opacity=\"1\">{}</text>\n\
+             </g>\n",
             x, y, color,
             x + 45, y + 20,
             label,
@@ -128,7 +117,7 @@ fn badges_svg() -> String {
 fn gen_many_circles_msx(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
     let mut s = String::from(
-r#"@CONFIG( version -> "1.0.0" )
+        r##"@CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~dot<object>(cx, cy, r, color) {
     return { type = "circle", cx = cx, cy = cy, r = r,
@@ -138,7 +127,7 @@ r#"@CONFIG( version -> "1.0.0" )
 @DATA(
   scene: { width = 1000, height = 1000, background = "#ffffff" }
   elements::
-"#);
+"##);
     for i in 0..n {
         let x = (i % 20) * 50 + 25;
         let y = (i / 20) * 50 + 25;
@@ -153,9 +142,9 @@ r#"@CONFIG( version -> "1.0.0" )
 fn gen_many_circles_svg(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
     let mut svg = String::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
-<rect width="1000" height="1000" fill="#ffffff"/>
-"#
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1000\" height=\"1000\" \
+         viewBox=\"0 0 1000 1000\">\n\
+         <rect width=\"1000\" height=\"1000\" fill=\"#ffffff\"/>\n"
     );
     for i in 0..n {
         let x = (i % 20) * 50 + 25;
@@ -163,8 +152,8 @@ fn gen_many_circles_svg(n: usize) -> String {
         let r = 15 + (i % 5) * 3;
         let c = colors[i % colors.len()];
         svg.push_str(&format!(
-            r#"<circle cx="{}" cy="{}" r="{}" fill="{}" stroke="none" stroke-width="0" opacity="0.9"/>
-"#,
+            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" \
+             stroke=\"none\" stroke-width=\"0\" opacity=\"0.9\"/>\n",
             x, y, r, c
         ));
     }
@@ -179,7 +168,6 @@ fn bench_parse_and_render(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(20);
 
-    // MSX source → SVG (full pipeline including DixScript evaluation)
     group.bench_function("msx_source_to_svg_10_circles", |b| {
         b.iter(|| {
             let scene = parse_scene(black_box(CIRCLES_10_MSX)).unwrap();
@@ -187,12 +175,10 @@ fn bench_parse_and_render(c: &mut Criterion) {
         })
     });
 
-    // SVG baseline — just build the string (no parse, pure generation)
     group.bench_function("svg_build_10_circles", |b| {
         b.iter(|| circles_10_svg())
     });
 
-    // MSX with QuickFuncs (badge component)
     group.bench_function("msx_source_to_svg_badges", |b| {
         b.iter(|| {
             let scene = parse_scene(black_box(BADGES_MSX)).unwrap();
@@ -200,7 +186,6 @@ fn bench_parse_and_render(c: &mut Criterion) {
         })
     });
 
-    // SVG baseline for badges
     group.bench_function("svg_build_badges", |b| {
         b.iter(|| badges_svg())
     });
@@ -213,7 +198,6 @@ fn bench_compile(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(20);
 
-    // Pre-parse scenes so we benchmark compile only
     let scene_10 = parse_scene(CIRCLES_10_MSX).unwrap();
 
     group.throughput(Throughput::Elements(10));
@@ -225,7 +209,6 @@ fn bench_compile(c: &mut Criterion) {
         b.iter(|| compile(black_box(&scene_10), false).unwrap())
     });
 
-    // Badges
     let scene_badges = parse_scene(BADGES_MSX).unwrap();
     group.bench_function("msx_compile_badges", |b| {
         b.iter(|| compile(black_box(&scene_badges), true).unwrap())
@@ -266,7 +249,6 @@ fn bench_render_only(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(20);
 
-    // Pre-decode so we only benchmark render
     let scene_10    = parse_scene(CIRCLES_10_MSX).unwrap();
     let binary_10   = compile(&scene_10, false).unwrap();
     let decoded_10  = decode(&binary_10).unwrap();
@@ -295,7 +277,6 @@ fn bench_scale(c: &mut Criterion) {
         let msx_src = gen_many_circles_msx(n);
         let svg_src = gen_many_circles_svg(n);
 
-        // MSX: full source → binary → render pipeline
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(
@@ -311,7 +292,6 @@ fn bench_scale(c: &mut Criterion) {
             },
         );
 
-        // SVG baseline: just build the string (no parsing, pure codegen)
         group.bench_with_input(
             BenchmarkId::new("svg_build_circles", n),
             &n,
@@ -320,7 +300,6 @@ fn bench_scale(c: &mut Criterion) {
             },
         );
 
-        // Size comparison (not a time benchmark — just report)
         let scene  = parse_scene(&msx_src).unwrap();
         let binary = compile(&scene, true).unwrap();
         let svg    = gen_many_circles_svg(n);
@@ -339,9 +318,6 @@ fn bench_binary_vs_svg_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("binary_vs_svg_size");
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(10);
-
-    // This benchmark is about throughput reporting, not timing.
-    // We emit size stats via println and do a trivial bench.
 
     let cases: &[(&str, &str)] = &[
         ("10_circles",  CIRCLES_10_MSX),
@@ -364,14 +340,12 @@ fn bench_binary_vs_svg_size(c: &mut Criterion) {
             svg.len(),
         );
 
-        // Trivial bench so Criterion tracks it over time
         group.bench_function(
             BenchmarkId::new("noop_size_check", label),
             |b| b.iter(|| binary_c.len() + svg.len()),
         );
     }
 
-    // Large scene size comparison
     for &n in &[50usize, 200] {
         let msx_src    = gen_many_circles_msx(n);
         let svg_src    = gen_many_circles_svg(n);
