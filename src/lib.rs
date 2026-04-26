@@ -20,6 +20,9 @@ pub use header::{MsxHeader, HEADER_SIZE};
 pub use parser::{parse_scene, parse_scene_file, parse_scene_from_data};
 pub use renderer::render;
 
+// Needed by decode_def / decode_element signatures below
+use ast::{Def, Element};
+
 use std::io;
 
 /// Parse an MSX source string and render it directly to SVG.
@@ -90,20 +93,20 @@ pub fn decode(data: &[u8]) -> io::Result<Scene> {
     let pool = read_string_pool(payload, &mut cursor)?;
 
     // Defs
-    let mut defs: Vec<Def> = Vec::new();
+    let mut defs: Vec<crate::ast::Def> = Vec::new();
     for _ in 0..header.def_count {
         let def = decode_def(payload, &mut cursor, &pool)?;
         defs.push(def);
     }
 
     // Elements
-    let mut elements: Vec<Element> = Vec::new();
+    let mut elements: Vec<crate::ast::Element> = Vec::new();
     for _ in 0..header.elem_count {
         let elem = decode_element(payload, &mut cursor, &pool)?;
         elements.push(elem);
     }
 
-    let mut canvas = Canvas::new(
+    let mut canvas = crate::ast::Canvas::new(
         header.width  as f64,
         header.height as f64,
         bg,
