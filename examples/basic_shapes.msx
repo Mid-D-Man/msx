@@ -1,38 +1,25 @@
-// basic_shapes.msx
-// Run: msx render examples/basic_shapes.msx -o basic_shapes.svg
-
-@CONFIG(
-  version -> "1.0.0"
-)
-
+@CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
-  ~s<object>(fill, stroke, sw) {
-    return { fill = fill, stroke = stroke, stroke_width = sw, opacity = 1.0 }
-  }
-  ~rect<object>(x, y, w, h, style) {
-    return { type = "rect", x = x, y = y, width = w, height = h, style = style }
-  }
-  ~rect_r<object>(x, y, w, h, rx, style) {
-    return { type = "rect", x = x, y = y, width = w, height = h, rx = rx, style = style }
-  }
-  ~circle<object>(cx, cy, r, style) {
-    return { type = "circle", cx = cx, cy = cy, r = r, style = style }
-  }
-  ~ellipse<object>(cx, cy, rx, ry, style) {
-    return { type = "ellipse", cx = cx, cy = cy, rx = rx, ry = ry, style = style }
-  }
-  ~line<object>(x1, y1, x2, y2, style) {
-    return { type = "line", x1 = x1, y1 = y1, x2 = x2, y2 = y2, style = style }
+  ~shape<object>(type, x, y, w, h, color) {
+    return {
+      type = type
+      x = x  y = y  width = w  height = h
+      style = { fill = color, stroke = #ffffff, stroke_width = 1.5, opacity = 1.0 }
+    }
   }
 )
-
 @DATA(
-  scene: { width = 600, height = 400, background = "#1a1a2e" }
-
+  scene = { width = 600, height = 400, background = #1a1a2e }
   elements::
-    rect(40, 40, 160, 100, s("#e94560", "#c0392b", 2))
-    rect_r(240, 40, 140, 100, 12, s("#0f3460", "#16213e", 3))
-    circle(520, 90, 60, s("#533483", "#7d3c98", 2))
-    ellipse(160, 280, 120, 55, s("#e94560", "none", 0))
-    line(350, 200, 580, 370, s("none", "#f5a623", 3))
+    shape("rect",  20,  20, 160, 120, #e94560)
+    shape("rect", 200,  20, 160, 120, #4a9eff)
+    shape("rect", 400,  20, 160, 120, #22c55e)
+    shape("rect",  20, 180, 160, 120, #f5a623)
+    shape("rect", 200, 180, 160, 120, #a78bfa)
+    shape("rect", 400, 180, 160, 120, #533483)
+    { type = "circle", cx = 300, cy = 300, r = 60,
+      style = { fill = #0f3460, stroke = #4a9eff, stroke_width = 3.0, opacity = 0.9 } }
+    { type = "text", x = 300, y = 390, content = "MSX Basic Shapes",
+      style = { fill = #ffffff, font_size = 14, text_anchor = "middle",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
