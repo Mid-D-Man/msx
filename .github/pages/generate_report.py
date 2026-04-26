@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
 generate_report.py
-Parses MSX CI output and generates a self-contained HTML report with:
-  - Test results (debug + release)
-  - Criterion benchmark output
-  - Corpus compression table (source vs binary vs SVG sizes)
-  - SVG preview gallery with source code + rendered output
-  - Size comparison charts (MSX binary vs SVG)
+Parses MSX CI output and generates a self-contained HTML report.
 """
 
 import argparse
@@ -55,11 +50,6 @@ def parse_tests(path: str) -> dict:
 
 
 def parse_bench(path: str) -> list:
-    """
-    Parse Criterion --output-format bencher output.
-    Also handles verbose MBFA diagnostics interleaved with bench output.
-    Returns [{name, ns, var}]
-    """
     results = []
     try:
         with open(path) as f:
@@ -107,10 +97,6 @@ def parse_bench(path: str) -> list:
 
 
 def parse_corpus(path: str) -> list:
-    """
-    Parse corpus CSV:
-    FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP
-    """
     rows = []
     try:
         with open(path) as f:
@@ -214,17 +200,15 @@ def test_rows_html(tests: list) -> str:
 
 
 def svg_throughput_bars(bench_rows: list) -> str:
-    """Horizontal bar chart: MB/s throughput from bench results."""
     def estimate_bytes(name: str) -> int:
-        # Try to extract from name hints
         m = re.search(r"(\d+)_circles", name)
         if m:
             n = int(m.group(1))
-            return n * 20  # ~20 bytes per circle element
+            return n * 20
         m = re.search(r"badges?", name)
         if m:
-            return 6 * 120  # 6 badges ~120 bytes each
-        return 1024  # default 1KB
+            return 6 * 120
+        return 1024
 
     items = []
     for r in bench_rows:
@@ -285,7 +269,6 @@ def svg_throughput_bars(bench_rows: list) -> str:
 
 
 def svg_size_comparison_bars(corpus_rows: list) -> str:
-    """Grouped bar chart: source / binary / SVG sizes per example."""
     if not corpus_rows:
         return "<p class='no-data'>No corpus data available.</p>"
 
@@ -305,7 +288,6 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
     lines = [
         f'<svg viewBox="0 0 {chart_w} {total_h}" '
         f'xmlns="http://www.w3.org/2000/svg" class="chart">',
-        # Legend
         f'<rect x="{label_w}" y="8" width="12" height="12" fill="#94a3b8"/>',
         f'<text x="{label_w+16}" y="19" class="legend">Source .msx</text>',
         f'<rect x="{label_w+110}" y="8" width="12" height="12" fill="#4a9eff"/>',
@@ -320,8 +302,6 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
             f'<text x="{label_w-8}" y="{y + bar_h + 4}" '
             f'text-anchor="end" class="bar-label">{r["name"]}</text>'
         )
-
-        # source bar
         sw = max(r["source_bytes"] * scale, 2)
         lines.append(
             f'<rect x="{label_w}" y="{y}" width="{sw:.1f}" height="{bar_h}" '
@@ -331,8 +311,6 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
             f'<text x="{label_w + sw + 4}" y="{y + bar_h - 3}" '
             f'class="bar-val">{r["source_bytes"]}B</text>'
         )
-
-        # binary bar
         bw = max(r["binary_bytes"] * scale, 2)
         lines.append(
             f'<rect x="{label_w}" y="{y + bar_h + gap}" width="{bw:.1f}" height="{bar_h}" '
@@ -342,8 +320,6 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
             f'<text x="{label_w + bw + 4}" y="{y + bar_h * 2 + gap - 3}" '
             f'class="bar-val">{r["binary_bytes"]}B ({r["bin_pct"]:.0f}% of src)</text>'
         )
-
-        # svg bar
         vw = max(r["svg_bytes"] * scale, 2)
         lines.append(
             f'<rect x="{label_w}" y="{y + (bar_h + gap) * 2}" width="{vw:.1f}" height="{bar_h}" '
@@ -353,15 +329,12 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
             f'<text x="{label_w + vw + 4}" y="{y + bar_h * 3 + gap * 2 - 3}" '
             f'class="bar-val">{r["svg_bytes"]}B ({r["svg_pct"]:.0f}% of src)</text>'
         )
-
-        # roundtrip badge
         colour  = "#22c55e" if r.get("pass") else "#ef4444"
         label_t = "✓" if r.get("pass") else "✗"
         lines.append(
             f'<text x="{chart_w - 6}" y="{y + bar_h + gap + bar_h // 2}" '
             f'fill="{colour}" class="rt-badge">{label_t}</text>'
         )
-
         y += group_h
 
     lines.append("</svg>")
@@ -384,16 +357,13 @@ def svg_gallery_html(examples: list) -> str:
         svg_bytes    = ex.get("svg_bytes", 0)
         passed       = ex.get("pass", False)
 
-        # Escape source for display
         src_escaped = (source
                        .replace("&", "&amp;")
                        .replace("<", "&lt;")
                        .replace(">", "&gt;"))
 
-        # Inline SVG (already valid SVG text)
-        svg_display = svg_content if svg_content else "<p>No SVG rendered</p>"
+        svg_display = svg_content if svg_content else "<p style='color:#94a3b8;font-size:0.8rem'>No SVG rendered</p>"
 
-        # Compute reduction
         bin_pct = (binary_bytes / max(svg_bytes, 1)) * 100 if svg_bytes > 0 else 0
 
         rt_badge = (
@@ -404,24 +374,34 @@ def svg_gallery_html(examples: list) -> str:
 
         cards.append(f"""
 <div class="example-card">
-  <div class="example-title">{name}</div>
-  <div class="example-body">
-    <div class="example-source">
-      <div class="source-label">MSX Source</div>
-      <pre class="source-code"><code>{src_escaped}</code></pre>
-    </div>
-    <div class="example-arrow">→</div>
-    <div class="example-preview">
-      <div class="source-label">Rendered SVG</div>
-      <div class="svg-preview">{svg_display}</div>
+  <div class="example-header">
+    <div class="example-title">{name}</div>
+    <div class="example-chips">
+      <span class="stat-chip">Source {source_bytes}B</span>
+      <span class="stat-chip accent">Binary {binary_bytes}B</span>
+      <span class="stat-chip purple">SVG {svg_bytes}B</span>
+      <span class="stat-chip dim">bin/svg: {bin_pct:.1f}%</span>
+      {rt_badge}
     </div>
   </div>
-  <div class="example-stats">
-    <span class="stat-chip">Source {source_bytes}B</span>
-    <span class="stat-chip accent">Binary {binary_bytes}B</span>
-    <span class="stat-chip purple">SVG {svg_bytes}B</span>
-    <span class="stat-chip dim">binary/svg: {bin_pct:.1f}%</span>
-    {rt_badge}
+  <div class="example-body">
+    <div class="example-pane example-pane--source">
+      <div class="pane-label">
+        <span class="pane-label-dot pane-label-dot--msx"></span>
+        MSX Source
+      </div>
+      <pre class="source-code"><code>{src_escaped}</code></pre>
+    </div>
+    <div class="example-divider">
+      <div class="divider-arrow">→</div>
+    </div>
+    <div class="example-pane example-pane--svg">
+      <div class="pane-label">
+        <span class="pane-label-dot pane-label-dot--svg"></span>
+        Rendered SVG
+      </div>
+      <div class="svg-preview">{svg_display}</div>
+    </div>
   </div>
 </div>""")
 
@@ -451,6 +431,7 @@ HTML_TEMPLATE = """\
     --red:       #ef4444;
     --yellow:    #eab308;
     --orange:    #f97316;
+    --gallery-gap: 28px;
   }}
 
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -484,7 +465,7 @@ HTML_TEMPLATE = """\
   .site-header h1 {{ font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; }}
   .site-header h1 span {{ color: var(--accent); }}
   .site-header .tagline {{ color: var(--muted); margin-top: 4px; font-size: 0.95rem; }}
-  .build-meta {{ margin-top: 12px; display: flex; gap: 20px; flex-wrap: wrap; }}
+  .build-meta {{ margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap; }}
   .build-meta .badge {{
     background: var(--surface2); border: 1px solid var(--border);
     border-radius: 6px; padding: 4px 10px; font-size: 0.8rem; color: var(--muted);
@@ -492,9 +473,8 @@ HTML_TEMPLATE = """\
   .build-meta .badge b {{ color: var(--text); }}
 
   /* ── Layout ── */
-  .container {{ max-width: 1200px; margin: 0 auto; padding: 32px 24px; }}
+  .container {{ max-width: 1300px; margin: 0 auto; padding: 32px 24px; }}
   .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }}
-  @media (max-width: 700px) {{ .grid-2 {{ grid-template-columns: 1fr; }} }}
 
   .card {{
     background: var(--surface); border: 1px solid var(--border);
@@ -540,79 +520,132 @@ HTML_TEMPLATE = """\
   .chart .rt-badge   {{ font-size: 14px; font-weight: bold; dominant-baseline: middle; }}
 
   /* ── Example gallery ── */
-  .example-gallery {{ display: flex; flex-direction: column; gap: 32px; }}
+  .example-gallery {{
+    display: flex;
+    flex-direction: column;
+    gap: var(--gallery-gap);
+  }}
 
   .example-card {{
     background: var(--surface2);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
+    border-radius: 12px;
+    overflow: hidden;
   }}
+
+  .example-header {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.03);
+  }}
+
   .example-title {{
     font-weight: 700;
     font-size: 1rem;
     color: var(--accent);
-    margin-bottom: 16px;
+    font-family: monospace;
+    letter-spacing: 0.02em;
   }}
+
+  .example-chips {{
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }}
+
+  /* ── Side-by-side body ── */
   .example-body {{
     display: grid;
-    grid-template-columns: 1fr 40px 1fr;
-    gap: 12px;
-    align-items: start;
+    grid-template-columns: 1fr 36px 1fr;
+    min-height: 260px;
   }}
-  @media (max-width: 900px) {{
-    .example-body {{
-      grid-template-columns: 1fr;
-    }}
-    .example-arrow {{ display: none; }}
+
+  .example-pane {{
+    display: flex;
+    flex-direction: column;
+    min-width: 0; /* prevent grid blowout */
   }}
-  .source-label {{
+
+  .example-pane--source {{
+    border-right: 1px solid var(--border);
+  }}
+
+  .pane-label {{
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
     font-size: 0.72rem;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.15);
+    flex-shrink: 0;
   }}
+
+  .pane-label-dot {{
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }}
+  .pane-label-dot--msx {{ background: var(--accent); }}
+  .pane-label-dot--svg {{ background: var(--purple); }}
+
   .source-code {{
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
-    font-family: 'Consolas', 'Fira Code', monospace;
-    font-size: 0.75rem;
+    flex: 1;
+    background: #0a0f1e;
+    padding: 14px 16px;
+    font-family: 'Consolas', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.73rem;
     color: #93c5fd;
-    overflow-x: auto;
+    overflow: auto;
     white-space: pre;
-    max-height: 300px;
-    overflow-y: auto;
+    line-height: 1.55;
+    margin: 0;
   }}
+
   .svg-preview {{
+    flex: 1;
     background: #ffffff;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 120px;
+    padding: 12px;
+    min-height: 200px;
   }}
+
   .svg-preview svg {{
     max-width: 100%;
+    max-height: 340px;
     height: auto;
+    width: auto;
+    display: block;
   }}
-  .example-arrow {{
+
+  /* ── Arrow divider ── */
+  .example-divider {{
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--muted);
-    font-size: 1.5rem;
-    padding-top: 24px;
+    background: var(--surface2);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    flex-shrink: 0;
   }}
-  .example-stats {{
-    margin-top: 14px;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+
+  .divider-arrow {{
+    font-size: 1.1rem;
+    color: var(--muted);
+    user-select: none;
+    writing-mode: horizontal-tb;
   }}
 
   /* ── Stat chips ── */
@@ -621,8 +654,9 @@ HTML_TEMPLATE = """\
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 9px;
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     color: var(--muted);
+    white-space: nowrap;
   }}
   .stat-chip.accent {{ border-color: var(--accent); color: var(--accent); }}
   .stat-chip.purple {{ border-color: var(--purple); color: var(--purple); }}
@@ -666,6 +700,92 @@ HTML_TEMPLATE = """\
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
   }}
   footer a {{ color: var(--accent); text-decoration: none; }}
+
+  /* ── Responsive ── */
+
+  /* Tablet: collapse test grid, keep side-by-side gallery */
+  @media (max-width: 900px) {{
+    .grid-2 {{
+      grid-template-columns: 1fr;
+    }}
+
+    .site-header {{
+      padding: 24px 20px;
+    }}
+
+    .site-header h1 {{
+      font-size: 1.5rem;
+    }}
+
+    .container {{
+      padding: 20px 16px;
+    }}
+  }}
+
+  /* Mobile: stack the gallery panes vertically */
+  @media (max-width: 680px) {{
+    .example-body {{
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto auto;
+    }}
+
+    .example-pane--source {{
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }}
+
+    .example-divider {{
+      border-left: none;
+      border-right: none;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      height: 32px;
+    }}
+
+    .divider-arrow {{
+      transform: rotate(90deg);
+    }}
+
+    .source-code {{
+      max-height: 220px;
+      font-size: 0.68rem;
+    }}
+
+    .svg-preview {{
+      min-height: 160px;
+    }}
+
+    .example-header {{
+      flex-direction: column;
+      align-items: flex-start;
+    }}
+
+    .build-meta {{
+      gap: 8px;
+    }}
+
+    footer {{
+      padding: 16px 20px;
+      flex-direction: column;
+      gap: 4px;
+    }}
+  }}
+
+  /* Very small screens */
+  @media (max-width: 400px) {{
+    .site-header h1 {{
+      font-size: 1.2rem;
+    }}
+
+    .example-chips {{
+      gap: 4px;
+    }}
+
+    .stat-chip {{
+      font-size: 0.65rem;
+      padding: 2px 6px;
+    }}
+  }}
 </style>
 </head>
 <body>
@@ -744,8 +864,9 @@ HTML_TEMPLATE = """\
       <div class="dot orange"></div>
       Example Gallery — MSX Source → Rendered SVG
     </div>
-    <p style="font-size:0.8rem;color:var(--muted);margin-bottom:16px">
-      Each example is a real <code>.msx</code> DixScript file compiled and rendered by the CI.
+    <p style="font-size:0.8rem;color:var(--muted);margin-bottom:20px">
+      Each example is a real <code style="background:var(--surface2);border-radius:4px;padding:1px 5px;font-family:monospace;font-size:0.85em;color:var(--accent)">.msx</code>
+      DixScript file compiled and rendered by the CI.
       QuickFuncs are evaluated at compile time — the binary contains only the resolved scene graph.
     </p>
     {example_gallery}
