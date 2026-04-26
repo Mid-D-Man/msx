@@ -5,19 +5,19 @@
     { type = "linear_gradient", id = "sunset",
       x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,
       stops = [
-        { offset = 0.0, color = #f7971e, opacity = 1.0 }
+        { offset = 0.0, color = #f7971e, opacity = 1.0 },
         { offset = 1.0, color = #ffd200, opacity = 1.0 }
       ] }
     { type = "linear_gradient", id = "ocean",
       x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 1.0,
       stops = [
-        { offset = 0.0, color = #2196f3, opacity = 1.0 }
+        { offset = 0.0, color = #2196f3, opacity = 1.0 },
         { offset = 1.0, color = #0d47a1, opacity = 1.0 }
       ] }
     { type = "radial_gradient", id = "glow",
       cx = 0.5, cy = 0.5, r = 0.5,
       stops = [
-        { offset = 0.0, color = #4facfe, opacity = 1.0 }
+        { offset = 0.0, color = #4facfe, opacity = 1.0 },
         { offset = 1.0, color = #00f2fe, opacity = 0.0 }
       ] }
   elements::
