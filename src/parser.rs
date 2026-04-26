@@ -397,31 +397,35 @@ fn parse_point_array(data: &DixData, prefix: &str) -> Result<Vec<Point>, String>
 mod tests {
     use super::*;
 
-    // All raw strings that embed "#colour" values use r##"..."## so the
-    // "#" inside colour literals does not accidentally close the raw string.
+    // ── Source helpers ────────────────────────────────────────────────────────
+    //
+    // Rules applied consistently throughout:
+    //   • scene uses flat object syntax:  scene = { width = W, height = H, background = #hex }
+    //   • hex colors are bare DixScript HexColor literals (no quotes)
+    //   • non-hex string values (type names, "none", text content, etc.) remain quoted
 
     fn simple_circle_src() -> &'static str {
-        r##"
+        r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
-  scene: { width = 200, height = 200, background = "#ffffff" }
+  scene = { width = 200, height = 200, background = #ffffff }
   elements::
     { type = "circle", cx = 100, cy = 100, r = 50,
-      style = { fill = "#ff0000", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      style = { fill = #ff0000, stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"##
+"#
     }
 
     fn simple_rect_src() -> &'static str {
-        r##"
+        r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
-  scene: { width = 400, height = 300, background = "#1a1a2e" }
+  scene = { width = 400, height = 300, background = #1a1a2e }
   elements::
     { type = "rect", x = 10, y = 20, width = 100, height = 50,
-      style = { fill = "#4a9eff", stroke = "#ffffff", stroke_width = 2.0, opacity = 0.9 } }
+      style = { fill = #4a9eff, stroke = #ffffff, stroke_width = 2.0, opacity = 0.9 } }
 )
-"##
+"#
     }
 
     #[test]
@@ -491,15 +495,15 @@ mod tests {
 
     #[test]
     fn parse_path_d_string() {
-        let src = r##"
+        let src = r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
-  scene: { width = 500, height = 500, background = "#000000" }
+  scene = { width = 500, height = 500, background = #000000 }
   elements::
     { type = "path", d = "M 50 450 L 250 50 L 450 450 Z",
-      style = { fill = "#3498db", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      style = { fill = #3498db, stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"##;
+"#;
         let scene = parse_scene(src).unwrap();
         if let Element::Path(p) = &scene.elements[0] {
             assert_eq!(p.commands.len(), 4);
@@ -510,7 +514,7 @@ mod tests {
 
     #[test]
     fn parse_group_with_children() {
-        let src = r##"
+        let src = r#"
 @CONFIG( version -> "1.0.0" )
 @QUICKFUNCS(
   ~badge<object>(x, y) {
@@ -518,19 +522,19 @@ mod tests {
       type = "group"
       elements = [
         { type = "rect", x = x, y = y, width = 90, height = 30,
-          style = { fill = "#007bff", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+          style = { fill = #007bff, stroke = "none", stroke_width = 0, opacity = 1.0 } },
         { type = "circle", cx = x + 45, cy = y + 15, r = 10,
-          style = { fill = "#ffffff", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+          style = { fill = #ffffff, stroke = "none", stroke_width = 0, opacity = 1.0 } }
       ]
     }
   }
 )
 @DATA(
-  scene: { width = 200, height = 100, background = "#f0f0f0" }
+  scene = { width = 200, height = 100, background = #f0f0f0 }
   elements::
     badge(10, 10)
 )
-"##;
+"#;
         let scene = parse_scene(src).unwrap();
         assert_eq!(scene.elements.len(), 1);
         if let Element::Group(g) = &scene.elements[0] {
@@ -544,16 +548,16 @@ mod tests {
 
     #[test]
     fn parse_text_element() {
-        let src = r##"
+        let src = r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
-  scene: { width = 300, height = 100, background = "#ffffff" }
+  scene = { width = 300, height = 100, background = #ffffff }
   elements::
     { type = "text", x = 50, y = 60, content = "Hello MSX",
-      style = { fill = "#000000", font_size = 18, text_anchor = "middle",
+      style = { fill = #000000, font_size = 18, text_anchor = "middle",
                 stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
-"##;
+"#;
         let scene = parse_scene(src).unwrap();
         if let Element::Text(t) = &scene.elements[0] {
             assert_eq!(t.content, "Hello MSX");
@@ -567,13 +571,13 @@ mod tests {
 
     #[test]
     fn no_elements_gives_empty_scene() {
-        let src = r##"
+        let src = r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
-  scene: { width = 100, height = 100, background = "#000000" }
+  scene = { width = 100, height = 100, background = #000000 }
   elements::
 )
-"##;
+"#;
         let result = parse_scene(src);
         match result {
             Ok(scene) => assert_eq!(scene.elements.len(), 0),
