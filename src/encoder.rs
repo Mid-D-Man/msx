@@ -28,7 +28,6 @@ pub fn write_f32(out: &mut Vec<u8>, v: f64) {
     out.extend_from_slice(&(v as f32).to_le_bytes());
 }
 
-/// Write an (x, y) coordinate pair as two f32 LE values.
 #[inline]
 pub fn write_point(out: &mut Vec<u8>, x: f64, y: f64) {
     write_f32(out, x);
@@ -37,10 +36,6 @@ pub fn write_point(out: &mut Vec<u8>, x: f64, y: f64) {
 
 // ── String pool ───────────────────────────────────────────────────────────────
 
-/// Append a string to the pool and return its index.
-///
-/// The pool is a `Vec<String>` maintained by the caller (compiler).
-/// This keeps encoding stateless — the pool is serialised separately.
 pub fn intern_string(pool: &mut Vec<String>, s: &str) -> u16 {
     if let Some(idx) = pool.iter().position(|p| p == s) {
         return idx as u16;
@@ -50,9 +45,6 @@ pub fn intern_string(pool: &mut Vec<String>, s: &str) -> u16 {
     idx
 }
 
-/// Serialise the full string pool to bytes.
-///
-/// Layout: `[u16 count] ([u16 byte_len][utf8 bytes])*`
 pub fn write_string_pool(out: &mut Vec<u8>, pool: &[String]) {
     write_u16(out, pool.len() as u16);
     for s in pool {
@@ -80,13 +72,11 @@ pub fn write_paint(out: &mut Vec<u8>, paint: &Paint, pool: &mut Vec<String>) {
             write_color(out, *c);
         }
         Paint::Ref(r) => {
-            // Ref may be gradient or pattern — use TAG_GRADIENT_REF for both in v0.1.
             write_u8(out, Paint::TAG_GRADIENT_REF);
             let idx = intern_string(pool, r);
             write_u16(out, idx);
         }
         Paint::CurrentColor => {
-            // Encode as a special named string ref so it round-trips.
             write_u8(out, Paint::TAG_GRADIENT_REF);
             let idx = intern_string(pool, "currentColor");
             write_u16(out, idx);
@@ -157,8 +147,6 @@ pub fn write_optional_transform(out: &mut Vec<u8>, t: &Option<Transform>) {
 
 // ── id_flags helper ───────────────────────────────────────────────────────────
 
-/// Write the id_flags byte then optional id string index.
-/// bit 0 = has_id   bit 1 = has_transform
 pub fn write_id_flags(
     out:       &mut Vec<u8>,
     id:        Option<&str>,
@@ -204,16 +192,27 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
         write_f32(out, style.stroke_miterlimit.unwrap_or(4.0));
     }
     if flags & (1 << 5) != 0 {
-        // font_size stored as u16 × 100 to avoid float for common sizes
-        let fs = ((style.font_size.unwrap_or(12.0) * 100.0).round() as u16);
+        // font_size: stored as u16 × 100
+        let fs = (style.font_size.unwrap_or(12.0) * 100.0).round() as u16;
         write_u16(out, fs);
-        let ff_idx = intern_string(
-            pool,
-            style.font_family.as_deref().unwrap_or(""),
-        );
+
+        // font_family: empty string = None
+        let ff_idx = intern_string(pool, style.font_family.as_deref().unwrap_or(""));
         write_u16(out, ff_idx);
-        write_u8(out, style.font_weight.as_ref().map(|fw| fw.to_byte()).unwrap_or(0));
-        write_u8(out, style.text_anchor.unwrap_or(TextAnchor::Start).to_byte());
+
+        // font_weight: 0 = None, 1 = Normal, 2 = Bold, 3..11 = Numeric/100
+        // The +1 offset lets us distinguish "not set" (0) from "Normal" (1).
+        let fw_byte = style.font_weight
+            .as_ref()
+            .map(|fw| fw.to_byte().saturating_add(1))
+            .unwrap_or(0);
+        write_u8(out, fw_byte);
+
+        // text_anchor: 0 = None, 1 = Start, 2 = Middle, 3 = End
+        let ta_byte = style.text_anchor
+            .map(|ta| ta.to_byte() + 1)
+            .unwrap_or(0);
+        write_u8(out, ta_byte);
     }
     if flags & (1 << 6) != 0 {
         let da = style.stroke_dasharray.as_deref().unwrap_or(&[]);
@@ -267,11 +266,8 @@ mod tests {
         intern_string(&mut pool, "hello world");
         let mut buf = Vec::new();
         write_string_pool(&mut buf, &pool);
-        // count = 2 as u16 LE
         assert_eq!(&buf[0..2], &[2u8, 0]);
-        // first string len = 3
         assert_eq!(&buf[2..4], &[3u8, 0]);
-        // first string bytes
         assert_eq!(&buf[4..7], b"abc");
     }
 
@@ -292,6 +288,38 @@ mod tests {
         assert_eq!(buf[1], 255);
         assert_eq!(buf[2], 0);
         assert_eq!(buf[3], 128);
-        assert_eq!(buf[4], 255); // alpha = opaque
+        assert_eq!(buf[4], 255);
     }
-}
+
+    #[test]
+    fn font_weight_none_sentinel_roundtrip() {
+        // None → byte 0 → decoded back as None
+        use crate::style::Style;
+        let mut style = Style::empty();
+        style.font_size   = Some(14.0);
+        style.text_anchor = Some(TextAnchor::Middle);
+        // font_weight intentionally left None
+
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+
+        // Read the bit-5 block: u16 font_size, u16 ff_idx, u8 fw, u8 ta
+        // flags byte is at buf[0]; bit 5 is set
+        assert_eq!(buf[0] & (1 << 5), 1 << 5);
+
+        // Find the fw byte: flags(1) + fill(none=skip) + stroke(none=skip)
+        // + opacity(1<<2 skip) + sw(1<<3 skip) = just flags + bit5 block
+        // bit 0 fill: not set (font_size only style)
+        // Actually style has only font_size and text_anchor set — flags = bit5 only = 0x20
+        assert_eq!(buf[0], 0x20);
+        // bit5 block starts at buf[1]: u16 fs=1400, u16 ff_idx=0, u8 fw=0, u8 ta=2
+        let fs  = u16::from_le_bytes([buf[1], buf[2]]);
+        assert_eq!(fs, 1400);
+        let _ff = u16::from_le_bytes([buf[3], buf[4]]);
+        let fw  = buf[5];
+        let ta  = buf[6];
+        assert_eq!(fw, 0, "font_weight None must encode as 0");
+        assert_eq!(ta, 2, "Middle must encode as 2");
+    }
+        }
