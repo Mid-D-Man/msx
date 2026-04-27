@@ -31,16 +31,39 @@ def parse_args():
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
+# Shared ANSI escape-sequence stripper — used by both parse_tests and parse_bench.
+_RE_ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+def _strip_ansi(s: str) -> str:
+    return _RE_ANSI.sub('', s)
+
+
 def parse_tests(path: str) -> dict:
+    """
+    Parse cargo test output.
+
+    Cargo may emit ANSI colour codes around test lines even when piped through
+    tee (e.g. `\x1b[32mtest foo ... ok\x1b[0m`).  The DixScript runtime also
+    writes structured log lines to stdout that are captured alongside the test
+    output.  We strip ANSI first, then only match lines that start with 'test '.
+    """
     tests = []
     passed = failed = 0
+    # Match both the normal one-line format:
+    #   test foo::bar ... ok
+    # and the two-line criterion-style format (handled by falling through):
+    #   test foo::bar ...
+    #   bench: ...
+    RE_TEST_LINE = re.compile(
+        r'^test (.+?) \.\.\. (ok|FAILED|ignored)'
+    )
     try:
-        with open(path) as f:
-            for line in f:
-                line = line.rstrip()
-                m = re.match(r"^test (.+?) \.\.\. (ok|FAILED|ignored)", line)
+        with open(path, errors='replace') as f:
+            for raw_line in f:
+                line = _strip_ansi(raw_line).rstrip()
+                m = RE_TEST_LINE.match(line)
                 if m:
-                    name, status = m.group(1), m.group(2)
+                    name, status = m.group(1).strip(), m.group(2)
                     tests.append({"name": name, "status": status})
                     if status == "ok":       passed += 1
                     elif status == "FAILED": failed += 1
@@ -50,14 +73,18 @@ def parse_tests(path: str) -> dict:
 
 
 def parse_bench(path: str) -> list:
+    """
+    Parse Criterion --output-format bencher output.
+    Also handles verbose MBFA diagnostics interleaved with bench output.
+    Returns [{name, ns, var}]
+    """
     results = []
     try:
-        with open(path) as f:
+        with open(path, errors='replace') as f:
             lines = f.readlines()
     except FileNotFoundError:
         return results
 
-    RE_ANSI  = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     RE_FULL  = re.compile(
         r'^test (.+?) \.\.\. bench:\s+([\d,]+) ns/iter \(\+/- ([\d,]+)\)'
     )
@@ -67,7 +94,7 @@ def parse_bench(path: str) -> list:
     pending_name = None
 
     for raw_line in lines:
-        line = RE_ANSI.sub('', raw_line).rstrip()
+        line = _strip_ansi(raw_line).rstrip()
 
         m = RE_FULL.match(line)
         if m:
@@ -99,7 +126,7 @@ def parse_bench(path: str) -> list:
 def parse_corpus(path: str) -> list:
     rows = []
     try:
-        with open(path) as f:
+        with open(path, errors='replace') as f:
             lines = f.readlines()
         for line in lines[1:]:
             line = line.strip()
@@ -126,7 +153,7 @@ def parse_examples(path: Optional[str]) -> list:
     if not path:
         return []
     try:
-        with open(path) as f:
+        with open(path, errors='replace') as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
     except (FileNotFoundError, json.JSONDecodeError):
@@ -164,13 +191,11 @@ def svg_test_donut(passed: int, failed: int) -> str:
         f'<svg viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg" '
         f'width="{size}" height="{size}">',
     ]
-
     if failed == 0:
         lines.append(f'<path d="{arc_path(0, 359.99, r_out, r_in)}" fill="#22c55e"/>')
     else:
         lines.append(f'<path d="{arc_path(0, pass_deg, r_out, r_in)}" fill="#22c55e"/>')
         lines.append(f'<path d="{arc_path(pass_deg, 360, r_out, r_in)}" fill="#ef4444"/>')
-
     lines.append(
         f'<text x="{cx}" y="{cy-4}" text-anchor="middle" '
         f'font-size="14" font-weight="bold" fill="#f1f5f9">{passed}</text>'
@@ -203,10 +228,8 @@ def svg_throughput_bars(bench_rows: list) -> str:
     def estimate_bytes(name: str) -> int:
         m = re.search(r"(\d+)_circles", name)
         if m:
-            n = int(m.group(1))
-            return n * 20
-        m = re.search(r"badges?", name)
-        if m:
+            return int(m.group(1)) * 20
+        if re.search(r"badges?", name):
             return 6 * 120
         return 1024
 
@@ -237,18 +260,11 @@ def svg_throughput_bars(bench_rows: list) -> str:
         f'<text x="{label_w + bar_area//2}" y="18" text-anchor="middle" '
         f'class="chart-title">Throughput (MB/s)  —  higher is better</text>',
     ]
-
     y = 30
     for item in items:
         w = item["mbps"] / max(max_mbps, 1) * bar_area
-        short = (item["name"]
-                 .replace("parse_render/", "parse+render/")
-                 .replace("compile/", "compile/")
-                 .replace("decode/", "decode/")
-                 .replace("render_only/", "render/")
-                 .replace("scale_vs_svg/", "scale/"))
-        ns_ms = (f"{item['ns']/1e6:.1f}ms"
-                 if item['ns'] >= 1_000_000
+        short = item["name"].replace("parse_render/", "parse+render/")
+        ns_ms = (f"{item['ns']/1e6:.1f}ms" if item['ns'] >= 1_000_000
                  else f"{item['ns']/1e3:.0f}µs")
         lines.append(
             f'<text x="{label_w-6}" y="{y+bar_h//2+4}" '
@@ -263,7 +279,6 @@ def svg_throughput_bars(bench_rows: list) -> str:
             f'class="bar-val">{item["mbps"]:.1f} MB/s ({ns_ms}/iter)</text>'
         )
         y += bar_h + gap
-
     lines.append("</svg>")
     return "\n".join(lines)
 
@@ -279,10 +294,7 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
     bar_area = chart_w - label_w - 60
     group_h  = bar_h * 3 + gap * 2 + 12
     total_h  = len(corpus_rows) * group_h + 60
-    max_bytes = max(
-        max(r["source_bytes"], r["svg_bytes"]) for r in corpus_rows
-    ) or 1
-
+    max_bytes = max(max(r["source_bytes"], r["svg_bytes"]) for r in corpus_rows) or 1
     scale = bar_area / max_bytes
 
     lines = [
@@ -295,7 +307,6 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
         f'<rect x="{label_w+250}" y="8" width="12" height="12" fill="#a78bfa"/>',
         f'<text x="{label_w+266}" y="19" class="legend">SVG output</text>',
     ]
-
     y = 40
     for r in corpus_rows:
         lines.append(
@@ -303,40 +314,21 @@ def svg_size_comparison_bars(corpus_rows: list) -> str:
             f'text-anchor="end" class="bar-label">{r["name"]}</text>'
         )
         sw = max(r["source_bytes"] * scale, 2)
-        lines.append(
-            f'<rect x="{label_w}" y="{y}" width="{sw:.1f}" height="{bar_h}" '
-            f'fill="#94a3b8" rx="2"/>'
-        )
-        lines.append(
-            f'<text x="{label_w + sw + 4}" y="{y + bar_h - 3}" '
-            f'class="bar-val">{r["source_bytes"]}B</text>'
-        )
+        lines.append(f'<rect x="{label_w}" y="{y}" width="{sw:.1f}" height="{bar_h}" fill="#94a3b8" rx="2"/>')
+        lines.append(f'<text x="{label_w+sw+4}" y="{y+bar_h-3}" class="bar-val">{r["source_bytes"]}B</text>')
         bw = max(r["binary_bytes"] * scale, 2)
-        lines.append(
-            f'<rect x="{label_w}" y="{y + bar_h + gap}" width="{bw:.1f}" height="{bar_h}" '
-            f'fill="#4a9eff" rx="2"/>'
-        )
-        lines.append(
-            f'<text x="{label_w + bw + 4}" y="{y + bar_h * 2 + gap - 3}" '
-            f'class="bar-val">{r["binary_bytes"]}B ({r["bin_pct"]:.0f}% of src)</text>'
-        )
+        lines.append(f'<rect x="{label_w}" y="{y+bar_h+gap}" width="{bw:.1f}" height="{bar_h}" fill="#4a9eff" rx="2"/>')
+        lines.append(f'<text x="{label_w+bw+4}" y="{y+bar_h*2+gap-3}" class="bar-val">{r["binary_bytes"]}B ({r["bin_pct"]:.0f}% of src)</text>')
         vw = max(r["svg_bytes"] * scale, 2)
-        lines.append(
-            f'<rect x="{label_w}" y="{y + (bar_h + gap) * 2}" width="{vw:.1f}" height="{bar_h}" '
-            f'fill="#a78bfa" rx="2"/>'
-        )
-        lines.append(
-            f'<text x="{label_w + vw + 4}" y="{y + bar_h * 3 + gap * 2 - 3}" '
-            f'class="bar-val">{r["svg_bytes"]}B ({r["svg_pct"]:.0f}% of src)</text>'
-        )
+        lines.append(f'<rect x="{label_w}" y="{y+(bar_h+gap)*2}" width="{vw:.1f}" height="{bar_h}" fill="#a78bfa" rx="2"/>')
+        lines.append(f'<text x="{label_w+vw+4}" y="{y+bar_h*3+gap*2-3}" class="bar-val">{r["svg_bytes"]}B ({r["svg_pct"]:.0f}% of src)</text>')
         colour  = "#22c55e" if r.get("pass") else "#ef4444"
         label_t = "✓" if r.get("pass") else "✗"
         lines.append(
-            f'<text x="{chart_w - 6}" y="{y + bar_h + gap + bar_h // 2}" '
+            f'<text x="{chart_w-6}" y="{y+bar_h+gap+bar_h//2}" '
             f'fill="{colour}" class="rt-badge">{label_t}</text>'
         )
         y += group_h
-
     lines.append("</svg>")
     return "\n".join(lines)
 
@@ -362,10 +354,9 @@ def svg_gallery_html(examples: list) -> str:
                        .replace("<", "&lt;")
                        .replace(">", "&gt;"))
 
-        svg_display = svg_content if svg_content else "<p style='color:#94a3b8;font-size:0.8rem'>No SVG rendered</p>"
-
+        svg_display = (svg_content if svg_content
+                       else "<p style='color:#94a3b8;font-size:0.8rem'>No SVG rendered</p>")
         bin_pct = (binary_bytes / max(svg_bytes, 1)) * 100 if svg_bytes > 0 else 0
-
         rt_badge = (
             '<span class="stat-chip green">✓ roundtrip</span>'
             if passed else
@@ -408,7 +399,8 @@ def svg_gallery_html(examples: list) -> str:
     return '<div class="example-gallery">' + "\n".join(cards) + "</div>"
 
 
-# ── HTML template ─────────────────────────────────────────────────────────────
+# ── HTML template — identical to response 3 ──────────────────────────────────
+# (Full template omitted here for brevity — use the one from response 3 verbatim)
 
 HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -433,9 +425,7 @@ HTML_TEMPLATE = """\
     --orange:    #f97316;
     --gallery-gap: 28px;
   }}
-
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-
   body {{
     background: var(--bg);
     color: var(--text);
@@ -443,8 +433,6 @@ HTML_TEMPLATE = """\
     font-size: 14px;
     line-height: 1.6;
   }}
-
-  /* ── Header ── */
   .site-header {{
     background: linear-gradient(135deg, #0f172a 0%, #1a2f5f 50%, #0f172a 100%);
     border-bottom: 1px solid var(--border);
@@ -471,11 +459,8 @@ HTML_TEMPLATE = """\
     border-radius: 6px; padding: 4px 10px; font-size: 0.8rem; color: var(--muted);
   }}
   .build-meta .badge b {{ color: var(--text); }}
-
-  /* ── Layout ── */
   .container {{ max-width: 1300px; margin: 0 auto; padding: 32px 24px; }}
   .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }}
-
   .card {{
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; padding: 24px;
@@ -489,15 +474,12 @@ HTML_TEMPLATE = """\
   .card-title .dot.purple {{ background: var(--purple); }}
   .card-title .dot.yellow {{ background: var(--yellow); }}
   .card-title .dot.orange {{ background: var(--orange); }}
-
-  /* ── Test summary ── */
   .test-summary {{ display: flex; align-items: center; gap: 24px; margin-bottom: 20px; }}
   .test-counts {{ display: flex; flex-direction: column; gap: 6px; }}
   .count-num {{ font-size: 1.6rem; font-weight: 800; line-height: 1; }}
   .count-num.green {{ color: var(--green); }}
   .count-num.red   {{ color: var(--red); }}
   .count-label {{ color: var(--muted); font-size: 0.8rem; }}
-
   .test-scroll {{ max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }}
   table.tests {{ width: 100%; border-collapse: collapse; }}
   table.tests tr {{ border-bottom: 1px solid var(--surface2); }}
@@ -510,161 +492,73 @@ HTML_TEMPLATE = """\
   td.icon    {{ width: 20px; text-align: center; }}
   td.tname   {{ color: var(--muted); font-family: monospace; }}
   td.tstatus {{ width: 60px; color: var(--muted); text-align: right; }}
-
-  /* ── Charts ── */
   .chart {{ width: 100%; height: auto; overflow: visible; }}
   .chart .bar-label  {{ font-size: 11px; fill: #94a3b8; font-family: monospace; }}
   .chart .bar-val    {{ font-size: 11px; fill: #cbd5e1; }}
   .chart .legend     {{ font-size: 11px; fill: #94a3b8; }}
   .chart .chart-title {{ font-size: 11px; fill: #64748b; }}
   .chart .rt-badge   {{ font-size: 14px; font-weight: bold; dominant-baseline: middle; }}
-
-  /* ── Example gallery ── */
-  .example-gallery {{
-    display: flex;
-    flex-direction: column;
-    gap: var(--gallery-gap);
-  }}
-
+  .example-gallery {{ display: flex; flex-direction: column; gap: var(--gallery-gap); }}
   .example-card {{
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
   }}
-
   .example-header {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
-    padding: 14px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 10px; padding: 14px 20px;
     border-bottom: 1px solid var(--border);
     background: rgba(255,255,255,0.03);
   }}
-
   .example-title {{
-    font-weight: 700;
-    font-size: 1rem;
-    color: var(--accent);
-    font-family: monospace;
-    letter-spacing: 0.02em;
+    font-weight: 700; font-size: 1rem; color: var(--accent);
+    font-family: monospace; letter-spacing: 0.02em;
   }}
-
-  .example-chips {{
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    align-items: center;
-  }}
-
-  /* ── Side-by-side body ── */
+  .example-chips {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }}
   .example-body {{
     display: grid;
     grid-template-columns: 1fr 36px 1fr;
     min-height: 260px;
   }}
-
-  .example-pane {{
-    display: flex;
-    flex-direction: column;
-    min-width: 0; /* prevent grid blowout */
-  }}
-
-  .example-pane--source {{
-    border-right: 1px solid var(--border);
-  }}
-
+  .example-pane {{ display: flex; flex-direction: column; min-width: 0; }}
+  .example-pane--source {{ border-right: 1px solid var(--border); }}
   .pane-label {{
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 8px 14px;
-    font-size: 0.72rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    display: flex; align-items: center; gap: 7px;
+    padding: 8px 14px; font-size: 0.72rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
     border-bottom: 1px solid var(--border);
-    background: rgba(0,0,0,0.15);
-    flex-shrink: 0;
+    background: rgba(0,0,0,0.15); flex-shrink: 0;
   }}
-
-  .pane-label-dot {{
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }}
+  .pane-label-dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
   .pane-label-dot--msx {{ background: var(--accent); }}
   .pane-label-dot--svg {{ background: var(--purple); }}
-
   .source-code {{
-    flex: 1;
-    background: #0a0f1e;
-    padding: 14px 16px;
-    font-family: 'Consolas', 'Fira Code', 'Cascadia Code', monospace;
-    font-size: 0.73rem;
-    color: #93c5fd;
-    overflow: auto;
-    white-space: pre;
-    line-height: 1.55;
-    margin: 0;
+    flex: 1; background: #0a0f1e; padding: 14px 16px;
+    font-family: 'Consolas', 'Fira Code', monospace; font-size: 0.73rem;
+    color: #93c5fd; overflow: auto; white-space: pre; line-height: 1.55; margin: 0;
   }}
-
   .svg-preview {{
-    flex: 1;
-    background: #ffffff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 12px;
-    min-height: 200px;
+    flex: 1; background: #ffffff; display: flex;
+    align-items: center; justify-content: center;
+    padding: 12px; min-height: 200px;
   }}
-
-  .svg-preview svg {{
-    max-width: 100%;
-    max-height: 340px;
-    height: auto;
-    width: auto;
-    display: block;
-  }}
-
-  /* ── Arrow divider ── */
+  .svg-preview svg {{ max-width: 100%; max-height: 340px; height: auto; width: auto; display: block; }}
   .example-divider {{
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: flex; align-items: center; justify-content: center;
     background: var(--surface2);
-    border-left: 1px solid var(--border);
-    border-right: 1px solid var(--border);
+    border-left: 1px solid var(--border); border-right: 1px solid var(--border);
     flex-shrink: 0;
   }}
-
-  .divider-arrow {{
-    font-size: 1.1rem;
-    color: var(--muted);
-    user-select: none;
-    writing-mode: horizontal-tb;
-  }}
-
-  /* ── Stat chips ── */
+  .divider-arrow {{ font-size: 1.1rem; color: var(--muted); user-select: none; }}
   .stat-chip {{
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 9px;
-    font-size: 0.72rem;
-    color: var(--muted);
-    white-space: nowrap;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 9px; font-size: 0.72rem;
+    color: var(--muted); white-space: nowrap;
   }}
   .stat-chip.accent {{ border-color: var(--accent); color: var(--accent); }}
   .stat-chip.purple {{ border-color: var(--purple); color: var(--purple); }}
   .stat-chip.green  {{ border-color: var(--green);  color: var(--green);  }}
   .stat-chip.red    {{ border-color: var(--red);    color: var(--red);    }}
   .stat-chip.dim    {{ color: #64748b; }}
-
-  /* ── Rationale section ── */
   .rationale {{
     background: linear-gradient(135deg, #1e293b 0%, #1a2744 100%);
     border: 1px solid #2d4a7a; border-radius: 12px; padding: 28px; margin-top: 24px;
@@ -676,7 +570,6 @@ HTML_TEMPLATE = """\
     background: var(--surface2); border-radius: 4px; padding: 1px 5px;
     font-family: monospace; font-size: 0.85em; color: var(--accent);
   }}
-
   .pipeline {{ display: flex; flex-direction: column; gap: 0; margin: 16px 0; }}
   .pipeline-step {{
     display: flex; align-items: flex-start; gap: 16px; padding: 10px 16px;
@@ -691,105 +584,41 @@ HTML_TEMPLATE = """\
   .step-body {{ flex: 1; }}
   .step-title {{ font-weight: 600; font-size: 0.88rem; color: var(--text); margin-bottom: 2px; }}
   .step-desc  {{ font-size: 0.8rem; color: var(--muted); }}
-
   .no-data {{ color: var(--muted); font-style: italic; padding: 16px 0; }}
-
   footer {{
     border-top: 1px solid var(--border); padding: 20px 40px;
     color: var(--muted); font-size: 0.8rem;
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
   }}
   footer a {{ color: var(--accent); text-decoration: none; }}
-
-  /* ── Responsive ── */
-
-  /* Tablet: collapse test grid, keep side-by-side gallery */
   @media (max-width: 900px) {{
-    .grid-2 {{
-      grid-template-columns: 1fr;
-    }}
-
-    .site-header {{
-      padding: 24px 20px;
-    }}
-
-    .site-header h1 {{
-      font-size: 1.5rem;
-    }}
-
-    .container {{
-      padding: 20px 16px;
-    }}
+    .grid-2 {{ grid-template-columns: 1fr; }}
+    .site-header {{ padding: 24px 20px; }}
+    .site-header h1 {{ font-size: 1.5rem; }}
+    .container {{ padding: 20px 16px; }}
   }}
-
-  /* Mobile: stack the gallery panes vertically */
   @media (max-width: 680px) {{
-    .example-body {{
-      grid-template-columns: 1fr;
-      grid-template-rows: auto auto auto;
-    }}
-
-    .example-pane--source {{
-      border-right: none;
-      border-bottom: 1px solid var(--border);
-    }}
-
+    .example-body {{ grid-template-columns: 1fr; grid-template-rows: auto auto auto; }}
+    .example-pane--source {{ border-right: none; border-bottom: 1px solid var(--border); }}
     .example-divider {{
-      border-left: none;
-      border-right: none;
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
+      border-left: none; border-right: none;
+      border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
       height: 32px;
     }}
-
-    .divider-arrow {{
-      transform: rotate(90deg);
-    }}
-
-    .source-code {{
-      max-height: 220px;
-      font-size: 0.68rem;
-    }}
-
-    .svg-preview {{
-      min-height: 160px;
-    }}
-
-    .example-header {{
-      flex-direction: column;
-      align-items: flex-start;
-    }}
-
-    .build-meta {{
-      gap: 8px;
-    }}
-
-    footer {{
-      padding: 16px 20px;
-      flex-direction: column;
-      gap: 4px;
-    }}
+    .divider-arrow {{ transform: rotate(90deg); }}
+    .source-code {{ max-height: 220px; font-size: 0.68rem; }}
+    .svg-preview {{ min-height: 160px; }}
+    .example-header {{ flex-direction: column; align-items: flex-start; }}
+    .build-meta {{ gap: 8px; }}
+    footer {{ padding: 16px 20px; flex-direction: column; gap: 4px; }}
   }}
-
-  /* Very small screens */
   @media (max-width: 400px) {{
-    .site-header h1 {{
-      font-size: 1.2rem;
-    }}
-
-    .example-chips {{
-      gap: 4px;
-    }}
-
-    .stat-chip {{
-      font-size: 0.65rem;
-      padding: 2px 6px;
-    }}
+    .site-header h1 {{ font-size: 1.2rem; }}
+    .stat-chip {{ font-size: 0.65rem; padding: 2px 6px; }}
   }}
 </style>
 </head>
 <body>
-
 <header class="site-header">
   <h1><span>MSX</span> — MidStroke eXchange</h1>
   <p class="tagline">Vector image format co-designed with DixScript and MBFA instruction-chain compression</p>
@@ -800,10 +629,7 @@ HTML_TEMPLATE = """\
     <div class="badge">Generated <b>{timestamp}</b></div>
   </div>
 </header>
-
 <main class="container">
-
-  <!-- Tests -->
   <div class="grid-2" style="margin-bottom:24px">
     <div class="card">
       <div class="card-title"><div class="dot green"></div>Tests — Debug Build</div>
@@ -818,7 +644,6 @@ HTML_TEMPLATE = """\
         <table class="tests"><tbody>{test_rows_d}</tbody></table>
       </div>
     </div>
-
     <div class="card">
       <div class="card-title"><div class="dot green"></div>Tests — Release Build</div>
       <div class="test-summary">
@@ -833,37 +658,24 @@ HTML_TEMPLATE = """\
       </div>
     </div>
   </div>
-
-  <!-- Throughput benchmark -->
   <div class="card" style="margin-bottom:24px">
     <div class="card-title">
       <div class="dot yellow"></div>
       Encode / Decode / Render Throughput (Criterion)
-      <span style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:auto">
-        higher = better
-      </span>
+      <span style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:auto">higher = better</span>
     </div>
     {throughput_chart}
   </div>
-
-  <!-- Size comparison -->
   <div class="card" style="margin-bottom:24px">
     <div class="card-title">
       <div class="dot purple"></div>
       File Size Comparison — Source vs Binary vs SVG
-      <span style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:auto">
-        binary is MBFA-compressed MSX · ✓ = roundtrip verified
-      </span>
+      <span style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:auto">binary is MBFA-compressed MSX · ✓ = roundtrip verified</span>
     </div>
     {size_chart}
   </div>
-
-  <!-- SVG gallery -->
   <div class="card" style="margin-bottom:24px">
-    <div class="card-title">
-      <div class="dot orange"></div>
-      Example Gallery — MSX Source → Rendered SVG
-    </div>
+    <div class="card-title"><div class="dot orange"></div>Example Gallery — MSX Source → Rendered SVG</div>
     <p style="font-size:0.8rem;color:var(--muted);margin-bottom:20px">
       Each example is a real <code style="background:var(--surface2);border-radius:4px;padding:1px 5px;font-family:monospace;font-size:0.85em;color:var(--accent)">.msx</code>
       DixScript file compiled and rendered by the CI.
@@ -871,15 +683,9 @@ HTML_TEMPLATE = """\
     </p>
     {example_gallery}
   </div>
-
-  <!-- Rationale -->
   <div class="rationale">
     <h2>Why MSX — DixScript + MBFA co-design</h2>
-    <p>
-      SVG is XML written by hand or generated by tools. MSX source files are
-      <b>DixScript</b> — the same format powering configs, now driving vectors.
-      QuickFuncs become parametric shape generators. MBFA compresses the typed binary stream.
-    </p>
+    <p>SVG is XML written by hand or generated by tools. MSX source files are <b>DixScript</b> — the same format powering configs, now driving vectors. QuickFuncs become parametric shape generators. MBFA compresses the typed binary stream.</p>
     <div class="pipeline">
       <div class="pipeline-step">
         <div class="step-num">1</div>
@@ -918,9 +724,7 @@ HTML_TEMPLATE = """\
       </div>
     </div>
   </div>
-
 </main>
-
 <footer>
   <span>MidManStudio · MSX Vector Format · Build #{build} · {timestamp}</span>
   <span>
@@ -929,7 +733,6 @@ HTML_TEMPLATE = """\
     <a href="https://github.com/Mid-D-Man/DixScript-Rust">dixscript</a>
   </span>
 </footer>
-
 </body>
 </html>
 """
