@@ -41,61 +41,52 @@ pub const TAG_END:              u8 = 0xFF;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Compile a Scene to a self-contained binary MSX file.
-///
-/// When `compress = true` the payload is MBFA-compressed.
-/// The 32-byte header is always written uncompressed so readers
-/// can detect the format without decompressing first.
 pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
     let mut pool:    Vec<String> = Vec::new();
     let mut payload: Vec<u8>    = Vec::new();
 
-    // ── Background ────────────────────────────────────────────────────────────
+    // Background
     payload.extend_from_slice(&scene.canvas.background.to_bytes());
 
-    // ── Viewbox (if present) ──────────────────────────────────────────────────
+    // Viewbox
     if let Some(ref vb) = scene.canvas.viewbox {
         payload.extend_from_slice(&vb.to_bytes());
     }
 
-    // ── Temporarily reserve string pool slot — we'll overwrite it ─────────────
-    // Pool position is after background + viewbox.  We write a placeholder
-    // length field now and patch it after all elements are encoded.
+    // Placeholder string-pool count (2 bytes, patched below)
     let pool_len_offset = payload.len();
-    // Reserve 2 bytes for pool count; actual content appended after elements
     payload.push(0); payload.push(0);
 
-    // ── Encode defs ───────────────────────────────────────────────────────────
+    // Defs
     let mut def_payload: Vec<u8> = Vec::new();
     for def in &scene.defs {
         encode_def(def, &mut def_payload, &mut pool);
     }
 
-    // ── Encode elements ───────────────────────────────────────────────────────
+    // Elements
     let mut elem_payload: Vec<u8> = Vec::new();
     for elem in &scene.elements {
         encode_element(elem, &mut elem_payload, &mut pool);
     }
     write_u8(&mut elem_payload, TAG_END);
 
-    // ── Now write the real string pool, patching the count ────────────────────
-    // Overwrite the 2 placeholder bytes with actual count
+    // Patch pool count
     let count_bytes = (pool.len() as u16).to_le_bytes();
     payload[pool_len_offset]     = count_bytes[0];
     payload[pool_len_offset + 1] = count_bytes[1];
 
-    // Append pool entries (len + bytes) — no count re-write needed
+    // Append pool entries
     for s in &pool {
         let bytes = s.as_bytes();
         write_u16(&mut payload, bytes.len() as u16);
         payload.extend_from_slice(bytes);
     }
 
-    // ── Append defs + elements ────────────────────────────────────────────────
+    // Append defs + elements
     payload.extend_from_slice(&def_payload);
     payload.extend_from_slice(&elem_payload);
 
-    // ── Build header ──────────────────────────────────────────────────────────
+    // Header
     let mut header = MsxHeader::new(
         scene.canvas.width  as f32,
         scene.canvas.height as f32,
@@ -105,14 +96,10 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
     header.def_count    = scene.defs.len() as u32;
     header.compress     = if compress { COMPRESS_MBFA } else { COMPRESS_NONE };
 
-    if scene.canvas.viewbox.is_some() {
-        header.set_viewbox(true);
-    }
-    if !scene.defs.is_empty() {
-        header.set_defs(true);
-    }
+    if scene.canvas.viewbox.is_some() { header.set_viewbox(true); }
+    if !scene.defs.is_empty()         { header.set_defs(true); }
 
-    // ── Optionally compress payload ───────────────────────────────────────────
+    // Optionally compress
     let final_payload = if compress {
         mbfa::compress(&payload, 8)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("MBFA compress: {}", e)))?
@@ -120,7 +107,6 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
         payload
     };
 
-    // ── Assemble output ───────────────────────────────────────────────────────
     let mut out = Vec::with_capacity(32 + final_payload.len());
     out.extend_from_slice(&header.serialize());
     out.extend_from_slice(&final_payload);
@@ -140,29 +126,20 @@ fn encode_linear_gradient(g: &LinearGradient, out: &mut Vec<u8>, pool: &mut Vec<
     write_u8(out, TAG_LINEAR_GRADIENT);
     let id_idx = intern_string(pool, &g.id);
     write_u16(out, id_idx);
-    write_f32(out, g.x1);
-    write_f32(out, g.y1);
-    write_f32(out, g.x2);
-    write_f32(out, g.y2);
+    write_f32(out, g.x1); write_f32(out, g.y1);
+    write_f32(out, g.x2); write_f32(out, g.y2);
     write_u16(out, g.stops.len() as u16);
-    for stop in &g.stops {
-        out.extend_from_slice(&stop.to_bytes());
-    }
+    for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
 }
 
 fn encode_radial_gradient(g: &RadialGradient, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_RADIAL_GRADIENT);
     let id_idx = intern_string(pool, &g.id);
     write_u16(out, id_idx);
-    write_f32(out, g.cx);
-    write_f32(out, g.cy);
-    write_f32(out, g.r);
-    write_f32(out, g.fx);
-    write_f32(out, g.fy);
+    write_f32(out, g.cx); write_f32(out, g.cy); write_f32(out, g.r);
+    write_f32(out, g.fx); write_f32(out, g.fy);
     write_u16(out, g.stops.len() as u16);
-    for stop in &g.stops {
-        out.extend_from_slice(&stop.to_bytes());
-    }
+    for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
 }
 
 // ── Element encoding ──────────────────────────────────────────────────────────
@@ -190,36 +167,34 @@ fn encode_rect(e: &Rect, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_f32(out, e.width);
     write_f32(out, e.height);
     write_f32(out, e.rx.unwrap_or(0.0));
-    write_f32(out, e.ry.unwrap_or(e.rx.unwrap_or(0.0)));
+    // FIX: always encode 0.0 when ry is None — never fall back to rx.
+    // Previously this wrote rx's value for ry when ry=None, causing the
+    // decoder to produce ry=Some(rx) and emit ry="N" in the SVG where
+    // the source had no ry attribute — breaking pixel-perfect roundtrip.
+    write_f32(out, e.ry.unwrap_or(0.0));
     write_style(out, &e.style, pool);
 }
 
 fn encode_circle(e: &Circle, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_CIRCLE);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
-    write_f32(out, e.cx);
-    write_f32(out, e.cy);
-    write_f32(out, e.r);
+    write_f32(out, e.cx); write_f32(out, e.cy); write_f32(out, e.r);
     write_style(out, &e.style, pool);
 }
 
 fn encode_ellipse(e: &Ellipse, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_ELLIPSE);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
-    write_f32(out, e.cx);
-    write_f32(out, e.cy);
-    write_f32(out, e.rx);
-    write_f32(out, e.ry);
+    write_f32(out, e.cx); write_f32(out, e.cy);
+    write_f32(out, e.rx); write_f32(out, e.ry);
     write_style(out, &e.style, pool);
 }
 
 fn encode_line(e: &Line, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_LINE);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
-    write_f32(out, e.x1);
-    write_f32(out, e.y1);
-    write_f32(out, e.x2);
-    write_f32(out, e.y2);
+    write_f32(out, e.x1); write_f32(out, e.y1);
+    write_f32(out, e.x2); write_f32(out, e.y2);
     write_style(out, &e.style, pool);
 }
 
@@ -227,10 +202,7 @@ fn encode_polyline(e: &Polyline, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_POLYLINE);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     write_u32(out, e.points.len() as u32);
-    for p in &e.points {
-        write_f32(out, p.x);
-        write_f32(out, p.y);
-    }
+    for p in &e.points { write_f32(out, p.x); write_f32(out, p.y); }
     write_style(out, &e.style, pool);
 }
 
@@ -238,10 +210,7 @@ fn encode_polygon(e: &Polyline, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_POLYGON);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     write_u32(out, e.points.len() as u32);
-    for p in &e.points {
-        write_f32(out, p.x);
-        write_f32(out, p.y);
-    }
+    for p in &e.points { write_f32(out, p.x); write_f32(out, p.y); }
     write_style(out, &e.style, pool);
 }
 
@@ -260,8 +229,7 @@ fn encode_text(e: &Text, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     let str_idx = intern_string(pool, &e.content);
     write_u16(out, str_idx);
-    write_f32(out, e.x);
-    write_f32(out, e.y);
+    write_f32(out, e.x); write_f32(out, e.y);
     write_style(out, &e.style, pool);
 }
 
@@ -269,10 +237,7 @@ fn encode_group(e: &Group, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_u8(out, TAG_GROUP);
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     write_u32(out, e.children.len() as u32);
-    for child in &e.children {
-        encode_element(child, out, pool);
-    }
-    // Group style — write a style block; empty if None
+    for child in &e.children { encode_element(child, out, pool); }
     let empty = Style::empty();
     write_style(out, e.style.as_ref().unwrap_or(&empty), pool);
 }
@@ -282,13 +247,11 @@ fn encode_use(e: &Use, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     let href_idx = intern_string(pool, &e.href);
     write_u16(out, href_idx);
-    write_f32(out, e.x);
-    write_f32(out, e.y);
+    write_f32(out, e.x); write_f32(out, e.y);
 }
 
-// ── Stats helper ──────────────────────────────────────────────────────────────
+// ── Stats ──────────────────────────────────────────────────────────────────────
 
-/// Returns (uncompressed_payload_bytes, element_count, def_count)
 pub fn compile_stats(scene: &Scene) -> (usize, usize, usize) {
     match compile(scene, false) {
         Ok(data) => (data.len() - 32, scene.element_count(), scene.defs.len()),
@@ -360,9 +323,7 @@ mod tests {
         style.stroke = Some(Paint::None);
         style.stroke_width = Some(0.0);
         style.opacity = Some(1.0);
-        scene.elements.push(Element::Rect(Rect::new(
-            10.0, 10.0, 50.0, 50.0, style
-        )));
+        scene.elements.push(Element::Rect(Rect::new(10.0, 10.0, 50.0, 50.0, style)));
         let data = compile(&scene, false).unwrap();
         let count = u32::from_le_bytes(data[16..20].try_into().unwrap());
         assert_eq!(count, 2);
@@ -370,7 +331,6 @@ mod tests {
 
     #[test]
     fn compile_size_less_than_raw_svg_for_many_circles() {
-        // 100 circles — binary should beat a verbose SVG representation
         let mut scene = Scene::new(Canvas::new(1000.0, 1000.0, Color::WHITE));
         for i in 0..100 {
             let mut style = Style::empty();
@@ -379,18 +339,48 @@ mod tests {
             style.stroke_width = Some(0.0);
             style.opacity = Some(1.0);
             scene.elements.push(Element::Circle(Circle {
-                cx: (i * 10) as f64,
-                cy: (i * 5) as f64,
-                r: 20.0,
-                id: None,
-                transform: None,
-                style,
+                cx: (i * 10) as f64, cy: (i * 5) as f64, r: 20.0,
+                id: None, transform: None, style,
             }));
         }
         let binary = compile(&scene, false).unwrap();
-        // Each circle in SVG is ~90 bytes; 100 circles = ~9000 bytes + overhead
-        // Binary: 32 header + ~30 bytes/circle = ~3032 bytes
         println!("100 circles binary size: {} bytes", binary.len());
-        assert!(binary.len() < 9_000, "binary should be smaller than verbose SVG");
+        assert!(binary.len() < 9_000);
     }
-  }
+
+    #[test]
+    fn rect_ry_none_does_not_inherit_rx() {
+        // When rx=12 and ry=None, the encoder must write ry=0 (not rx=12).
+        // Decoding should give ry=None, so the SVG has rx="12" without ry="12".
+        use crate::ast::Rect as AstRect;
+        let mut style = Style::empty();
+        style.fill = Some(Paint::Color(Color::rgb(0, 128, 255)));
+        style.stroke = Some(Paint::None);
+        style.stroke_width = Some(0.0);
+        style.opacity = Some(1.0);
+
+        let mut scene = Scene::new(Canvas::new(400.0, 300.0, Color::WHITE));
+        scene.elements.push(Element::Rect(AstRect {
+            x: 10.0, y: 10.0, width: 100.0, height: 50.0,
+            rx: Some(12.0),
+            ry: None,           // <─ explicitly None
+            id: None, transform: None, style,
+        }));
+
+        let binary  = compile(&scene, false).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        if let Element::Rect(r) = &decoded.elements[0] {
+            assert_eq!(r.rx, Some(12.0), "rx must survive roundtrip");
+            assert_eq!(r.ry, None,       "ry=None must NOT become Some(12) after roundtrip");
+        } else {
+            panic!("expected Rect");
+        }
+
+        let svg_src = crate::render(&scene);
+        let svg_bin = crate::render(&decoded);
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(norm(&svg_src), norm(&svg_bin),
+            "source SVG and decoded SVG must be identical when ry=None");
+    }
+        }
