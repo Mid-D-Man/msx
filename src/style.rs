@@ -76,6 +76,8 @@ impl TextAnchor {
     pub fn parse(s: &str) -> Self {
         match s { "middle" => TextAnchor::Middle, "end" => TextAnchor::End, _ => TextAnchor::Start }
     }
+    /// Raw byte used for binary encoding (0=Start, 1=Middle, 2=End).
+    /// The encoder adds +1 offset so 0 means "None" on the wire.
     pub fn to_byte(self) -> u8 { match self { TextAnchor::Start => 0, TextAnchor::Middle => 1, TextAnchor::End => 2 } }
     pub fn from_byte(b: u8) -> Self {
         match b { 1 => TextAnchor::Middle, 2 => TextAnchor::End, _ => TextAnchor::Start }
@@ -92,8 +94,8 @@ pub enum FontWeight {
 impl FontWeight {
     pub fn to_svg(&self) -> String {
         match self {
-            FontWeight::Normal    => "normal".to_string(),
-            FontWeight::Bold      => "bold".to_string(),
+            FontWeight::Normal     => "normal".to_string(),
+            FontWeight::Bold       => "bold".to_string(),
             FontWeight::Numeric(n) => n.to_string(),
         }
     }
@@ -104,8 +106,14 @@ impl FontWeight {
             other    => other.parse::<u16>().map(FontWeight::Numeric).unwrap_or(FontWeight::Normal),
         }
     }
+    /// Raw byte used for binary encoding (0=Normal, 1=Bold, 2..=9=Numeric/100).
+    /// The encoder adds +1 offset so 0 means "None" on the wire.
     pub fn to_byte(&self) -> u8 {
-        match self { FontWeight::Normal => 0, FontWeight::Bold => 1, FontWeight::Numeric(n) => (*n / 100).min(9) as u8 + 2 }
+        match self {
+            FontWeight::Normal    => 0,
+            FontWeight::Bold      => 1,
+            FontWeight::Numeric(n) => (*n / 100).min(9) as u8 + 2,
+        }
     }
     pub fn from_byte(b: u8) -> Self {
         match b { 0 => FontWeight::Normal, 1 => FontWeight::Bold, n => FontWeight::Numeric((n - 2) as u16 * 100) }
@@ -114,8 +122,6 @@ impl FontWeight {
 
 // ── Style ─────────────────────────────────────────────────────────────────────
 
-/// Full style block for an MSX element.
-/// All fields are optional — `None` means "inherit from parent / SVG default".
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
     pub fill:               Option<Paint>,
@@ -168,10 +174,10 @@ impl Default for Style {
 impl Style {
     pub fn none() -> Self {
         Style {
-            fill:              Some(Paint::None),
-            stroke:            Some(Paint::None),
-            stroke_width:      Some(0.0),
-            opacity:           Some(1.0),
+            fill:          Some(Paint::None),
+            stroke:        Some(Paint::None),
+            stroke_width:  Some(0.0),
+            opacity:       Some(1.0),
             ..Self::empty()
         }
     }
@@ -200,7 +206,15 @@ impl Style {
         }
     }
 
-    /// Collect non-None fields as SVG attribute strings.
+    /// Collect non-None fields as SVG attribute key-value pairs.
+    ///
+    /// SVG default values are suppressed so that source → render and
+    /// source → binary → decode → render produce identical output:
+    ///   • fill-rule="nonzero"   (SVG default)
+    ///   • stroke-linecap="butt" (SVG default)
+    ///   • stroke-linejoin="miter" (SVG default)
+    ///   • font-weight="normal"  (SVG default)
+    ///   • text-anchor="start"   (SVG default)
     pub fn to_svg_attrs(&self) -> Vec<(&'static str, String)> {
         let mut attrs: Vec<(&'static str, String)> = Vec::new();
 
@@ -256,10 +270,17 @@ impl Style {
             attrs.push(("font-family", ff.clone()));
         }
         if let Some(ref fw) = self.font_weight {
-            attrs.push(("font-weight", fw.to_svg()));
+            // Suppress "normal" — it is the SVG default and omitting it
+            // keeps source→render identical to binary→render.
+            if *fw != FontWeight::Normal {
+                attrs.push(("font-weight", fw.to_svg()));
+            }
         }
         if let Some(ta) = self.text_anchor {
-            attrs.push(("text-anchor", ta.to_svg().to_string()));
+            // Suppress "start" — it is the SVG default.
+            if ta != TextAnchor::Start {
+                attrs.push(("text-anchor", ta.to_svg().to_string()));
+            }
         }
         if let Some(ref db) = self.dominant_baseline {
             attrs.push(("dominant-baseline", db.clone()));
@@ -274,7 +295,6 @@ impl Style {
         attrs
     }
 
-    /// Serialize all non-None fields to a single `style="..."` attribute string.
     pub fn to_svg_style_attr(&self) -> String {
         self.to_svg_attrs()
             .iter()
@@ -283,16 +303,6 @@ impl Style {
             .join(";")
     }
 
-    /// Presence flags for binary serialisation (8 bits).
-    ///
-    /// bit 0 = fill present
-    /// bit 1 = stroke present
-    /// bit 2 = opacity present
-    /// bit 3 = stroke_width present
-    /// bit 4 = fill_rule + linecap + linejoin present
-    /// bit 5 = font fields present
-    /// bit 6 = dash present
-    /// bit 7 = visibility/display present
     pub fn present_flags(&self) -> u8 {
         let mut f = 0u8;
         if self.fill.is_some()                                                    { f |= 1 << 0; }
@@ -347,6 +357,43 @@ mod tests {
         s.opacity = Some(0.5);
         let attrs = s.to_svg_attrs();
         assert!(attrs.iter().any(|(k, v)| *k == "opacity" && v == "0.5"));
+    }
+
+    #[test]
+    fn style_svg_attrs_font_weight_normal_omitted() {
+        // font-weight="normal" is the SVG default and must be suppressed
+        // to keep source→SVG identical to binary→SVG.
+        let mut s = Style::empty();
+        s.font_weight = Some(FontWeight::Normal);
+        let attrs = s.to_svg_attrs();
+        assert!(!attrs.iter().any(|(k, _)| *k == "font-weight"),
+            "font-weight=\"normal\" should be suppressed (SVG default)");
+    }
+
+    #[test]
+    fn style_svg_attrs_font_weight_bold_included() {
+        let mut s = Style::empty();
+        s.font_weight = Some(FontWeight::Bold);
+        let attrs = s.to_svg_attrs();
+        assert!(attrs.iter().any(|(k, v)| *k == "font-weight" && v == "bold"));
+    }
+
+    #[test]
+    fn style_svg_attrs_text_anchor_start_omitted() {
+        // text-anchor="start" is the SVG default and must be suppressed.
+        let mut s = Style::empty();
+        s.text_anchor = Some(TextAnchor::Start);
+        let attrs = s.to_svg_attrs();
+        assert!(!attrs.iter().any(|(k, _)| *k == "text-anchor"),
+            "text-anchor=\"start\" should be suppressed (SVG default)");
+    }
+
+    #[test]
+    fn style_svg_attrs_text_anchor_middle_included() {
+        let mut s = Style::empty();
+        s.text_anchor = Some(TextAnchor::Middle);
+        let attrs = s.to_svg_attrs();
+        assert!(attrs.iter().any(|(k, v)| *k == "text-anchor" && v == "middle"));
     }
 
     #[test]
