@@ -1,0 +1,11 @@
+[package]
+name        = "msx-ast"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX scene graph — pure data types, zero external deps"
+publish     = false
+
+[dependencies]
+# Intentionally empty. This crate must have zero external deps.
