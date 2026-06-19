@@ -1,0 +1,13 @@
+# core/msx-parser/Cargo.toml
+[package]
+name        = "msx-parser"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX DixScript source parser — .msx source to Scene AST"
+publish     = false
+
+[dependencies]
+msx-ast   = { workspace = true }
+dixscript = { workspace = true }
