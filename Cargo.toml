@@ -1,25 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/msx-ast",
+    "core/msx-binary",
+    "core/msx-parser",
+    "render/msx-render-core",
+    "render/msx-render-svg",
+    "render/msx-render-cpu",
+    "primitives/msx-sdf",
+    "primitives/msx-splat",
+    "apps/msx-cli",
+]
+
+[workspace.package]
+version    = "0.2.0"
+edition    = "2021"
+authors    = ["MidManStudio"]
+license    = "MIT"
+
+[workspace.dependencies]
+# Internal
+msx-ast         = { path = "core/msx-ast" }
+msx-binary      = { path = "core/msx-binary" }
+msx-parser      = { path = "core/msx-parser" }
+msx-render-core = { path = "render/msx-render-core" }
+msx-render-svg  = { path = "render/msx-render-svg" }
+msx-render-cpu  = { path = "render/msx-render-cpu" }
+msx-sdf         = { path = "primitives/msx-sdf" }
+msx-splat       = { path = "primitives/msx-splat" }
+# External siblings
+mbfa      = { path = "../mbfa" }
+dixscript = { path = "../dixscript" }
+# Rendering
+tiny-skia = "0.11"
+rayon     = "1.8"
+glam      = "0.27"
+# CLI
+clap  = { version = "4.5", features = ["derive"] }
+image = "0.25"
+# Dev
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# ── Root package ─ thin re-export so existing CI / tests still run ──────────
+
 [package]
-name = "msx"
-version = "0.1.0"
-edition = "2021"
-authors = ["MidManStudio"]
-description = "MSX — MidStroke eXchange vector format built on DixScript and MBFA"
-license = "MIT"
-
-[[bin]]
-name = "msx"
-path = "src/main.rs"
-
-[lib]
-name = "msx"
-path = "src/lib.rs"
+name        = "msx"
+version.workspace  = true
+edition.workspace  = true
+authors.workspace  = true
+license.workspace  = true
+description = "MSX — MidStroke eXchange vector format (workspace facade)"
+publish     = false
 
 [dependencies]
-mbfa       = { path = "../mbfa" }
-dixscript  = { path = "../dixscript" }   # ← the whole DixScript runtime
+msx-ast        = { path = "core/msx-ast" }
+msx-binary     = { path = "core/msx-binary" }
+msx-parser     = { path = "core/msx-parser" }
+msx-render-svg = { path = "render/msx-render-svg" }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { workspace = true }
 
 [[bench]]
 name    = "compare"
