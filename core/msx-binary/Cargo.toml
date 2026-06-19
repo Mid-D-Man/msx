@@ -1,0 +1,12 @@
+[package]
+name        = "msx-binary"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX binary encode/decode — typed element streams + MBFA compression"
+publish     = false
+
+[dependencies]
+msx-ast = { workspace = true }
+mbfa    = { workspace = true }
