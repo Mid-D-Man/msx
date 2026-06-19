@@ -1,0 +1,12 @@
+# render/msx-render-svg/Cargo.toml
+[package]
+name        = "msx-render-svg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX SVG export — Scene to SVG 1.1 string"
+publish     = false
+
+[dependencies]
+msx-ast = { workspace = true }
