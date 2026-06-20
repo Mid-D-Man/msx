@@ -1,0 +1,13 @@
+# primitives/msx-splat/Cargo.toml
+[package]
+name        = "msx-splat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX Gaussian splat math — f32 per-pixel evaluation and multi-splat compositing, shared by CPU and GPU renderers"
+publish     = false
+
+[dependencies]
+msx-ast = { workspace = true }
+glam    = { workspace = true }
