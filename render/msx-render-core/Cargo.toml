@@ -1,0 +1,12 @@
+# render/msx-render-core/Cargo.toml
+[package]
+name        = "msx-render-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX shared rendering types — Renderer trait, RenderTarget, color/blend-mode math"
+publish     = false
+
+[dependencies]
+msx-ast = { workspace = true }
