@@ -1,0 +1,17 @@
+# render/msx-render-cpu/Cargo.toml
+[package]
+name        = "msx-render-cpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX software rasterizer — tiny-skia for vector paths, per-pixel SDF/splat evaluation, rayon-parallel"
+publish     = false
+
+[dependencies]
+msx-ast         = { workspace = true }
+msx-render-core = { workspace = true }
+msx-sdf         = { workspace = true }
+msx-splat       = { workspace = true }
+tiny-skia       = { workspace = true }
+rayon           = { workspace = true }
