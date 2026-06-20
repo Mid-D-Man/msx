@@ -1,0 +1,12 @@
+# primitives/msx-sdf/Cargo.toml
+[package]
+name        = "msx-sdf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX SDF primitive math — pure signed-distance-field shapes and combinators, shared by CPU and GPU renderers"
+publish     = false
+
+[dependencies]
+glam = { workspace = true }
