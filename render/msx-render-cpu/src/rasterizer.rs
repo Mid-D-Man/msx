@@ -1,17 +1,25 @@
 // render/msx-render-cpu/src/rasterizer.rs
 //! Every SVG-native vector shape, rasterized through `tiny-skia`:
-//! `rect`/`circle`/`ellipse`/`line`/`polyline`/`polygon`/`path`/`group`/`use`.
-//! `Sdf`/`Splat`/`Layer` are accepted by `render_element`'s match (so it
-//! stays exhaustive) but don't draw anything yet — see the crate-level docs
-//! in `lib.rs`.
+//! `rect`/`circle`/`ellipse`/`line`/`polyline`/`polygon`/`path`/`group`/`use`,
+//! plus dispatch into `sdf_raster.rs`/`splat_raster.rs` for `Sdf`/`Splat`.
+//! `Layer` is accepted by the match (keeps it exhaustive) but doesn't draw
+//! anything yet — `composite.rs`, next.
+//!
+//! Threads `msx_ast::Matrix2D` through every recursive call (see the note
+//! at the top of this message for why, vs. `tiny_skia::Transform`) and
+//! converts to `tiny_skia::Transform` only at each `fill_path`/
+//! `stroke_path` call site.
 
 use std::collections::HashMap;
 
-use msx_ast::{path::PathCommand, Color, Def, Element, FillRule, Group, LineCap, LineJoin, Paint, Style, Use};
+use msx_ast::{path::PathCommand, Color, Def, Element, FillRule, Group, LineCap, LineJoin, Matrix2D, Paint, Style, Use};
 use tiny_skia::{
     Color as SkColor, FillRule as SkFillRule, LineCap as SkLineCap, LineJoin as SkLineJoin,
     Paint as SkPaint, Path as SkPath, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
+
+use crate::sdf_raster::rasterize_sdf;
+use crate::splat_raster::rasterize_splat;
 
 // ── Lookups built once per render, threaded through every recursive call ──
 
@@ -60,7 +68,7 @@ impl<'a> ElementIndex<'a> {
 
 // ── Top-level dispatch ──────────────────────────────────────────────────────
 
-pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Transform, defs: &Defs, index: &ElementIndex) {
+pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2D, defs: &Defs, index: &ElementIndex) {
     match element {
         Element::Rect(e) => fill_and_stroke(pixmap, build_rect_path(e), &e.style, e.transform.as_ref(), transform, defs),
         Element::Circle(e) => fill_and_stroke(pixmap, build_circle_path(e), &e.style, e.transform.as_ref(), transform, defs),
@@ -76,14 +84,17 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Transfo
         }
         Element::Group(g) => render_group(pixmap, g, transform, defs, index),
         Element::Use(u) => render_use(pixmap, u, transform, defs, index),
-        Element::Sdf(_) | Element::Splat(_) | Element::Layer(_) => {
-            // sdf_raster.rs / splat_raster.rs / composite.rs — next pass.
+        Element::Sdf(node) => rasterize_sdf(pixmap, node, transform),
+        Element::Splat(s) => rasterize_splat(pixmap, s, transform),
+        Element::Layer(_) => {
+            // composite.rs — next pass.
         }
     }
 }
 
-fn render_group(pixmap: &mut Pixmap, g: &Group, parent_transform: Transform, defs: &Defs, index: &ElementIndex) {
-    let combined = parent_transform.pre_concat(to_tiny_skia_transform(g.transform.as_ref()));
+fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
+    let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
+    let combined = parent.concat(local);
     for child in &g.children {
         render_element(pixmap, child, combined, defs, index);
     }
@@ -93,28 +104,21 @@ fn render_group(pixmap: &mut Pixmap, g: &Group, parent_transform: Transform, def
     // track today. Tracked as a follow-up, not silently dropped.
 }
 
-fn render_use(pixmap: &mut Pixmap, u: &Use, parent_transform: Transform, defs: &Defs, index: &ElementIndex) {
+fn render_use(pixmap: &mut Pixmap, u: &Use, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
     let id = u.href.strip_prefix('#').unwrap_or(&u.href);
     let Some(target) = index.get(id) else {
         return; // broken reference — SVG renders nothing for these too
     };
-    let offset = Transform::from_translate(u.x as f32, u.y as f32);
-    let local = offset.pre_concat(to_tiny_skia_transform(u.transform.as_ref()));
-    render_element(pixmap, target, parent_transform.pre_concat(local), defs, index);
+    let offset = Matrix2D::translate(u.x, u.y);
+    let local = u.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
+    render_element(pixmap, target, parent.concat(offset.concat(local)), defs, index);
 }
 
 // ── Fill + stroke ────────────────────────────────────────────────────────────
 
-fn fill_and_stroke(
-    pixmap: &mut Pixmap,
-    path: Option<SkPath>,
-    style: &Style,
-    local_transform: Option<&msx_ast::Transform>,
-    parent_transform: Transform,
-    defs: &Defs,
-) {
+fn fill_and_stroke(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D, defs: &Defs) {
     let Some(path) = path else { return };
-    let transform = parent_transform.pre_concat(to_tiny_skia_transform(local_transform));
+    let transform = to_tiny_skia_transform(combine(parent, local_transform));
     let opacity = style.opacity.unwrap_or(1.0) as f32;
 
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
@@ -133,7 +137,7 @@ fn fill_and_stroke(
     }
 }
 
-fn stroke_only(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent_transform: Transform) {
+fn stroke_only(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D) {
     let Some(path) = path else { return };
     let Some(stroke_paint) = style.stroke.as_ref().filter(|p| !p.is_none()) else { return };
     let width = style.stroke_width.unwrap_or(1.0) as f32;
@@ -141,12 +145,17 @@ fn stroke_only(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_t
         return;
     }
     let opacity = style.opacity.unwrap_or(1.0) as f32;
-    let transform = parent_transform.pre_concat(to_tiny_skia_transform(local_transform));
-    // `<line>` has no fillable area, so a gradient ref has nothing
-    // meaningful to map onto — flat color only here.
+    let transform = to_tiny_skia_transform(combine(parent, local_transform));
     if let Paint::Color(c) = stroke_paint {
         let paint = flat_paint(*c, opacity);
         pixmap.stroke_path(&path, &paint, &build_stroke(style, width), transform, None);
+    }
+}
+
+fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
+    match local {
+        None => parent,
+        Some(t) => parent.concat(t.to_matrix()),
     }
 }
 
@@ -160,13 +169,11 @@ fn resolve_paint(paint: &Paint, opacity: f32, defs: &Defs) -> Option<SkPaint<'st
             let def = defs.get(id)?;
             // TODO: a real tiny-skia LinearGradient/RadialGradient shader,
             // mapped through objectBoundingBox using the fill path's
-            // bounds. Skipped for now rather than guessed at — the exact
-            // gradient-shader constructor signature is the one part of this
-            // module worth double-checking against whichever tiny-skia
-            // 0.11.x patch is actually pinned, and a silently wrong
-            // signature is worse than this honest placeholder. Every
-            // gradient-filled shape still renders the gradient's average
-            // color rather than nothing.
+            // bounds. Skipped for now — the exact gradient-shader
+            // constructor signature is the one part of this module worth
+            // double-checking against whichever tiny-skia 0.11.x patch is
+            // actually pinned. Every gradient-filled shape still renders
+            // the gradient's average color rather than nothing.
             Some(flat_paint(average_stop_color(def), opacity))
         }
     }
@@ -230,17 +237,8 @@ fn build_stroke(style: &Style, width: f32) -> Stroke {
     stroke
 }
 
-// ── Transform conversion ────────────────────────────────────────────────────
-
-pub(crate) fn to_tiny_skia_transform(t: Option<&msx_ast::Transform>) -> Transform {
-    match t {
-        None => Transform::identity(),
-        Some(t) if t.is_none() => Transform::identity(),
-        Some(t) => {
-            let m = t.to_matrix();
-            Transform::from_row(m.a as f32, m.b as f32, m.c as f32, m.d as f32, m.e as f32, m.f as f32)
-        }
-    }
+fn to_tiny_skia_transform(m: Matrix2D) -> Transform {
+    Transform::from_row(m.a as f32, m.b as f32, m.c as f32, m.d as f32, m.e as f32, m.f as f32)
 }
 
 // ── Path construction ───────────────────────────────────────────────────────
@@ -345,10 +343,6 @@ fn build_msx_path(p: &msx_ast::Path) -> Option<SkPath> {
                 pb.quad_to(c.x as f32, c.y as f32, to.x as f32, to.y as f32);
                 current = (to.x as f32, to.y as f32);
             }
-            // msx-ast's `parse_d` always expands `S`/`T` into explicit
-            // `C`/`Q` at parse time, so these two never actually appear in
-            // a parsed `Path`'s commands — handled here only so the match
-            // stays exhaustive.
             PathCommand::SmoothCubic { c2, to } => {
                 pb.cubic_to(current.0, current.1, c2.x as f32, c2.y as f32, to.x as f32, to.y as f32);
                 current = (to.x as f32, to.y as f32);
@@ -557,4 +551,12 @@ mod tests {
         append_arc(&mut pb, (120.0, 380.0), (130.0, 130.0), 0.0, false, true, (380.0, 380.0));
         assert!(pb.finish().is_some());
     }
-                      }
+
+    #[test]
+    fn combine_with_no_local_transform_returns_parent_unchanged() {
+        let parent = Matrix2D::translate(5.0, 5.0);
+        let combined = combine(parent, None);
+        assert_eq!(combined.e, 5.0);
+        assert_eq!(combined.f, 5.0);
+    }
+                    }
