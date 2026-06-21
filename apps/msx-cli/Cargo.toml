@@ -1,0 +1,23 @@
+# apps/msx-cli/Cargo.toml
+[package]
+name        = "msx-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX command-line tool — render, compile, rasterize, validate, roundtrip, view"
+publish     = false
+
+[[bin]]
+name = "msx"
+path = "src/main.rs"
+
+[dependencies]
+msx-ast         = { workspace = true }
+msx-binary      = { workspace = true }
+msx-parser      = { workspace = true }
+msx-render-core = { workspace = true }
+msx-render-cpu  = { workspace = true }
+msx-render-svg  = { workspace = true }
+clap            = { workspace = true }
+image           = { workspace = true }
