@@ -2,24 +2,24 @@
 //! Software rasterizer: `tiny-skia` for every SVG-native vector shape,
 //! `msx-sdf`/`msx-splat` for the per-pixel math the v0.2 primitives need,
 //! `rayon` for parallelizing the parts that are actually slow (per-pixel
-//! SDF/splat evaluation — `tiny-skia`'s own path fills are already fast and
-//! don't need help).
+//! SDF/splat evaluation — `tiny-skia`'s own path fills are already fast).
 //!
-//! This pass ships `rasterizer.rs` — every SVG-native shape (`rect`,
-//! `circle`, `ellipse`, `line`, `polyline`/`polygon`, `path`, `group`,
-//! `use`). `Sdf`/`Splat`/`Layer` are accepted by the dispatch match (so it
-//! stays exhaustive) but render nothing until `sdf_raster.rs`,
-//! `splat_raster.rs`, `effects.rs`, and `composite.rs` land next.
+//! `Sdf`/`Splat` are fully wired this pass. `Layer` is still accepted by
+//! the dispatch match (keeps it exhaustive) but renders nothing — that's
+//! `effects.rs`/`composite.rs`, next.
 //!
 //! `Text` is a deliberate no-op — no font shaping/rasterization dependency
-//! is wired in (`tiny-skia` doesn't do text at all), and faking it with a
-//! placeholder box would be worse than honestly skipping it.
+//! is wired in (`tiny-skia` doesn't do text at all).
 
+mod geom;
+mod pixel;
 mod rasterizer;
+mod sdf_raster;
+mod splat_raster;
 
 pub use rasterizer::{Defs, ElementIndex};
 
-use msx_ast::Scene;
+use msx_ast::{Matrix2D, Scene};
 use msx_render_core::{RenderTarget, Renderer};
 use tiny_skia::Pixmap;
 
@@ -59,7 +59,7 @@ pub fn render_to_pixmap(scene: &Scene) -> Pixmap {
     let index = ElementIndex::build(&scene.elements);
 
     for element in &scene.elements {
-        rasterizer::render_element(&mut pixmap, element, tiny_skia::Transform::identity(), &defs, &index);
+        rasterizer::render_element(&mut pixmap, element, Matrix2D::identity(), &defs, &index);
     }
 
     pixmap
@@ -87,4 +87,4 @@ fn unpremultiply(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
         let un = |c: u8| ((c as f32 / 255.0 / af).min(1.0) * 255.0).round() as u8;
         [un(r), un(g), un(b), a]
     }
-}
+    }
