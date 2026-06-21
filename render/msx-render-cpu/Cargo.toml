@@ -15,3 +15,4 @@ msx-sdf         = { workspace = true }
 msx-splat       = { workspace = true }
 tiny-skia       = { workspace = true }
 rayon           = { workspace = true }
+glam            = { workspace = true }
