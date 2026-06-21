@@ -1,16 +1,18 @@
 // render/msx-render-cpu/src/lib.rs
 //! Software rasterizer: `tiny-skia` for every SVG-native vector shape,
 //! `msx-sdf`/`msx-splat` for the per-pixel math the v0.2 primitives need,
-//! `rayon` for parallelizing the parts that are actually slow (per-pixel
-//! SDF/splat evaluation — `tiny-skia`'s own path fills are already fast).
+//! `rayon` for parallelizing the parts that are actually slow.
 //!
-//! `Sdf`/`Splat` are fully wired this pass. `Layer` is still accepted by
-//! the dispatch match (keeps it exhaustive) but renders nothing — that's
-//! `effects.rs`/`composite.rs`, next.
+//! `Sdf`, `Splat`, and `Layer` (offscreen buffer + blend mode + opacity +
+//! effects, via `composite.rs`/`effects.rs`) are all wired up now.
 //!
-//! `Text` is a deliberate no-op — no font shaping/rasterization dependency
-//! is wired in (`tiny-skia` doesn't do text at all).
+//! `Text` is still a deliberate no-op — no font shaping/rasterization
+//! dependency is wired in (`tiny-skia` doesn't do text at all). Gradient
+//! *refs* (`fill = "url(#id)"`) render as a flat average-of-stops color —
+//! see the `TODO` in `rasterizer.rs::resolve_paint` for why.
 
+mod composite;
+mod effects;
 mod geom;
 mod pixel;
 mod rasterizer;
@@ -70,7 +72,7 @@ fn copy_into_target(pixmap: &Pixmap, target: &mut RenderTarget) {
     if target.width != w || target.height != h {
         *target = RenderTarget::new(w, h);
     }
-    let data = pixmap.data(); // premultiplied RGBA8, row-major
+    let data = pixmap.data();
     for y in 0..h {
         for x in 0..w {
             let idx = ((y * w + x) * 4) as usize;
@@ -87,4 +89,4 @@ fn unpremultiply(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
         let un = |c: u8| ((c as f32 / 255.0 / af).min(1.0) * 255.0).round() as u8;
         [un(r), un(g), un(b), a]
     }
-    }
+        }
