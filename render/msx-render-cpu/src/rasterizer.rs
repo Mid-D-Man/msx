@@ -1,14 +1,14 @@
 // render/msx-render-cpu/src/rasterizer.rs
 //! Every SVG-native vector shape, rasterized through `tiny-skia`:
 //! `rect`/`circle`/`ellipse`/`line`/`polyline`/`polygon`/`path`/`group`/`use`,
-//! plus dispatch into `sdf_raster.rs`/`splat_raster.rs` for `Sdf`/`Splat`.
-//! `Layer` is accepted by the match (keeps it exhaustive) but doesn't draw
-//! anything yet — `composite.rs`, next.
+//! plus dispatch into `sdf_raster.rs`/`splat_raster.rs`/`composite.rs` for
+//! `Sdf`/`Splat`/`Layer`.
 //!
-//! Threads `msx_ast::Matrix2D` through every recursive call (see the note
-//! at the top of this message for why, vs. `tiny_skia::Transform`) and
-//! converts to `tiny_skia::Transform` only at each `fill_path`/
-//! `stroke_path` call site.
+//! Threads `msx_ast::Matrix2D` through every recursive call (sidesteps
+//! relying on `tiny_skia::Transform`'s exact composition-method semantics,
+//! and is the one thing `sdf_raster.rs`/`splat_raster.rs` need to invert
+//! for their per-pixel local-space mapping) and converts to
+//! `tiny_skia::Transform` only at each `fill_path`/`stroke_path` call site.
 
 use std::collections::HashMap;
 
@@ -18,6 +18,7 @@ use tiny_skia::{
     Paint as SkPaint, Path as SkPath, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
+use crate::composite::render_layer;
 use crate::sdf_raster::rasterize_sdf;
 use crate::splat_raster::rasterize_splat;
 
@@ -86,9 +87,7 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
         Element::Use(u) => render_use(pixmap, u, transform, defs, index),
         Element::Sdf(node) => rasterize_sdf(pixmap, node, transform),
         Element::Splat(s) => rasterize_splat(pixmap, s, transform),
-        Element::Layer(_) => {
-            // composite.rs — next pass.
-        }
+        Element::Layer(l) => render_layer(pixmap, l, transform, defs, index),
     }
 }
 
@@ -559,4 +558,4 @@ mod tests {
         assert_eq!(combined.e, 5.0);
         assert_eq!(combined.f, 5.0);
     }
-                    }
+        }
