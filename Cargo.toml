@@ -1,3 +1,4 @@
+# Cargo.toml (root, updated)
 [workspace]
 resolver = "2"
 members = [
@@ -7,6 +8,7 @@ members = [
     "render/msx-render-core",
     "render/msx-render-svg",
     "render/msx-render-cpu",
+    "render/msx-render-gpu",
     "primitives/msx-sdf",
     "primitives/msx-splat",
     "apps/msx-cli",
@@ -26,6 +28,7 @@ msx-parser      = { path = "core/msx-parser" }
 msx-render-core = { path = "render/msx-render-core" }
 msx-render-svg  = { path = "render/msx-render-svg" }
 msx-render-cpu  = { path = "render/msx-render-cpu" }
+msx-render-gpu  = { path = "render/msx-render-gpu" }
 msx-sdf         = { path = "primitives/msx-sdf" }
 msx-splat       = { path = "primitives/msx-splat" }
 # External siblings
@@ -35,6 +38,14 @@ dixscript = { path = "../dixscript" }
 tiny-skia = "0.11"
 rayon     = "1.8"
 glam      = "0.27"
+# GPU (msx-render-gpu) — see that crate's lib.rs docs for the version-risk
+# note. wgpu ships a breaking release roughly every 3 months by its own
+# stated policy, so whatever patch version actually resolves here is worth
+# diffing against the next time this stops compiling.
+wgpu      = "26"
+lyon      = "1.0"
+bytemuck  = { version = "1.14", features = ["derive"] }
+pollster  = "0.3"
 # CLI
 clap  = { version = "4.5", features = ["derive"] }
 image = "0.25"
