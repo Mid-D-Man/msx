@@ -9,24 +9,27 @@
 //! project's original plan pinned `wgpu = "0.19"` — current is **29.0.3**,
 //! over two years and a full versioning-scheme change later. Every wgpu
 //! signature here was checked against current (~April 2026) docs/tutorials
-//! rather than pulled from training-data memory; `pipeline.rs`'s
+//! rather than pulled from training-data memory; `pipeline.rs`/`sdf.rs`'s
 //! `immediate_size` field is flagged inline as the one spot I'm least sure
 //! about. `lyon`'s tessellation API, by contrast, checked out essentially
-//! unchanged from what I expected — it's a much smaller, more stable
-//! library than wgpu, and that showed.
+//! unchanged from what I expected.
 //!
-//! This pass: `Sdf`/`Splat`/`Layer` are accepted by the dispatch match in
-//! `vector.rs` (keeps it exhaustive) but render nothing — WGSL evaluation
-//! for those is next. `Text` is a deliberate no-op, same reason as every
-//! other MSX renderer (no font backend wired in anywhere yet).
+//! `Vector` shapes and `Sdf` are both wired up now — `Sdf` via a flattened
+//! postorder op list evaluated with an explicit stack in WGSL, since the
+//! shader language has no recursion for the actual recursive `SdfTree`.
+//! `Splat` and `Layer` are still accepted by the dispatch match in
+//! `vector.rs` (keeps it exhaustive) but render nothing. `Text` is a
+//! deliberate no-op everywhere in this project — no font backend wired in.
 
 mod context;
 mod pipeline;
+mod sdf;
 mod target;
 mod vector;
 
 pub use context::GpuContext;
 pub use pipeline::VectorPipeline;
+pub use sdf::SdfPipeline;
 pub use target::OffscreenTarget;
 pub use vector::{tessellate_scene, Vertex, VectorGeometry};
 
@@ -36,13 +39,15 @@ use msx_render_core::{RenderTarget, Renderer};
 pub struct GpuRenderer {
     context: GpuContext,
     vector_pipeline: VectorPipeline,
+    sdf_pipeline: SdfPipeline,
 }
 
 impl GpuRenderer {
     pub fn new() -> Result<Self, String> {
         let context = GpuContext::new()?;
         let vector_pipeline = VectorPipeline::new(&context.device, wgpu::TextureFormat::Rgba8Unorm);
-        Ok(GpuRenderer { context, vector_pipeline })
+        let sdf_pipeline = SdfPipeline::new(&context.device, wgpu::TextureFormat::Rgba8Unorm);
+        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline })
     }
 }
 
@@ -66,6 +71,7 @@ impl Renderer for GpuRenderer {
             label: Some("msx render encoder"),
         });
         self.vector_pipeline.draw(&self.context.device, &mut encoder, &offscreen.view, &geometry, clear_color);
+        self.sdf_pipeline.draw_all(&self.context.device, &mut encoder, &offscreen.view, scene);
         self.context.queue.submit(std::iter::once(encoder.finish()));
 
         *target = offscreen.read_back(&self.context.device, &self.context.queue);
@@ -75,12 +81,10 @@ impl Renderer for GpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Canvas, Color, Element, Paint, Rect, Style};
+    use msx_ast::{Canvas, Color, Element, Paint, Rect, SdfNode, SdfTree, Style};
 
     #[test]
     fn renders_a_filled_rect_if_a_gpu_adapter_is_available() {
-        // CI/sandboxed environments often have no GPU passthrough at all —
-        // skip rather than fail when that's the case.
         let Ok(renderer) = GpuRenderer::new() else {
             eprintln!("skipping: no GPU adapter available in this environment");
             return;
@@ -103,4 +107,26 @@ mod tests {
 
         assert_eq!(target.get_pixel(10, 10), [10, 20, 30, 255]);
     }
+
+    #[test]
+    fn renders_an_sdf_circle_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let mut scene = Scene::new(Canvas::new(40.0, 40.0, Color::BLACK));
+        scene.elements.push(Element::Sdf(SdfNode::new(
+            SdfTree::Circle { cx: 20.0, cy: 20.0, r: 15.0 },
+            Paint::Color(Color::rgb(220, 80, 40)),
+        )));
+
+        let mut target = RenderTarget::new(40, 40);
+        renderer.render(&scene, &mut target);
+
+        // Center of the circle should be the fill color; a far corner,
+        // well outside the circle, should still be the background.
+        assert_eq!(target.get_pixel(20, 20), [220, 80, 40, 255]);
+        assert_eq!(target.get_pixel(1, 1), [0, 0, 0, 255]);
     }
+        }
