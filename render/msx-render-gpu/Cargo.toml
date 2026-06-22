@@ -1,0 +1,20 @@
+# render/msx-render-gpu/Cargo.toml
+[package]
+name        = "msx-render-gpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX GPU renderer — wgpu-backed, offscreen (no window/Surface — that's apps/msx-viewer's job)"
+publish     = false
+
+[dependencies]
+msx-ast         = { workspace = true }
+msx-render-core = { workspace = true }
+msx-sdf         = { workspace = true }
+msx-splat       = { workspace = true }
+wgpu            = { workspace = true }
+lyon            = { workspace = true }
+glam            = { workspace = true }
+bytemuck        = { workspace = true }
+pollster        = { workspace = true }
