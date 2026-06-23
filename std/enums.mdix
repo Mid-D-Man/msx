@@ -1,0 +1,90 @@
+// std/enums.msx — Standard MSX enum constants
+//
+// IMPORTANT — cross-file import status:
+//   QuickFunc imports (`Namespace.func(...)`) are confirmed working —
+//   dixscript's loader explicitly checks for imported-namespace functions
+//   as a gate for running value resolution (see dixscript's
+//   Runtime/loader.rs). Cross-file @ENUMS imports use a different grammar
+//   production (`NamespaceName.EnumName.EnumValue`, vs the local
+//   `EnumName.EnumValue` two-part form) and have NOT been independently
+//   verified to resolve the same way. If `BlendMode.Multiply` doesn't
+//   resolve correctly when this file is @IMPORTS'd, copy the relevant
+//   @ENUMS block directly into your .msx file as a known-working
+//   fallback — msx-parser also accepts plain lowercase strings everywhere
+//   an enum is accepted (e.g. blend_mode = "multiply"), so nothing breaks
+//   either way.
+//
+// Values below are wired into msx-parser via DixValue::Enum.value reads —
+// they MUST match the discriminants in msx-ast's Rust enums exactly.
+// BlendMode, LineCap, LineJoin, FillRule, TextAnchor are all consumed
+// today (see core/msx-parser/src/style.rs, layer.rs). GradientType,
+// CompositeOp, SdfOp are included for documentation/future use only — no
+// parser code reads them yet; gradient and SDF node types are currently
+// dispatched purely on their literal `type = "..."` string tag.
+
+@CONFIG( version -> "1.0.0" )
+
+@ENUMS(
+  BlendMode {
+    Normal = 0
+    Multiply = 1
+    Screen = 2
+    Overlay = 3
+    Add = 4
+    SoftLight = 5
+    HardLight = 6
+    Difference = 7
+    Exclusion = 8
+    Darken = 9
+    Lighten = 10
+    Subtract = 11
+    Divide = 12
+  }
+
+  LineCap {
+    Butt = 0
+    Round = 1
+    Square = 2
+  }
+
+  LineJoin {
+    Miter = 0
+    Round = 1
+    Bevel = 2
+  }
+
+  FillRule {
+    NonZero = 0
+    EvenOdd = 1
+  }
+
+  TextAnchor {
+    Start = 0
+    Middle = 1
+    End = 2
+  }
+
+  // ── Documentation / future use — not yet read by any parser code ──────────
+
+  GradientType {
+    Linear = 0
+    Radial = 1
+    Conic = 2
+  }
+
+  CompositeOp {
+    Over = 0
+    Under = 1
+    Atop = 2
+    Xor = 3
+  }
+
+  SdfOp {
+    Union = 0
+    Subtract = 1
+    Intersect = 2
+    SmoothUnion = 3
+    SmoothSubtract = 4
+    SmoothIntersect = 5
+  }
+)
