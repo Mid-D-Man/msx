@@ -1,0 +1,78 @@
+// std/shapes.msx — Reusable shape/component QuickFuncs
+//
+// Usage: @IMPORTS( Shapes from "std/shapes.msx" )
+// then:  elements:: Shapes.badge(20, 30, "primary", "#007bff")
+//
+// Every function returns a plain DixScript object matching msx-ast's
+// Element shape (see docs/format-spec.md) — nothing here is special MSX
+// magic, just QuickFuncs building the same object literals you'd
+// otherwise write by hand. Patterns below are lifted directly from this
+// project's own examples/parametric.msx and benches/compare.rs, not new
+// syntax — generalized into a shared, importable form.
+
+@CONFIG( version -> "1.0.0" )
+
+@QUICKFUNCS(
+  // Pill-shaped label — rounded rect + centered text in one call.
+  ~badge<object>(x, y, label, color) {
+    return {
+      type = "group"
+      elements = [
+        { type = "rect", x = x, y = y, width = 90, height = 30, rx = 15,
+          style = { fill = color, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+        { type = "text", x = x + 45, y = y + 20, content = label,
+          style = { fill = "#ffffff", font_size = 12, text_anchor = "middle",
+                    font_weight = "bold", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ]
+    }
+  }
+
+  // Card surface — background rect + a thin top accent bar.
+  ~card<object>(x, y, w, h, accent) {
+    return {
+      type = "group"
+      elements = [
+        { type = "rect", x = x, y = y, width = w, height = h, rx = 8,
+          style = { fill = "#ffffff", stroke = "#e0e0e0", stroke_width = 1, opacity = 1.0 } }
+        { type = "rect", x = x, y = y, width = w, height = 4, rx = 2,
+          style = { fill = accent, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ]
+    }
+  }
+
+  // Checkmark glyph, parametric size and color.
+  ~icon_check<object>(cx, cy, size, color) {
+    let half = size * 0.5;
+    return {
+      type = "path"
+      d = $"M {cx - half * 0.7} {cy} L {cx - half * 0.1} {cy + half * 0.7} L {cx + half * 0.8} {cy - half * 0.6}"
+      style = { fill = "none", stroke = color, stroke_width = size * 0.12,
+                stroke_linecap = "round", stroke_linejoin = "round", opacity = 1.0 }
+    }
+  }
+
+  // Filled dot — the parametric-circle pattern used throughout the
+  // benchmark corpus and synthetic test generators.
+  ~dot<object>(cx, cy, r, color) {
+    return {
+      type = "circle"
+      cx = cx  cy = cy  r = r
+      style = { fill = color, stroke = "none", stroke_width = 0, opacity = 0.9 }
+    }
+  }
+
+  // Labeled divider — a stroke with a small centered caption above it,
+  // useful for diagrams and annotated exports.
+  ~divider<object>(x1, y1, x2, y2, label, color) {
+    return {
+      type = "group"
+      elements = [
+        { type = "line", x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+          style = { fill = "none", stroke = color, stroke_width = 1.5, opacity = 0.8 } }
+        { type = "text", x = (x1 + x2) * 0.5, y = y1 - 6, content = label,
+          style = { fill = color, font_size = 10, text_anchor = "middle",
+                    stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ]
+    }
+  }
+)
