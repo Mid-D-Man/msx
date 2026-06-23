@@ -1,0 +1,22 @@
+# apps/msx-viewer/Cargo.toml
+[package]
+name        = "msx-viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX native viewer — open an .msx file and see it, CPU-rendered (msx-render-cpu) for now"
+publish     = false
+
+[[bin]]
+name = "msx-viewer"
+path = "src/main.rs"
+
+[dependencies]
+msx-ast         = { workspace = true }
+msx-binary      = { workspace = true }
+msx-parser      = { workspace = true }
+msx-render-core = { workspace = true }
+msx-render-cpu  = { workspace = true }
+winit  = "0.30"
+pixels = "0.15"
