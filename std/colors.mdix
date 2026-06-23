@@ -1,0 +1,40 @@
+// std/colors.msx — Standard color palette
+//
+// Usage: @IMPORTS( Colors from "std/colors.msx" )
+// then:  fill = Colors.crimson()
+//
+// Every function returns a plain hex string — msx-parser reads colors via
+// Color::parse(), which accepts "#rrggbb" directly, so these compose with
+// every style/gradient-stop/effect color field without any special
+// handling on the parser side.
+
+@CONFIG( version -> "1.0.0" )
+
+@QUICKFUNCS(
+  // ── Neutrals ───────────────────────────────────────────────────────────
+  ~white<string>()     { return "#ffffff" }
+  ~black<string>()     { return "#000000" }
+  ~slate_50<string>()  { return "#f8fafc" }
+  ~slate_200<string>() { return "#e2e8f0" }
+  ~slate_400<string>() { return "#94a3b8" }
+  ~slate_600<string>() { return "#475569" }
+  ~slate_800<string>() { return "#1e293b" }
+  ~slate_950<string>() { return "#0f172a" }
+
+  // ── Accents — matching the palette already used throughout this
+  //    project's example .msx files and the CI report styling ───────────
+  ~crimson<string>()   { return "#e94560" }
+  ~violet<string>()    { return "#533483" }
+  ~navy<string>()      { return "#0f3460" }
+  ~azure<string>()     { return "#4a9eff" }
+  ~emerald<string>()   { return "#22c55e" }
+  ~amber<string>()     { return "#f5a623" }
+  ~lavender<string>()  { return "#a78bfa" }
+
+  // ── Semantic / UI ──────────────────────────────────────────────────────
+  ~success<string>()   { return "#28a745" }
+  ~warning<string>()   { return "#ffc107" }
+  ~danger<string>()    { return "#dc3545" }
+  ~info<string>()      { return "#17a2b8" }
+  ~primary<string>()   { return "#007bff" }
+)
