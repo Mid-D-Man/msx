@@ -2,26 +2,17 @@
 //! `SdfTree` evaluation on the GPU. WGSL has no recursion, so the tree is
 //! flattened (postorder, on the CPU) into a linear `SdfOp` array uploaded
 //! as a storage buffer, and the fragment shader evaluates it with an
-//! explicit fixed-size array acting as a stack — push primitive distances,
-//! pop operands for n-ary/binary ops, push results — instead of recursive
-//! calls. One draw call per `Sdf` element: a screen-space quad sized to a
-//! conservative bbox (same estimation logic as
-//! `msx-render-cpu::sdf_raster::sdf_bounds`, duplicated here rather than
-//! shared — same pattern as every other small geometry helper across the
-//! renderer crates), with the inverse transform passed in as a uniform so
-//! the fragment shader can map each pixel back to the tree's local space.
+//! explicit fixed-size array acting as a stack.
 //!
-//! Ordering note: every `Sdf` element draws *after* all vector geometry,
-//! regardless of where it sits in document order — proper interleaving
-//! would need either a depth buffer with per-element depth or genuinely
-//! per-element pipeline switching in tree order, neither of which exists
-//! yet. Flagged, not hidden.
+//! `collect_sdf_nodes` deliberately does NOT recurse into `Element::Layer`
+//! children — those get rendered by `layer.rs`'s own isolated pass.
+//! Recursing here too would draw layer-internal SDF shapes twice: once
+//! flattened into the main pass (ignoring the layer's opacity entirely),
+//! and once correctly inside the layer's buffer.
 
 use wgpu::util::DeviceExt;
 
 use msx_ast::{Color, Element, Matrix2D, Paint, SdfNode, SdfTree, Scene};
-
-// ── Flattened op representation ─────────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -53,8 +44,12 @@ fn op(kind: u32, count: u32, p: [f32; 6]) -> SdfOp {
     SdfOp { kind, count, param0: p[0], param1: p[1], param2: p[2], param3: p[3], param4: p[4], param5: p[5] }
 }
 
-/// Postorder flatten — see module docs for why children of `Union`/
-/// `SmoothUnion` are pushed in *reverse*.
+/// Postorder flatten. Children of `Union`/`SmoothUnion` are pushed in
+/// *reverse* so that LIFO popping in the shader recovers the original
+/// forward fold order — `SmoothUnion`'s n-ary fold isn't associative for
+/// 3+ children, only pairwise-commutative, so popping a stack naively
+/// would silently fold in the wrong sequence vs. the CPU reference
+/// (`msx-sdf`'s fold walks children left-to-right).
 pub fn flatten_tree(tree: &SdfTree, ops: &mut Vec<SdfOp>) {
     match tree {
         SdfTree::Circle { cx, cy, r } => {
@@ -111,17 +106,15 @@ pub fn flatten_tree(tree: &SdfTree, ops: &mut Vec<SdfOp>) {
     }
 }
 
-// ── Per-draw uniform / vertex layout ────────────────────────────────────────
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SdfParams {
-    pub inv_row0: [f32; 4], // a, c, e, unused
-    pub inv_row1: [f32; 4], // b, d, f, unused
+    pub inv_row0: [f32; 4],
+    pub inv_row1: [f32; 4],
     pub fill_color: [f32; 4],
     pub stroke_color: [f32; 4],
     pub stroke_width: f32,
-    pub has_stroke: f32, // 0.0 / 1.0 — avoids mixing bool semantics into a uniform struct
+    pub has_stroke: f32,
     pub op_count: u32,
     pub _pad: f32,
 }
@@ -132,8 +125,6 @@ pub struct SdfVertex {
     pub clip_position: [f32; 2],
     pub screen_position: [f32; 2],
 }
-
-// ── Pipeline ─────────────────────────────────────────────────────────────────
 
 pub struct SdfPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -217,13 +208,16 @@ impl SdfPipeline {
         SdfPipeline { pipeline, bind_group_layout }
     }
 
-    /// Draws every `Sdf` element in the scene over whatever's already in
-    /// `view` — one draw call per shape.
     pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
-        let mut nodes = Vec::new();
-        collect_sdf_nodes(&scene.elements, Matrix2D::identity(), &mut nodes);
+        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas);
+    }
 
+    /// Entry point for `layer.rs`: draw just the `Sdf` shapes within one
+    /// layer's children, scoped to its own buffer.
+    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) {
+        let mut nodes = Vec::new();
+        collect_sdf_nodes(elements, base_transform, &mut nodes);
         for (node, transform) in &nodes {
             self.draw_one(device, encoder, view, node, *transform, canvas);
         }
@@ -291,8 +285,6 @@ impl SdfPipeline {
             ],
         });
 
-        // `Load`, not `Clear` — this pass must preserve whatever the
-        // vector pass (or an earlier SDF draw) already painted.
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("msx sdf pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -310,6 +302,7 @@ impl SdfPipeline {
     }
 }
 
+/// Does NOT recurse into `Element::Layer` — see module docs.
 fn collect_sdf_nodes<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut Vec<(&'a SdfNode, Matrix2D)>) {
     for el in elements {
         match el {
@@ -317,10 +310,6 @@ fn collect_sdf_nodes<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut
             Element::Group(g) => {
                 let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
                 collect_sdf_nodes(&g.children, transform.concat(local), out);
-            }
-            Element::Layer(l) => {
-                let local = l.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-                collect_sdf_nodes(&l.children, transform.concat(local), out);
             }
             _ => {}
         }
@@ -331,7 +320,6 @@ fn paint_color(paint: &Paint) -> Color {
     match paint {
         Paint::Color(c) => *c,
         Paint::CurrentColor => Color::BLACK,
-        // None/gradient SDF fills: same gap msx-render-cpu has, same reason.
         Paint::None | Paint::Ref(_) => Color::rgba(0, 0, 0, 0),
     }
 }
@@ -351,11 +339,6 @@ fn quad_vertices(bounds: (f32, f32, f32, f32), canvas: (f32, f32)) -> ([SdfVerte
     ];
     (verts, [0, 1, 2, 0, 2, 3])
 }
-
-// ── Matrix helpers + bbox estimation ────────────────────────────────────────
-// Same math as msx-render-cpu's geom.rs/sdf_raster.rs — duplicated rather
-// than shared, consistent with every renderer crate keeping its own small
-// geometry helpers instead of depending on a sibling renderer crate.
 
 fn apply_matrix(m: Matrix2D, p: (f32, f32)) -> (f32, f32) {
     (m.a as f32 * p.0 + m.c as f32 * p.1 + m.e as f32, m.b as f32 * p.0 + m.d as f32 * p.1 + m.f as f32)
@@ -437,6 +420,7 @@ fn pad_bounds(b: (f32, f32, f32, f32), amount: f32) -> (f32, f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use msx_ast::{Element as MsxElement, Group};
 
     #[test]
     fn flatten_circle_produces_one_op() {
@@ -452,8 +436,8 @@ mod tests {
         let tree = SdfTree::Circle { cx: 0.0, cy: 0.0, r: 50.0 }.subtract(SdfTree::Circle { cx: 0.0, cy: 0.0, r: 30.0 });
         flatten_tree(&tree, &mut ops);
         assert_eq!(ops.len(), 3);
-        assert_eq!(ops[0].param2, 50.0); // a (r=50) pushed first
-        assert_eq!(ops[1].param2, 30.0); // b (r=30) pushed second
+        assert_eq!(ops[0].param2, 50.0);
+        assert_eq!(ops[1].param2, 30.0);
         assert_eq!(ops[2].kind, OP_SUBTRACT);
     }
 
@@ -469,12 +453,32 @@ mod tests {
             k: 0.5,
         };
         flatten_tree(&tree, &mut ops);
-        // Children pushed in reverse (30, 20, 10) so LIFO popping in the
-        // shader recovers forward fold order (10, 20, 30) — see module docs.
         assert_eq!(ops[0].param2, 30.0);
         assert_eq!(ops[1].param2, 20.0);
         assert_eq!(ops[2].param2, 10.0);
         assert_eq!(ops[3].kind, OP_SMOOTH_UNION);
         assert_eq!(ops[3].count, 3);
     }
-              }
+
+    #[test]
+    fn collect_sdf_nodes_skips_layer_children() {
+        let inner = SdfNode::new(SdfTree::Circle { cx: 0.0, cy: 0.0, r: 5.0 }, Paint::Color(Color::BLACK));
+        let layer = msx_ast::Layer::new(vec![MsxElement::Sdf(inner)]);
+        let elements = vec![MsxElement::Layer(layer)];
+
+        let mut out = Vec::new();
+        collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
+        assert!(out.is_empty(), "SDF nodes inside a Layer must not be collected by the main pass");
+    }
+
+    #[test]
+    fn collect_sdf_nodes_still_recurses_through_groups() {
+        let inner = SdfNode::new(SdfTree::Circle { cx: 0.0, cy: 0.0, r: 5.0 }, Paint::Color(Color::BLACK));
+        let group = Group::new(vec![MsxElement::Sdf(inner)]);
+        let elements = vec![MsxElement::Group(group)];
+
+        let mut out = Vec::new();
+        collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
+        assert_eq!(out.len(), 1);
+    }
+                        }
