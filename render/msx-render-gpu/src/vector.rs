@@ -1,16 +1,12 @@
 // render/msx-render-gpu/src/vector.rs
 //! Vector shape tessellation: every SVG-native element becomes triangles
-//! via `lyon`, with color baked directly into each vertex (no per-draw
-//! uniform needed yet) and screen position pre-transformed into WebGPU
-//! clip space on the CPU side — the simplest pipeline that proves geometry
-//! actually reaches the GPU, before anything fancier (per-shape uniforms,
-//! instancing) gets layered on.
+//! via `lyon`, with color baked directly into each vertex and screen
+//! position pre-transformed into WebGPU clip space on the CPU side.
 //!
-//! Fill and stroke triangles for every shape in the scene land in one
-//! shared vertex/index buffer, in document order. With no depth buffer
-//! configured, alpha blending happens in draw order — "later shapes paint
-//! over earlier ones," the same compositing rule `msx-render-svg`/
-//! `msx-render-cpu` already use.
+//! `tessellate_elements` is the actual workhorse now — `tessellate_scene`
+//! is a thin wrapper over it. `layer.rs` calls `tessellate_elements`
+//! directly (scoped to just one layer's children) to render that layer
+//! into its own isolated buffer.
 
 use std::collections::HashMap;
 
@@ -36,23 +32,23 @@ pub struct VectorGeometry {
     pub indices: Vec<u32>,
 }
 
-struct Defs<'a> {
+pub(crate) struct Defs<'a> {
     by_id: HashMap<&'a str, &'a Def>,
 }
 impl<'a> Defs<'a> {
-    fn build(defs: &'a [Def]) -> Self {
+    pub(crate) fn build(defs: &'a [Def]) -> Self {
         Defs { by_id: defs.iter().map(|d| (d.id(), d)).collect() }
     }
-    fn get(&self, id: &str) -> Option<&'a Def> {
+    pub(crate) fn get(&self, id: &str) -> Option<&'a Def> {
         self.by_id.get(id).copied()
     }
 }
 
-struct ElementIndex<'a> {
+pub(crate) struct ElementIndex<'a> {
     by_id: HashMap<&'a str, &'a Element>,
 }
 impl<'a> ElementIndex<'a> {
-    fn build(elements: &'a [Element]) -> Self {
+    pub(crate) fn build(elements: &'a [Element]) -> Self {
         let mut by_id = HashMap::new();
         Self::index_into(elements, &mut by_id);
         ElementIndex { by_id }
@@ -69,21 +65,33 @@ impl<'a> ElementIndex<'a> {
             }
         }
     }
-    fn get(&self, id: &str) -> Option<&'a Element> {
+    pub(crate) fn get(&self, id: &str) -> Option<&'a Element> {
         self.by_id.get(id).copied()
     }
 }
 
 pub fn tessellate_scene(scene: &Scene) -> VectorGeometry {
-    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let defs = Defs::build(&scene.defs);
     let index = ElementIndex::build(&scene.elements);
     let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
+    tessellate_elements_with(&scene.elements, Matrix2D::identity(), canvas, &defs, &index)
+}
 
-    for element in &scene.elements {
-        tessellate_element(element, Matrix2D::identity(), canvas, &defs, &index, &mut buffers);
+/// Entry point for `layer.rs`: tessellate just one layer's children,
+/// with their own local `Defs`/`ElementIndex` (cross-boundary `use`/
+/// gradient-ref resolution into the outer scene isn't supported — see
+/// `layer.rs`'s module doc).
+pub fn tessellate_elements(elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) -> VectorGeometry {
+    let defs = Defs::build(&[]);
+    let index = ElementIndex::build(elements);
+    tessellate_elements_with(elements, base_transform, canvas, &defs, &index)
+}
+
+fn tessellate_elements_with(elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, index: &ElementIndex) -> VectorGeometry {
+    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
+    for element in elements {
+        tessellate_element(element, base_transform, canvas, defs, index, &mut buffers);
     }
-
     VectorGeometry { vertices: buffers.vertices, indices: buffers.indices }
 }
 
@@ -128,8 +136,12 @@ fn tessellate_element(
             }
         }
         Element::Use(u) => tessellate_use(u, transform, canvas, defs, index, buffers),
-        Element::Sdf(_) | Element::Splat(_) | Element::Layer(_) => {
-            // SDF/splat fragment shaders and layer compositing — next pass.
+        Element::Sdf(_) | Element::Splat(_) => {
+            // sdf.rs / splat.rs handle these in their own passes.
+        }
+        Element::Layer(_) => {
+            // layer.rs handles these via its own isolated render +
+            // composite — never flattened into the shared vector pass.
         }
     }
 }
@@ -176,7 +188,7 @@ fn stroke_only_line(l: &Line, transform: Matrix2D, canvas: (f32, f32), buffers: 
     if width <= 0.0 {
         return;
     }
-    let Paint::Color(c) = stroke else { return }; // gradient stroke on a bare line: same simplification as elsewhere
+    let Paint::Color(c) = stroke else { return };
     let opacity = l.style.opacity.unwrap_or(1.0);
     let a = (c.a as f64 / 255.0) * opacity.clamp(0.0, 1.0);
     let rgba = [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, a as f32];
@@ -222,8 +234,6 @@ fn apply_matrix(m: Matrix2D, p: (f32, f32)) -> (f32, f32) {
     (m.a as f32 * p.0 + m.c as f32 * p.1 + m.e as f32, m.b as f32 * p.0 + m.d as f32 * p.1 + m.f as f32)
 }
 
-/// Canvas pixel space (origin top-left, y-down) → WebGPU clip space
-/// (origin center, y-up, [-1, 1] on both axes).
 fn to_clip_space(x: f32, y: f32, width: f32, height: f32) -> [f32; 2] {
     [(x / width) * 2.0 - 1.0, 1.0 - (y / height) * 2.0]
 }
@@ -242,10 +252,6 @@ fn paint_to_rgba(paint: &Paint, opacity: f64, defs: &Defs) -> Option<[f32; 4]> {
     Some([color.r as f32 / 255.0, color.g as f32 / 255.0, color.b as f32 / 255.0, a as f32])
 }
 
-/// Same flat-color gradient fallback `msx-render-cpu` uses, for the same
-/// reason — see that crate's `rasterizer.rs::resolve_paint` TODO. Each
-/// renderer crate keeps its own tiny copy rather than sharing one, by
-/// design — they don't depend on each other, only on `msx-render-core`.
 fn average_stop_color(def: &Def) -> Color {
     let stops: &[msx_ast::Stop] = match def {
         Def::LinearGradient(g) => &g.stops,
@@ -372,9 +378,6 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
                 b.quadratic_bezier_to(point(c.x as f32, c.y as f32), point(to.x as f32, to.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
-            // Same note as msx-render-cpu: parse_d always expands S/T into
-            // explicit C/Q, so these never appear in a parsed Path — kept
-            // only so the match stays exhaustive.
             PathCommand::SmoothCubic { c2, to } => {
                 ensure_open!();
                 b.cubic_bezier_to(point(current.0, current.1), point(c2.x as f32, c2.y as f32), point(to.x as f32, to.y as f32));
@@ -462,9 +465,7 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
 
 /// Same SVG-arc-to-cubic-bezier construction as
 /// `msx-render-cpu::rasterizer::append_arc`, targeting a `lyon`
-/// `path::Builder` instead of `tiny_skia::PathBuilder` — see that
-/// function's doc comment for the full derivation (SVG 1.1 spec Appendix
-/// F.6).
+/// `path::Builder` — see that function's doc comment for the derivation.
 fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_rotation_deg: f32, large_arc: bool, sweep: bool, to: (f32, f32)) {
     let (x1, y1) = from;
     let (x2, y2) = to;
@@ -549,4 +550,4 @@ fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_ro
         b.cubic_bezier_to(point(c1r.0, c1r.1), point(c2r.0, c2r.1), point(p2r.0, p2r.1));
         theta = theta_next;
     }
-}
+                }
