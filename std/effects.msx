@@ -1,0 +1,48 @@
+// std/effects.msx — Common effect presets
+//
+// Usage: @IMPORTS( Effects from "std/effects.msx" )
+// then:  effects = [ Effects.soft_shadow() ]
+//
+// Every function returns a plain effect object matching exactly what
+// core/msx-parser/src/layer.rs::parse_effect expects (type tag + that
+// effect's specific fields) — since this file and that parser were
+// written together, the shapes are guaranteed to match regardless of
+// whether @IMPORTS resolution works the way std/enums.msx's note
+// describes. Worst case, copy a preset's body inline into your own
+// @QUICKFUNCS section — the object it returns is correct either way.
+
+@CONFIG( version -> "1.0.0" )
+
+@QUICKFUNCS(
+  ~soft_blur<object>() {
+    return { type = "blur", radius = 4.0 }
+  }
+
+  ~heavy_blur<object>() {
+    return { type = "blur", radius = 14.0 }
+  }
+
+  ~soft_shadow<object>() {
+    return { type = "drop_shadow", offset_x = 2.0, offset_y = 4.0,
+             blur_radius = 6.0, color = "#000000", opacity = 0.35 }
+  }
+
+  ~long_shadow<object>() {
+    return { type = "drop_shadow", offset_x = 0.0, offset_y = 12.0,
+             blur_radius = 18.0, color = "#000000", opacity = 0.25 }
+  }
+
+  ~pressed_inset<object>() {
+    return { type = "inner_shadow", offset_x = 0.0, offset_y = 2.0,
+             blur_radius = 3.0, color = "#000000", opacity = 0.4 }
+  }
+
+  ~neon_glow<object>(color) {
+    return { type = "outer_glow", color = color, blur_radius = 10.0,
+             spread = 2.0, opacity = 0.8 }
+  }
+
+  ~highlight_rim<object>(color) {
+    return { type = "inner_glow", color = color, blur_radius = 6.0, opacity = 0.6 }
+  }
+)
