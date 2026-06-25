@@ -75,7 +75,7 @@ An `.msx` file is a valid DixScript file with a vector-graphics schema.
         { type = "rect", x = x, y = y, width = 90, height = 30, rx = 15,
           style = { fill = color, stroke = "none", stroke_width = 0, opacity = 1.0 } }
         { type = "text", x = x + 45, y = y + 20, content = label,
-          style = { fill = "#fff", font_size = 12, text_anchor = "middle",
+          style = { fill = #fff, font_size = 12, text_anchor = "middle",
                     stroke = "none", stroke_width = 0, opacity = 1.0 } }
       ]
     }
@@ -84,15 +84,15 @@ An `.msx` file is a valid DixScript file with a vector-graphics schema.
 
 @DATA(
   // Canvas definition
-  scene: { width = 600, height = 200, background = "#f0f0f0" }
+  scene: { width = 600, height = 200, background = #f0f0f0 }
 
   // Every element is a plain DixScript object or a QuickFunc call
   elements::
-    badge(40,  80, "primary", "#007bff")
-    badge(160, 80, "success", "#28a745")
-    badge(280, 80, "danger",  "#dc3545")
+    badge(40,  80, "primary", #007bff)
+    badge(160, 80, "success", #28a745)
+    badge(280, 80, "danger",  #dc3545)
     { type = "circle", cx = 450, cy = 100, r = 60,
-      style = s("#533483", "#7d3c98", 3) }
+      style = s(#533483, #7d3c98, 3) }
 )
 ```
 
