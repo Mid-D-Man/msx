@@ -18,5 +18,5 @@ msx-binary      = { workspace = true }
 msx-parser      = { workspace = true }
 msx-render-core = { workspace = true }
 msx-render-cpu  = { workspace = true }
-winit  = "0.30"
-pixels = "0.15"
+winit  = { workspace = true }
+pixels = { workspace = true }
