@@ -14,3 +14,21 @@ pub fn dropped_file(event: &winit::event::WindowEvent) -> Option<PathBuf> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_file_extracts_the_path() {
+        let path = PathBuf::from("/tmp/example.msx");
+        let event = winit::event::WindowEvent::DroppedFile(path.clone());
+        assert_eq!(dropped_file(&event), Some(path));
+    }
+
+    #[test]
+    fn dropped_file_ignores_other_events() {
+        let event = winit::event::WindowEvent::CloseRequested;
+        assert_eq!(dropped_file(&event), None);
+    }
+            }
