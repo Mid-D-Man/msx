@@ -105,13 +105,23 @@ r#"@CONFIG( version -> "1.0.0" )
 }
 
 // ── SVG string builders (pure baseline — no MSX) ─────────────────────────────
+//
+// BUGFIX: these two header templates and the per-badge template embed a
+// literal `"#hexcolor` (e.g. `fill="#ffffff"`) inside what was a *single*-hash
+// raw string. `"#` is exactly the close delimiter for `r#"..."#`, so the
+// string was terminating mid-template and the file didn't compile — this
+// never surfaced because the CI bench step already has `|| true` on it.
+// Bumped these three to double-hash `r##"..."##` so the embedded `"#` is no
+// longer a closer. The other two raw strings below (lines using `{}`
+// placeholders for color, no literal hex) never had this problem and are
+// untouched.
 
 fn svg_circles(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
     let mut s = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
 <rect width="1000" height="1000" fill="#ffffff"/>
-"#
+"##
     );
     for i in 0..n {
         let x = (i % 20) * 50 + 25;
@@ -134,15 +144,15 @@ fn svg_badges() -> String {
         (460, "info",    "#17a2b8"),    (570, "dark",    "#343a40"),
     ];
     let mut s = String::from(
-r#"<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200">
+r##"<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200">
 <rect width="700" height="200" fill="#f4f5f7"/>
-"#
+"##
     );
     for (x, label, color) in &badges {
         s.push_str(&format!(
-            r#"<g><rect x="{}" y="80" width="90" height="30" rx="15" fill="{}" stroke="none" stroke-width="0" opacity="1"/>
+            r##"<g><rect x="{}" y="80" width="90" height="30" rx="15" fill="{}" stroke="none" stroke-width="0" opacity="1"/>
 <text x="{}" y="100" fill="#ffffff" font-size="12" text-anchor="middle" font-weight="bold">{}</text></g>
-"#, x, color, x + 45, label
+"##, x, color, x + 45, label
         ));
     }
     s.push_str("</svg>");
