@@ -1,5 +1,5 @@
-# msx/.github/workflows/pages.yml
-name: MSX — Test, Bench, Pages
+# .github/workflows/pages.yml  (replaces .github/workflows/buid-deploy.yml — delete that file, typo'd name and all)
+name: MSX — Bench, Report, Pages
 
 on:
   push:
@@ -44,8 +44,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -56,31 +54,50 @@ jobs:
             target
             ../mbfa/target
             ../DixScript-Rust/target
-          key: msx-pages-${{ hashFiles('Cargo.toml') }}
-          restore-keys: msx-pages-
-
-      # ── Lint ─────────────────────────────────────────────────────────────────
-      - name: Clippy
-        run: mkdir -p results && cargo clippy -- -D warnings 2>&1 | tee results/clippy.txt || true
+          key: msx-pages-v1-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: msx-pages-v1-
 
       # ── Tests ─────────────────────────────────────────────────────────────────
+      # Correctness gating (clippy + the full --workspace debug+release test
+      # matrix) now lives in ci.yml, which runs on every PR before it reaches
+      # main. These two runs stay here only as a last check before publishing
+      # a report — covers e.g. an admin direct-push to main bypassing ci.yml's
+      # gate — not a replacement for it.
+      #
+      # Both now carry --workspace (see ci.yml's comment for why) and an
+      # explicit pipefail shell. GitHub's docs say bash steps default to
+      # `-eo pipefail`, but `command | tee file` has reportedly still exited
+      # 0 on hosted runners regardless (actions/runner#1955,
+      # actions/runner-images#4459) — setting it explicitly removes any doubt
+      # rather than trusting the documented default.
       - name: Create results dir
         run: mkdir -p results
 
       - name: Run tests (debug)
-        run: cargo test 2>&1 | tee results/test_debug.txt
+        run: cargo test --workspace 2>&1 | tee results/test_debug.txt
+        shell: bash --noprofile --norc -eo pipefail {0}
 
       - name: Run tests (release)
-        run: cargo test --release 2>&1 | tee results/test_release.txt
+        run: cargo test --workspace --release 2>&1 | tee results/test_release.txt
+        shell: bash --noprofile --norc -eo pipefail {0}
 
       # ── Build ─────────────────────────────────────────────────────────────────
+      # --workspace added: without it this built only the root facade package,
+      # which has no [[bin]] of its own — meaning target/release/msx (the CLI
+      # binary the next step shells out to) was never actually produced, and
+      # "Render examples and collect corpus stats" below has been silently
+      # recording 0 bytes / FAIL for every example on every run, since each
+      # call's `if "$BIN" ...; then ... else` swallows the "binary not found"
+      # failure instead of surfacing it.
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --workspace --release
 
       # ── Benchmarks ────────────────────────────────────────────────────────────
       # Criterion --output-format bencher emits one-liner bench: N ns/iter lines
       # which generate_report.py:parse_bench() consumes.  measurement-time 5 and
-      # sample-size 20 keep the total suite under 10 minutes.
+      # sample-size 20 keep the total suite under 10 minutes. `|| true` here is
+      # deliberate — a flaky/slow bench run shouldn't block the report, unlike
+      # the test steps above.
       - name: Run criterion benchmarks
         timeout-minutes: 12
         run: |
