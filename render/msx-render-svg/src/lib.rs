@@ -171,7 +171,10 @@ mod tests {
         let svg = render(&scene);
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains(r#"width="50""#));
-        assert!(svg.contains(r#"fill="#ff0000""#));
+        // BUGFIX: was `r#"fill="#ff0000""#` — the embedded `"#` is the close
+        // delimiter for a single-hash raw string, so this never compiled.
+        // Bumped to double-hash; verified against rustc directly.
+        assert!(svg.contains(r##"fill="#ff0000""##));
         assert!(svg.contains("<circle"));
         assert!(svg.ends_with("</svg>"));
     }
@@ -250,4 +253,4 @@ mod tests {
         let svg = render(&scene);
         assert!(svg.contains("<!-- sdf node 'circle'"));
     }
-  }
+                                                      }
