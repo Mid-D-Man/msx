@@ -1,0 +1,85 @@
+# .github/workflows/ci.yml  (new file)
+name: MSX — CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MSX
+        uses: actions/checkout@v4
+
+      - name: Checkout MBFA (sibling path dependency)
+        run: |
+          git clone --depth 1 "https://github.com/Mid-D-Man/mbfa.git" \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+          git config --global --add safe.directory \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+
+      - name: Checkout DixScript (sibling path dependency)
+        run: |
+          PARENT=$(dirname "$GITHUB_WORKSPACE")
+          git clone --depth 1 "https://github.com/Mid-D-Man/DixScript-Rust.git" \
+            "$PARENT/DixScript-Rust"
+          git config --global --add safe.directory "$PARENT/DixScript-Rust"
+          ln -s "$PARENT/DixScript-Rust/dixscript" "$PARENT/dixscript"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ../mbfa/target
+            ../DixScript-Rust/target
+          # NOTE: hashFiles only sees inside $GITHUB_WORKSPACE (this repo), so
+          # a dependency bump in the sibling mbfa / DixScript-Rust repos won't
+          # bust this cache on its own. Bump the `v1` suffix by hand if a
+          # build looks stale after touching either sibling.
+          key: msx-ci-v1-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: msx-ci-v1-
+
+      # ── --workspace on every line below is the actual fix in this file.
+      # This repo's root Cargo.toml has both [workspace] and [package] (a
+      # "non-virtual" workspace) with no default-members set — per Cargo's
+      # own docs that means bare cargo test/build/clippy scope to the root
+      # package ONLY. Verified directly against cargo 1.75 in a throwaway
+      # reproduction: a member crate's #[test]s and its own [[bin]] target
+      # are both silently skipped with no warning. Previously, CI only ever
+      # exercised the root re-export facade (src/lib.rs, no tests of its
+      # own) + tests/roundtrip.rs — never the #[cfg(test)] modules living in
+      # msx-ast / msx-binary / msx-parser / msx-render-core / msx-render-cpu
+      # / msx-render-gpu / msx-sdf / msx-splat / msx-cli / msx-viewer, and
+      # never even built the `msx` CLI binary (root package has no [[bin]]).
+      - name: Clippy (workspace, all targets, warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --all-targets also *builds* (not runs) benches/compare.rs and
+      # tests/roundtrip.rs as compile targets — this is how the embedded
+      # `"#` raw-string bugs in both files got caught, confirmed against
+      # rustc directly.
+      - name: Build workspace (debug, all targets)
+        run: cargo build --workspace --all-targets
+
+      - name: Test workspace (debug)
+        run: cargo test --workspace
+
+      - name: Test workspace (release)
+        run: cargo test --workspace --release
