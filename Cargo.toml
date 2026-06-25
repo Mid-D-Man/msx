@@ -12,6 +12,7 @@ members = [
     "primitives/msx-sdf",
     "primitives/msx-splat",
     "apps/msx-cli",
+    "apps/msx-viewer",
 ]
 
 [workspace.package]
@@ -49,6 +50,13 @@ pollster  = "0.3"
 # CLI
 clap  = { version = "4.5", features = ["derive"] }
 image = "0.25"
+# Viewer (apps/msx-viewer) — pinned versions unchanged from what was already
+# in apps/msx-viewer/Cargo.toml; just centralized here so every crate in the
+# workspace sources its versions the same way. pixels 0.17.x and a later
+# winit than 0.30 are both out now — worth a deliberate, tested bump later,
+# not a drive-by version change here.
+winit  = "0.30"
+pixels = "0.15"
 # Dev
 criterion = { version = "0.5", features = ["html_reports"] }
 
