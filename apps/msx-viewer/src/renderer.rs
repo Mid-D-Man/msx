@@ -49,4 +49,43 @@ pub fn render_scene(scene: &Scene) -> RenderedScene {
     renderer.render(scene, &mut target);
 
     RenderedScene { width, height, rgba: target.into_bytes() }
-  }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+// Same source/binary/garbage detection as `msx-cli`'s identical, separately
+// duplicated `load_scene_bytes` — the two crates carry their own copy of this
+// sniff logic, so they each carry their own copy of the tests for it too,
+// rather than leaving the viewer's copy unverified.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use msx_ast::{Canvas, Color};
+
+    #[test]
+    fn load_scene_bytes_detects_dixscript_source() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #ffffff }
+  elements::
+)
+"#;
+        let scene = load_scene_bytes(src.as_bytes()).expect("source should parse");
+        assert!((scene.canvas.width - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_scene_bytes_detects_binary() {
+        let scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        let binary = msx_binary::compile(&scene, true).expect("compile should succeed");
+        let decoded = load_scene_bytes(&binary).expect("binary should decode");
+        assert!((decoded.canvas.width - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_scene_bytes_rejects_invalid_input() {
+        let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
+        assert!(load_scene_bytes(&garbage).is_err());
+    }
+    }
