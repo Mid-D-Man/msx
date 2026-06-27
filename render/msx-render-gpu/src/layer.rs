@@ -33,7 +33,8 @@ use msx_ast::{Element, Layer, Matrix2D};
 use crate::sdf::SdfPipeline;
 use crate::splat::SplatPipeline;
 use crate::target::OffscreenTarget;
-use crate::vector::{self, VectorPipeline};
+use crate::vector;
+use crate::VectorPipeline;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -90,7 +91,7 @@ impl LayerCompositor {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("msx layer composite pipeline layout"),
             bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0,
+            push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -192,10 +193,13 @@ impl LayerCompositor {
                 label: Some("msx layer composite pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: dst_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
@@ -254,4 +258,4 @@ mod tests {
         collect_layers(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1, "only the outer layer should be found");
     }
-}
+                                                     }
