@@ -67,7 +67,7 @@ impl SplatPipeline {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("msx splat pipeline layout"),
             bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0, // see pipeline.rs's note on this field
+            push_constant_ranges: &[], // confirmed field name — see pipeline.rs's note
         });
 
         let instance_layout = wgpu::VertexBufferLayout {
@@ -147,10 +147,13 @@ impl SplatPipeline {
             label: Some("msx splat pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
@@ -252,4 +255,4 @@ mod tests {
         collect_splats(&elements, Matrix2D::identity(), &mut out);
         assert!(out.is_empty(), "splats inside a Layer must not be collected by the main pass");
     }
-  }
+    }
