@@ -85,7 +85,7 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
     // Optionally compress
     let final_payload = if compress {
         mbfa::compress(&payload, 8)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("MBFA compress: {}", e)))?
+            .map_err(|e| io::Error::other(format!("MBFA compress: {}", e)))?
     } else {
         payload
     };
@@ -403,4 +403,4 @@ mod tests {
             panic!("expected Layer");
         }
     }
-      }
+    }
