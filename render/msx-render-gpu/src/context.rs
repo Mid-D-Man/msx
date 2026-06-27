@@ -19,19 +19,20 @@ impl GpuContext {
     }
 
     async fn new_async() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        // NOTE: verified directly against wgpu 26.0.1's source
+        // (wgpu-types/src/instance.rs) — `InstanceDescriptor` has exactly
+        // `backends` / `flags` / `memory_budget_thresholds` /
+        // `backend_options`, no `display` field, and `Instance::new` takes
+        // `&InstanceDescriptor`, not an owned one.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: Default::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
-            display: None,
         });
 
-        // NOTE: `request_adapter` returning `Result` (vs. an older `Option`
-        // in earlier wgpu generations) is the one call here I'd check
-        // first if this doesn't compile — a one-line fix either way
-        // (`.ok_or_else(...)` instead of `.map_err(...)`), unlike a wrong
-        // struct field name, which cascades.
+        // `request_adapter` returns `Result` in this wgpu generation —
+        // confirmed against source, so `.map_err(...)` below is correct.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -41,11 +42,15 @@ impl GpuContext {
             .await
             .map_err(|e| format!("no suitable GPU adapter: {}", e))?;
 
+        // NOTE: same verification — `DeviceDescriptor` in 26.0.1 has
+        // `label` / `required_features` / `required_limits` /
+        // `memory_hints` / `trace`. No `experimental_features` field exists
+        // on this version (it's from a later API generation than what was
+        // available when this was first written).
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("msx-render-gpu device"),
                 required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
@@ -55,4 +60,4 @@ impl GpuContext {
 
         Ok(GpuContext { device, queue })
     }
-      }
+}
