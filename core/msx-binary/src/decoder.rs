@@ -66,7 +66,7 @@ pub fn read_string_pool(data: &[u8], cursor: &mut usize) -> io::Result<Vec<Strin
     Ok(pool)
 }
 
-pub fn lookup_string<'a>(pool: &'a [String], idx: u16) -> io::Result<&'a str> {
+pub fn lookup_string(pool: &[String], idx: u16) -> io::Result<&str> {
     pool.get(idx as usize)
         .map(|s| s.as_str())
         .ok_or_else(|| bad(&format!("string pool index {} out of range (pool len={})", idx, pool.len())))
