@@ -1,19 +1,28 @@
 // render/msx-render-gpu/src/lib.rs
 //! GPU renderer — wgpu-backed, offscreen-only (no window `Surface`; that's
-//! `apps/msx-viewer`'s job once it exists).
+//! `apps/msx-viewer`'s job once it wires up a GPU path).
 //!
 //! ## Honesty about scope and risk
 //!
 //! This is the highest API-risk crate in the project, by a wide margin.
-//! wgpu ships a breaking release roughly every three months, and the
-//! project's original plan pinned `wgpu = "0.19"` — current is **29.0.3**,
-//! over two years and a full versioning-scheme change later. Every wgpu
-//! signature here was checked against current (~April 2026) docs/tutorials
-//! rather than pulled from training-data memory; the `immediate_size`
-//! field on `PipelineLayoutDescriptor` (used in `pipeline.rs`/`sdf.rs`/
-//! `splat.rs`/`layer.rs`) is flagged as the one spot I'm least sure about.
-//! `lyon`'s tessellation API, by contrast, checked out essentially
-//! unchanged from what I expected.
+//! wgpu ships a breaking release roughly every three months. Every wgpu
+//! signature in this crate (`context.rs`, `pipeline.rs`, `sdf.rs`,
+//! `splat.rs`, `layer.rs`, `target.rs`) has been checked directly against
+//! the published wgpu 26.0.1 source (`gfx-rs/wgpu`, tag `wgpu-v26.0.1`) —
+//! not docs, not training-data memory, the actual struct definitions —
+//! after the first version of this crate, written against an
+//! aspirational/incorrect guess at the 26.x API, failed to build with 19
+//! distinct errors. Notably this API generation renamed the texture/buffer
+//! copy descriptors (`ImageCopyTexture` → `TexelCopyTextureInfo`, etc., see
+//! `target.rs`), uses `Device::poll(PollType) -> Result<PollStatus,
+//! PollError>` rather than an older `Maintain`-based signature, dropped
+//! `PipelineLayoutDescriptor::immediate_size`/`push_constant_ranges`
+//! confusion in favor of just `push_constant_ranges`, and added a
+//! mandatory `depth_slice` field to `RenderPassColorAttachment` and
+//! mandatory `occlusion_query_set`/`timestamp_writes` fields to
+//! `RenderPassDescriptor`. `lyon`'s tessellation API needed one similar
+//! fix: `StrokeOptions` is `#[non_exhaustive]`, so it has to be built via
+//! its `.with_line_width()` builder method, not struct-update syntax.
 //!
 //! `Vector`, `Sdf`, `Splat`, and `Layer` (opacity + isolated buffering;
 //! Normal blend only — see `layer.rs`) are all wired up now. Rendering
@@ -189,4 +198,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-                                   }
+}
