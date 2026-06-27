@@ -167,7 +167,7 @@ impl SdfPipeline {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("msx sdf pipeline layout"),
             bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0, // see pipeline.rs's note on this field
+            push_constant_ranges: &[], // confirmed field name — see pipeline.rs's note
         });
 
         let vertex_layout = wgpu::VertexBufferLayout {
@@ -289,10 +289,13 @@ impl SdfPipeline {
             label: Some("msx sdf pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
@@ -481,4 +484,4 @@ mod tests {
         collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1);
     }
-                        }
+                                     }
