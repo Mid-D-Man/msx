@@ -1,7 +1,7 @@
 // render/msx-render-svg/src/layer.rs
 use msx_ast::{fmt_f64, Effect, Layer};
 
-use crate::{render_element, write_attr, write_id, write_style, write_transform, Ctx};
+use crate::{render_element, write_attr, write_id, write_transform, Ctx};
 
 /// `blend_mode` → CSS `mix-blend-mode` (`Subtract`/`Divide` have no CSS
 /// equivalent and fall back to Normal here; `msx-render-cpu`/`-gpu`
@@ -116,4 +116,4 @@ fn effect_primitive(effect: &Effect, input: &str, result: &str, idx: usize) -> S
             result = result,
         ),
     }
-  }
+        }
