@@ -215,7 +215,14 @@ fn fill_path(path: &LyonPath, rgba: [f32; 4], transform: Matrix2D, canvas: (f32,
 
 fn stroke_path(path: &LyonPath, rgba: [f32; 4], width: f32, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
     let mut tess = StrokeTessellator::new();
-    let options = StrokeOptions { line_width: width, ..StrokeOptions::default() };
+    // BUGFIX: lyon's `StrokeOptions` is `#[non_exhaustive]` (confirmed
+    // against the published lyon_tessellation 1.0.20 source), so the old
+    // `StrokeOptions { line_width: width, ..StrokeOptions::default() }`
+    // struct-update syntax doesn't compile at all from outside the crate —
+    // non_exhaustive blocks that even with `..Default::default()` filling
+    // every other field. The crate's own builder method is the intended
+    // replacement.
+    let options = StrokeOptions::default().with_line_width(width);
     let _ = tess.tessellate_path(
         path,
         &options,
@@ -550,4 +557,4 @@ fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_ro
         b.cubic_bezier_to(point(c1r.0, c1r.1), point(c2r.0, c2r.1), point(p2r.0, p2r.1));
         theta = theta_next;
     }
-                }
+                      }
