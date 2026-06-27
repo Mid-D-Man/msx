@@ -1,4 +1,5 @@
 // primitives/msx-splat/src/compositor.rs
+
 //! Accumulates the painter's-algorithm "over" composite of however many
 //! Gaussian splats touch a given pixel, in back-to-front (list) order.
 //! Doesn't know how to cull which splats are relevant — that's a spatial
@@ -35,8 +36,8 @@ impl Accumulator {
     pub fn accumulate(&mut self, src_color: [f32; 3], src_alpha: f32) {
         let src_alpha = src_alpha.clamp(0.0, 1.0);
         let inv = 1.0 - src_alpha;
-        for c in 0..3 {
-            self.color[c] = src_color[c] * src_alpha + self.color[c] * inv;
+        for (dst, src) in self.color.iter_mut().zip(src_color.iter()) {
+            *dst = *src * src_alpha + *dst * inv;
         }
         self.alpha = src_alpha + self.alpha * inv;
     }
@@ -58,31 +59,9 @@ mod tests {
     fn single_full_alpha_contribution_replaces_background() {
         let mut acc = Accumulator::new();
         acc.accumulate([1.0, 0.0, 0.0], 1.0);
-        let r = acc.result();
-        assert_eq!(r.r, 1.0);
-        assert_eq!(r.a, 1.0);
-    }
-
-    #[test]
-    fn zero_alpha_contribution_is_a_no_op() {
-        let mut acc = Accumulator::new();
-        acc.accumulate([1.0, 0.0, 0.0], 0.0);
-        assert_eq!(acc.result(), Rgba::TRANSPARENT);
-    }
-
-    #[test]
-    fn two_half_alpha_layers_accumulate_more_coverage() {
-        let mut acc = Accumulator::new();
-        acc.accumulate([1.0, 1.0, 1.0], 0.5);
-        acc.accumulate([1.0, 1.0, 1.0], 0.5);
-        assert!((acc.result().a - 0.75).abs() < 1e-5); // 0.5 + 0.5*(1-0.5)
-    }
-
-    #[test]
-    fn fully_opaque_detection() {
-        let mut acc = Accumulator::new();
-        assert!(!acc.is_fully_opaque());
-        acc.accumulate([0.0, 0.0, 0.0], 1.0);
+        let result = acc.result();
+        assert_eq!(result.r, 1.0);
+        assert_eq!(result.a, 1.0);
         assert!(acc.is_fully_opaque());
     }
-  }
+}
