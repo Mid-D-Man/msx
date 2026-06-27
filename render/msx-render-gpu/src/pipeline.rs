@@ -22,12 +22,11 @@ impl VectorPipeline {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("msx vector pipeline layout"),
             bind_group_layouts: &[],
-            // NOTE: current wgpu appears to have renamed push constants to
-            // "immediate data" — this field used to be (and may still be,
-            // depending on exactly which patch resolves)
-            // `push_constant_ranges: &[]`. One-line fix either way if this
-            // doesn't compile.
-            immediate_size: 0,
+            // Confirmed against wgpu 26.0.1 source (wgpu/src/api/pipeline_layout.rs):
+            // PipelineLayoutDescriptor has label / bind_group_layouts /
+            // push_constant_ranges, nothing named immediate_size in this
+            // generation of the API.
+            push_constant_ranges: &[],
         });
 
         let vertex_layout = wgpu::VertexBufferLayout {
@@ -98,6 +97,9 @@ impl VectorPipeline {
             label: Some("msx vector pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
+                // depth_slice only applies to 3D texture views; this target
+                // is always a plain 2D color texture, so None.
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(clear_color),
@@ -105,6 +107,8 @@ impl VectorPipeline {
                 },
             })],
             depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
 
         if let Some((vertex_buffer, index_buffer)) = &buffers {
@@ -114,4 +118,4 @@ impl VectorPipeline {
             pass.draw_indexed(0..geometry.indices.len() as u32, 0, 0..1);
         }
     }
-                                             }
+                    }
