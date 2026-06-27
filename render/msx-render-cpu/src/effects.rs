@@ -66,7 +66,7 @@ pub fn gaussian_blur(pixmap: &mut Pixmap, sigma: f32) {
     pixmap.data_mut().copy_from_slice(&buf_a);
 }
 
-fn box_blur_horizontal(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: i32) {
+fn box_blur_horizontal(src: &[u8], dst: &mut [u8], width: usize, _height: usize, radius: i32) {
     if radius <= 0 {
         dst.copy_from_slice(src);
         return;
@@ -386,4 +386,4 @@ mod tests {
         let outside_idx = (1 * 30 + 1) * 4;
         assert_eq!(data[outside_idx + 3], 0);
     }
-  }
+                                           }
