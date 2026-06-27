@@ -80,14 +80,14 @@ fn box_blur_horizontal(src: &[u8], dst: &mut [u8], width: usize, _height: usize,
             for dx in -radius..=radius {
                 let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
                 let idx = sx * 4;
-                for c in 0..4 {
-                    sum[c] += src_row[idx + c] as i64;
+                for (s, &byte) in sum.iter_mut().zip(&src_row[idx..idx + 4]) {
+                    *s += byte as i64;
                 }
                 count += 1;
             }
             let out_idx = x * 4;
-            for c in 0..4 {
-                dst_row[out_idx + c] = (sum[c] / count).clamp(0, 255) as u8;
+            for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
+                *d = (s / count).clamp(0, 255) as u8;
             }
         }
     });
@@ -106,14 +106,14 @@ fn box_blur_vertical(src: &[u8], dst: &mut [u8], width: usize, height: usize, ra
             for dy in -radius..=radius {
                 let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
                 let idx = (sy * width + x) * 4;
-                for c in 0..4 {
-                    sum[c] += src[idx + c] as i64;
+                for (s, &byte) in sum.iter_mut().zip(&src[idx..idx + 4]) {
+                    *s += byte as i64;
                 }
                 count += 1;
             }
             let out_idx = x * 4;
-            for c in 0..4 {
-                dst_row[out_idx + c] = (sum[c] / count).clamp(0, 255) as u8;
+            for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
+                *d = (s / count).clamp(0, 255) as u8;
             }
         }
     });
@@ -386,4 +386,4 @@ mod tests {
         let outside_idx = (1 * 30 + 1) * 4;
         assert_eq!(data[outside_idx + 3], 0);
     }
-                                           }
+    }
