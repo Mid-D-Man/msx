@@ -56,11 +56,13 @@ mod tests {
     use msx_ast::{Circle, Color, Element, Paint, Style};
 
     fn solid_circle(cx: f64, cy: f64, r: f64, color: Color) -> Element {
-        let mut style = Style::default();
-        style.fill = Some(Paint::Color(color));
-        style.stroke = Some(Paint::None);
-        style.stroke_width = Some(0.0);
-        style.opacity = Some(1.0);
+        let style = Style {
+            fill: Some(Paint::Color(color)),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
         Element::Circle(Circle { cx, cy, r, id: None, transform: None, style })
     }
 
@@ -96,4 +98,4 @@ mod tests {
         render_layer(&mut pixmap, &layer, Matrix2D::identity(), &defs, &index);
         assert_eq!(pixmap.data(), before.as_slice());
     }
-          }
+        }
