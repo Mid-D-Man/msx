@@ -178,6 +178,13 @@ fn roundtrip_group_with_transform() {
 
 #[test]
 fn roundtrip_nested_groups() {
+    // NOTE: 2 levels of group nesting + a styled leaf would land one level
+    // past DixScript's MAX_NESTING_DEPTH=5 (data_section_analyzer.rs) —
+    // confirmed by tracing its depth counter, which increments once per
+    // array AND once per object on the way down. style is fully optional
+    // (msx-parser's parse_style defaults sanely when absent), so dropping
+    // it here keeps the actual group-within-group structure this test
+    // exists to verify, while staying inside the depth limit.
     check_roundtrip("nested_groups", r#"
 @CONFIG( version -> "1.0.0" )
 @DATA(
@@ -188,8 +195,7 @@ fn roundtrip_nested_groups() {
         { type = "group",
           transform = { type = "rotate", angle = 45 },
           elements = [
-            { type = "rect", x = -25, y = -25, width = 50, height = 50,
-              style = { fill = #e94560, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+            { type = "rect", x = -25, y = -25, width = 50, height = 50 }
           ] }
       ] }
 )
@@ -362,6 +368,10 @@ fn roundtrip_stroke_dasharray() {
 
 #[test]
 fn roundtrip_use_element() {
+    // BUGFIX: `href = "#tile"` below embeds a literal `"#`, which is the
+    // close delimiter for a single-hash raw string — this terminated the
+    // string mid-source and the file didn't compile. Bumped to double-hash;
+    // verified against rustc directly.
     check_roundtrip("use_element", r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
@@ -380,4 +390,4 @@ fn roundtrip_use_element() {
     { type = "use", href = "#tile", x = 210, y = 60 }
 )
 "##);
-}
+        }
