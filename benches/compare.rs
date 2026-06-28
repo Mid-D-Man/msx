@@ -105,16 +105,6 @@ r#"@CONFIG( version -> "1.0.0" )
 }
 
 // ── SVG string builders (pure baseline — no MSX) ─────────────────────────────
-//
-// BUGFIX: these two header templates and the per-badge template embed a
-// literal `"#hexcolor` (e.g. `fill="#ffffff"`) inside what was a *single*-hash
-// raw string. `"#` is exactly the close delimiter for `r#"..."#`, so the
-// string was terminating mid-template and the file didn't compile — this
-// never surfaced because the CI bench step already has `|| true` on it.
-// Bumped these three to double-hash `r##"..."##` so the embedded `"#` is no
-// longer a closer. The other two raw strings below (lines using `{}`
-// placeholders for color, no literal hex) never had this problem and are
-// untouched.
 
 fn svg_circles(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
