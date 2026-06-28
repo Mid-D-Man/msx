@@ -362,7 +362,7 @@ fn roundtrip_stroke_dasharray() {
 
 #[test]
 fn roundtrip_use_element() {
-    check_roundtrip("use_element", r#"
+    check_roundtrip("use_element", r##"
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene = { width = 400, height = 200, background = #f0f0f0 }
@@ -379,5 +379,5 @@ fn roundtrip_use_element() {
     { type = "use", href = "#tile", x = 100, y = 60 }
     { type = "use", href = "#tile", x = 210, y = 60 }
 )
-"#);
+"##);
 }
