@@ -108,11 +108,10 @@ r#"@CONFIG( version -> "1.0.0" )
 
 fn svg_circles(n: usize) -> String {
     let colors = ["#e94560", "#533483", "#0f3460", "#4a9eff", "#22c55e"];
-    let mut s = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
+    let mut s = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
 <rect width="1000" height="1000" fill="#ffffff"/>
 "##
-    );
+    .to_string();
     for i in 0..n {
         let x = (i % 20) * 50 + 25;
         let y = (i / 20) * 50 + 25;
@@ -234,10 +233,10 @@ fn bench_render(c: &mut Criterion) {
         b.iter(|| render(black_box(scene_badges())))
     });
     g.bench_function("svg_build_circles_10", |b| {
-        b.iter(|| svg_circles_10())
+        b.iter(svg_circles_10)
     });
     g.bench_function("svg_build_badges", |b| {
-        b.iter(|| svg_badges())
+        b.iter(svg_badges)
     });
 
     g.finish();
@@ -263,10 +262,10 @@ fn bench_decode_render(c: &mut Criterion) {
         })
     });
     g.bench_function("svg_build_circles_10_baseline", |b| {
-        b.iter(|| svg_circles_10())
+        b.iter(svg_circles_10)
     });
     g.bench_function("svg_build_badges_baseline", |b| {
-        b.iter(|| svg_badges())
+        b.iter(svg_badges)
     });
 
     g.finish();
