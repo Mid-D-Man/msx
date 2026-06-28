@@ -214,19 +214,21 @@ fn sk_fill_rule(style: &Style) -> SkFillRule {
 }
 
 fn build_stroke(style: &Style, width: f32) -> Stroke {
-    let mut stroke = Stroke::default();
-    stroke.width = width;
-    stroke.line_cap = match style.stroke_linecap {
-        Some(LineCap::Round) => SkLineCap::Round,
-        Some(LineCap::Square) => SkLineCap::Square,
-        _ => SkLineCap::Butt,
+    let mut stroke = Stroke {
+        width,
+        line_cap: match style.stroke_linecap {
+            Some(LineCap::Round) => SkLineCap::Round,
+            Some(LineCap::Square) => SkLineCap::Square,
+            _ => SkLineCap::Butt,
+        },
+        line_join: match style.stroke_linejoin {
+            Some(LineJoin::Round) => SkLineJoin::Round,
+            Some(LineJoin::Bevel) => SkLineJoin::Bevel,
+            _ => SkLineJoin::Miter,
+        },
+        miter_limit: style.stroke_miterlimit.unwrap_or(4.0) as f32,
+        ..Default::default()
     };
-    stroke.line_join = match style.stroke_linejoin {
-        Some(LineJoin::Round) => SkLineJoin::Round,
-        Some(LineJoin::Bevel) => SkLineJoin::Bevel,
-        _ => SkLineJoin::Miter,
-    };
-    stroke.miter_limit = style.stroke_miterlimit.unwrap_or(4.0) as f32;
     if let Some(ref dashes) = style.stroke_dasharray {
         let array: Vec<f32> = dashes.iter().map(|d| *d as f32).collect();
         if let Some(dash) = StrokeDash::new(array, style.stroke_dashoffset.unwrap_or(0.0) as f32) {
@@ -251,7 +253,7 @@ fn build_rect_path(r: &msx_ast::Rect) -> Option<SkPath> {
     if rx <= 0.0 || ry <= 0.0 {
         pb.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h)?);
     } else {
-        const K: f32 = 0.552_284_75;
+        const K: f32 = 0.552_284_8;
         let (kx, ky) = (rx * K, ry * K);
         pb.move_to(x + rx, y);
         pb.line_to(x + w - rx, y);
@@ -277,7 +279,7 @@ fn build_circle_path(c: &msx_ast::Circle) -> Option<SkPath> {
 fn build_ellipse_path(e: &msx_ast::Ellipse) -> Option<SkPath> {
     let mut pb = PathBuilder::new();
     let (cx, cy, rx, ry) = (e.cx as f32, e.cy as f32, e.rx as f32, e.ry as f32);
-    const K: f32 = 0.552_284_75;
+    const K: f32 = 0.552_284_8;
     let (kx, ky) = (rx * K, ry * K);
 
     pb.move_to(cx + rx, cy);
@@ -558,4 +560,4 @@ mod tests {
         assert_eq!(combined.e, 5.0);
         assert_eq!(combined.f, 5.0);
     }
-        }
+                }
