@@ -1,4 +1,4 @@
-# .github/workflows/pages.yml  (replaces .github/workflows/buid-deploy.yml — delete that file, typo'd name and all)
+# .github/workflows/pages.yml  (replaces .github/workflows/buid-deploy.yml — delete that file)
 name: MSX — Bench, Report, Pages
 
 on:
@@ -59,15 +59,15 @@ jobs:
 
       # ── Tests ─────────────────────────────────────────────────────────────────
       # Correctness gating (clippy + the full --workspace debug+release test
-      # matrix) now lives in ci.yml, which runs on every PR before it reaches
-      # main. These two runs stay here only as a last check before publishing
-      # a report — covers e.g. an admin direct-push to main bypassing ci.yml's
+      # matrix) lives in ci.yml, which runs on every PR before it reaches main.
+      # These two runs stay here only as a last check before publishing a
+      # report — covers e.g. an admin direct-push to main bypassing ci.yml's
       # gate — not a replacement for it.
       #
-      # Both now carry --workspace (see ci.yml's comment for why) and an
-      # explicit pipefail shell. GitHub's docs say bash steps default to
-      # `-eo pipefail`, but `command | tee file` has reportedly still exited
-      # 0 on hosted runners regardless (actions/runner#1955,
+      # Both carry --workspace (see ci.yml's comment for why) and an explicit
+      # pipefail shell. GitHub's docs say bash steps default to `-eo
+      # pipefail`, but `command | tee file` has reportedly still exited 0 on
+      # hosted runners regardless (actions/runner#1955,
       # actions/runner-images#4459) — setting it explicitly removes any doubt
       # rather than trusting the documented default.
       - name: Create results dir
@@ -82,22 +82,13 @@ jobs:
         shell: bash --noprofile --norc -eo pipefail {0}
 
       # ── Build ─────────────────────────────────────────────────────────────────
-      # --workspace added: without it this built only the root facade package,
+      # --workspace: without it this built only the root facade package,
       # which has no [[bin]] of its own — meaning target/release/msx (the CLI
-      # binary the next step shells out to) was never actually produced, and
-      # "Render examples and collect corpus stats" below has been silently
-      # recording 0 bytes / FAIL for every example on every run, since each
-      # call's `if "$BIN" ...; then ... else` swallows the "binary not found"
-      # failure instead of surfacing it.
+      # binary the next step shells out to) was never actually produced.
       - name: Build release binary
         run: cargo build --workspace --release
 
       # ── Benchmarks ────────────────────────────────────────────────────────────
-      # Criterion --output-format bencher emits one-liner bench: N ns/iter lines
-      # which generate_report.py:parse_bench() consumes.  measurement-time 5 and
-      # sample-size 20 keep the total suite under 10 minutes. `|| true` here is
-      # deliberate — a flaky/slow bench run shouldn't block the report, unlike
-      # the test steps above.
       - name: Run criterion benchmarks
         timeout-minutes: 12
         run: |
@@ -111,12 +102,18 @@ jobs:
       # ── Example rendering + corpus stats ──────────────────────────────────────
       # For every .msx file in examples/:
       #   1. Compile (source → MBFA binary) and record binary size
-      #   2. Render  (source → SVG)         and record SVG size
-      #   3. Roundtrip test                 to verify decode integrity
+      #   2. Render  (source → SVG export)  and record SVG size
+      #   3. Rasterize (source → native PNG via msx-render-cpu) — MSX's
+      #      primary output, used by the report's "Rendered Visual" pane.
+      #      Kept separate from the size-comparison columns below: PNG is a
+      #      raster format with very different scaling behavior than the two
+      #      vector formats being compared there, so it's not an apples-to-
+      #      apples size metric — it's purely for the visual gallery.
+      #   4. Roundtrip test to verify decode integrity
       - name: Render examples and collect corpus stats
         run: |
           BIN=./target/release/msx
-          mkdir -p results/svgs
+          mkdir -p results/svgs results/pngs
           {
             printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
             for src in examples/*.msx; do
@@ -132,13 +129,20 @@ jobs:
                 bin_bytes=0
               fi
 
-              # Render source directly to SVG
+              # Render source directly to SVG (export path)
               if "$BIN" render "$src" -o "results/svgs/${stem}.svg" 2>/dev/null; then
                 svg_bytes=$(wc -c < "results/svgs/${stem}.svg")
               else
                 echo "  WARN: render failed for $stem" >&2
                 svg_bytes=0
               fi
+
+              # Rasterize to native PNG (primary output path) — failure here
+              # is non-fatal to the stats row; examples.json just won't have
+              # a png_base64 for this one and the report falls back to the
+              # inline SVG for that single card.
+              "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
+                echo "  WARN: rasterize failed for $stem" >&2
 
               denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
               bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
@@ -156,12 +160,14 @@ jobs:
           } | tee results/corpus.csv
 
       # ── Build examples.json for the report ────────────────────────────────────
-      # Combines rendered SVG content, source text, and compression stats into a
-      # single JSON so the Python report generator stays stateless.
+      # Combines rendered SVG content, the native PNG raster (base64,
+      # self-contained — no extra asset files needed at deploy time), source
+      # text, and compression stats into a single JSON so the Python report
+      # generator stays stateless.
       - name: Build examples.json
         run: |
           python3 - <<'PYEOF'
-          import json, os, glob
+          import json, os, glob, base64
 
           # Read corpus stats into a lookup dict
           stats = {}
@@ -185,6 +191,7 @@ jobs:
           for svg_path in sorted(glob.glob('results/svgs/*.svg')):
               stem     = os.path.splitext(os.path.basename(svg_path))[0]
               src_path = f'examples/{stem}.msx'
+              png_path = f'results/pngs/{stem}.png'
 
               if not os.path.exists(src_path):
                   continue
@@ -194,11 +201,17 @@ jobs:
               with open(src_path, 'r', errors='replace') as f:
                   source = f.read()
 
+              png_base64 = ''
+              if os.path.exists(png_path):
+                  with open(png_path, 'rb') as f:
+                      png_base64 = base64.b64encode(f.read()).decode('ascii')
+
               row = stats.get(stem, {})
               entry = {
                   'name':         stem,
                   'source':       source,
                   'svg':          svg_content,
+                  'png_base64':   png_base64,
                   'source_bytes': row.get('source_bytes', os.path.getsize(src_path)),
                   'binary_bytes': row.get('binary_bytes', 0),
                   'svg_bytes':    row.get('svg_bytes',    os.path.getsize(svg_path)),
@@ -207,10 +220,11 @@ jobs:
                   'pass':         row.get('pass', False),
               }
               results.append(entry)
+              png_note = '' if png_base64 else ' [no native PNG]'
               print(f"  {stem}: {entry['source_bytes']}B src "
                     f"→ {entry['binary_bytes']}B bin "
                     f"→ {entry['svg_bytes']}B svg "
-                    f"({'PASS' if entry['pass'] else 'FAIL'})")
+                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}")
 
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
