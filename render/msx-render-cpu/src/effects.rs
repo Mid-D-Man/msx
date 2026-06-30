@@ -55,65 +55,77 @@ pub fn gaussian_blur(pixmap: &mut Pixmap, sigma: f32) {
     let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
     let radius = ((sigma * 1.88) as i32).max(1);
 
-    let mut buf_a = pixmap.data().to_vec();
-    let mut buf_b = vec![0u8; buf_a.len()];
+    // BUGFIX: this used to round-trip through `Vec<u8>` + truncating i64
+    // division between every one of the 6 box-blur sub-passes (3 iterations
+    // × horizontal+vertical). For a low-alpha source spread over a wide
+    // radius — a single bright pixel, a thin line — the per-pixel average
+    // drops below 1.0 well before the spread finishes, and truncating to
+    // u8 at every sub-pass can lose the *entire* signal to flat zero before
+    // the last pass even runs. Confirmed by direct simulation: a single
+    // alpha=204 pixel blurred with this radius collapsed to total mass 0
+    // with the old u8/i64 path, vs. mass ~204 conserved keeping f32
+    // throughout. Quantizing to u8 only once, at the very end, fixes it.
+    let mut buf_a: Vec<f32> = pixmap.data().iter().map(|&b| b as f32).collect();
+    let mut buf_b: Vec<f32> = vec![0.0; buf_a.len()];
 
     for _ in 0..3 {
         box_blur_horizontal(&buf_a, &mut buf_b, width, height, radius);
         box_blur_vertical(&buf_b, &mut buf_a, width, height, radius);
     }
 
-    pixmap.data_mut().copy_from_slice(&buf_a);
+    for (dst, &src) in pixmap.data_mut().iter_mut().zip(buf_a.iter()) {
+        *dst = src.round().clamp(0.0, 255.0) as u8;
+    }
 }
 
-fn box_blur_horizontal(src: &[u8], dst: &mut [u8], width: usize, _height: usize, radius: i32) {
+fn box_blur_horizontal(src: &[f32], dst: &mut [f32], width: usize, _height: usize, radius: i32) {
     if radius <= 0 {
         dst.copy_from_slice(src);
         return;
     }
-    let row_bytes = width * 4;
-    dst.par_chunks_mut(row_bytes).enumerate().for_each(|(y, dst_row)| {
-        let src_row = &src[y * row_bytes..(y + 1) * row_bytes];
+    let row_floats = width * 4;
+    dst.par_chunks_mut(row_floats).enumerate().for_each(|(y, dst_row)| {
+        let src_row = &src[y * row_floats..(y + 1) * row_floats];
         for x in 0..width {
-            let mut sum = [0i64; 4];
-            let mut count = 0i64;
+            let mut sum = [0.0f32; 4];
+            let mut count = 0.0f32;
             for dx in -radius..=radius {
                 let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
                 let idx = sx * 4;
-                for (s, &byte) in sum.iter_mut().zip(&src_row[idx..idx + 4]) {
-                    *s += byte as i64;
+                for (s, &v) in sum.iter_mut().zip(&src_row[idx..idx + 4]) {
+                    *s += v;
                 }
-                count += 1;
+                count += 1.0;
             }
             let out_idx = x * 4;
             for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
-                *d = (s / count).clamp(0, 255) as u8;
+                *d = s / count;
             }
         }
     });
 }
 
-fn box_blur_vertical(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: i32) {
+fn box_blur_vertical(src: &[f32], dst: &mut [f32], width: usize, height: usize, radius: i32) {
     if radius <= 0 {
         dst.copy_from_slice(src);
         return;
     }
-    let row_bytes = width * 4;
-    dst.par_chunks_mut(row_bytes).enumerate().for_each(|(y, dst_row)| {
+    let row_floats = width * 4;
+    dst.par_chunks_mut(row_floats).enumerate().for_each(|(y, dst_row)| {
         for x in 0..width {
-            let mut sum = [0i64; 4];
-            let mut count = 0i64;
+            let mut sum = [0.0f32; 4];
+            let mut count = 0.0f32;
             for dy in -radius..=radius {
                 let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
                 let idx = (sy * width + x) * 4;
-                for (s, &byte) in sum.iter_mut().zip(&src[idx..idx + 4]) {
-                    *s += byte as i64;
+                for (s, &v) in sum.iter_mut().zip(&src[idx..idx + 4]) {
+                    *s += v;
                 }
-                count += 1;
+                count += 1.0;
             }
             let out_idx = x * 4;
             for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
-                *d = (s / count).clamp(0, 255) as u8;
+                *d = s / count;
             }
         }
     });
@@ -386,4 +398,4 @@ mod tests {
         let outside_idx = (1 * 30 + 1) * 4;
         assert_eq!(data[outside_idx + 3], 0);
     }
-    }
+         }
