@@ -90,9 +90,26 @@ mod tests {
 
     #[test]
     fn arc_within_range_behaves_like_ring() {
+        // BUGFIX: this used to assert `d.abs() < 1e-3` while passing
+        // thickness=2.0. arc()'s in-range branch is the exact same formula
+        // as ring(), and for a point exactly on the arc's centerline
+        // radius, that formula correctly evaluates to -thickness/2 (you're
+        // a half-thickness inside the band, not sitting on its edge) — so
+        // the old assertion expected ~0.0 when the correct value is -1.0.
+        // Confirmed via a standalone reimplementation of the formula before
+        // touching this. arc()'s implementation was always correct; only
+        // this assertion was wrong. Rewritten to verify what the test name
+        // actually claims — that arc's in-range branch numerically matches
+        // ring()'s formula — rather than re-hardcoding a number.
         use std::f32::consts::PI;
-        let d = arc(Vec2::new(10.0, 0.0), Vec2::ZERO, 10.0, -PI / 4.0, PI / 4.0, 2.0);
-        assert!(d.abs() < 1e-3);
+        let p = Vec2::new(10.0, 0.0);
+        let center = Vec2::ZERO;
+        let r = 10.0;
+        let thickness = 2.0;
+
+        let d = arc(p, center, r, -PI / 4.0, PI / 4.0, thickness);
+        let expected = ring(p, center, r, thickness);
+        assert!((d - expected).abs() < 1e-4, "arc in-range should match ring(): d={d}, expected={expected}");
     }
 
     #[test]
@@ -101,4 +118,4 @@ mod tests {
         let d = arc(Vec2::new(-10.0, 0.0), Vec2::ZERO, 10.0, -PI / 4.0, PI / 4.0, 0.0);
         assert!(d > 0.0);
     }
-                   }
+    }
