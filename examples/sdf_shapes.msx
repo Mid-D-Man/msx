@@ -1,0 +1,64 @@
+// examples/sdf_shapes.msx
+// SDF primitives and boolean operations.
+// What makes these special vs SVG shapes: k > 0 on smooth_union/subtract
+// means the boundary between shapes blends like wet clay being pushed
+// together — no hard seam, no aliasing, mathematically exact at any
+// resolution. The k value controls how far the blend extends: 0.0 is
+// identical to a hard boolean, 0.5 is aggressive clay-blending.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 600, height = 400, background = #0d0d1a }
+  elements::
+
+    // Row 1 — primitives
+    // Circle
+    { type = "sdf", fill = #4a9eff,
+      transform = { type = "translate", x = 75, y = 100 },
+      tree = { type = "circle", cx = 0, cy = 0, r = 55 } }
+
+    // Box with round corners
+    { type = "sdf", fill = #22c55e,
+      transform = { type = "translate", x = 225, y = 100 },
+      tree = { type = "box", x = -55, y = -45, width = 110, height = 90, corner_radius = 18 } }
+
+    // Ring
+    { type = "sdf", fill = #f5a623,
+      transform = { type = "translate", x = 375, y = 100 },
+      tree = { type = "ring", cx = 0, cy = 0, r = 48, thickness = 16 } }
+
+    // Arc
+    { type = "sdf", fill = #a78bfa,
+      transform = { type = "translate", x = 525, y = 100 },
+      tree = { type = "arc", cx = 0, cy = 0, r = 48,
+               angle_start = -2.094, angle_end = 2.094, thickness = 14 } }
+
+    // Row 2 — boolean operations
+    // Hard union (k=0): two circles touching, sharp join
+    { type = "sdf", fill = #e94560,
+      transform = { type = "translate", x = 75, y = 280 },
+      tree = { type = "union",
+        children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                     { type = "circle", cx =  22, cy = 0, r = 38 } ] } }
+
+    // Smooth union (k=0.3): same two circles, blended like clay
+    { type = "sdf", fill = #ff6b6b,
+      transform = { type = "translate", x = 225, y = 280 },
+      tree = { type = "smooth_union", k = 0.3,
+        children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                     { type = "circle", cx =  22, cy = 0, r = 38 } ] } }
+
+    // Smooth subtract (k=0.25): circle with a soft notch carved out
+    { type = "sdf", fill = #ffd166,
+      transform = { type = "translate", x = 375, y = 280 },
+      tree = { type = "smooth_subtract", k = 0.25,
+        a = { type = "circle", cx = 0, cy = 0, r = 52 },
+        b = { type = "circle", cx = 22, cy = -18, r = 36 } } }
+
+    // Smooth intersect + offset: inflated intersect ring
+    { type = "sdf", fill = #06d6a0,
+      transform = { type = "translate", x = 525, y = 280 },
+      tree = { type = "offset", amount = 8,
+        child = { type = "smooth_intersect", k = 0.15,
+          a = { type = "circle", cx = -16, cy = 0, r = 52 },
+          b = { type = "circle", cx =  16, cy = 0, r = 52 } } } }
+)
