@@ -1,0 +1,67 @@
+// examples/sdf_logo.msx
+// MSX logotype concept — the letters "M", "S", "X" built from SDF
+// primitives and boolean operations, with splat glow as lighting.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 600, height = 300, background = #06060f }
+  elements::
+
+    // ── Background glow ───────────────────────────────────────────────
+    { type = "splat", x = 300, y = 150, sigma_x = 220, sigma_y = 100,
+      color = #1a0040, opacity = 0.85 }
+    { type = "splat", x = 110, y = 150, sigma_x = 80,  sigma_y = 60,
+      color = #4a9eff, opacity = 0.25 }
+    { type = "splat", x = 300, y = 150, sigma_x = 70,  sigma_y = 55,
+      color = #a78bfa, opacity = 0.25 }
+    { type = "splat", x = 490, y = 150, sigma_x = 80,  sigma_y = 60,
+      color = #e94560, opacity = 0.25 }
+
+    // ── "M" ───────────────────────────────────────────────────────────
+    { type = "sdf", fill = #4a9eff,
+      transform = { type = "translate", x = 110, y = 150 },
+      tree = { type = "smooth_subtract", k = 0.1,
+        a = { type = "smooth_union", k = 0.2,
+          children = [
+            { type = "box", x = -45, y = -70, width = 28, height = 140, corner_radius = 8 },
+            { type = "box", x =  17, y = -70, width = 28, height = 140, corner_radius = 8 },
+            { type = "box", x = -20, y = -70, width = 40, height = 36,  corner_radius = 6 }
+          ] },
+        b = { type = "box", x = -12, y = -30, width = 24, height = 60, corner_radius = 4 } } }
+    { type = "splat", x = 110, y = 150, sigma_x = 38, sigma_y = 30,
+      color = #7ec8ff, opacity = 0.45 }
+
+    // ── "S" ───────────────────────────────────────────────────────────
+    { type = "sdf", fill = #a78bfa,
+      transform = { type = "translate", x = 300, y = 150 },
+      tree = { type = "smooth_union", k = 0.18,
+        children = [
+          { type = "smooth_subtract", k = 0.12,
+            a = { type = "circle", cx = 12, cy = -34, r = 36 },
+            b = { type = "circle", cx = 12, cy = -34, r = 22 } },
+          { type = "smooth_subtract", k = 0.12,
+            a = { type = "circle", cx = -12, cy = 34, r = 36 },
+            b = { type = "circle", cx = -12, cy = 34, r = 22 } },
+          { type = "box", x = -8, y = -12, width = 16, height = 24, corner_radius = 4 }
+        ] } }
+    { type = "splat", x = 300, y = 150, sigma_x = 38, sigma_y = 30,
+      color = #c4b5fd, opacity = 0.45 }
+
+    // ── "X" ───────────────────────────────────────────────────────────
+    { type = "sdf", fill = #e94560,
+      transform = { type = "translate", x = 490, y = 150 },
+      tree = { type = "smooth_union", k = 0.15,
+        children = [
+          { type = "line", x1 = -42, y1 = -66, x2 = 42, y2 = 66, thickness = 22 },
+          { type = "line", x1 =  42, y1 = -66, x2 = -42, y2 = 66, thickness = 22 }
+        ] } }
+    { type = "splat", x = 490, y = 150, sigma_x = 38, sigma_y = 30,
+      color = #ff8fa3, opacity = 0.45 }
+
+    // ── Core highlights ───────────────────────────────────────────────
+    { type = "splat", x = 110, y = 135, sigma_x = 12, sigma_y = 10,
+      color = #ffffff, opacity = 0.6 }
+    { type = "splat", x = 300, y = 130, sigma_x = 12, sigma_y = 10,
+      color = #ffffff, opacity = 0.6 }
+    { type = "splat", x = 490, y = 148, sigma_x = 12, sigma_y = 10,
+      color = #ffffff, opacity = 0.6 }
+)
