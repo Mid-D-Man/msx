@@ -1,0 +1,63 @@
+// examples/sdf_splat_mixed.msx
+// Hard vector shapes + SDF booleans + Gaussian splat atmosphere.
+// This is the actual MSX value proposition: all three mark types
+// compositing together in one scene. The splats provide the soft glow
+// that makes the hard shapes read as lit from within — something you
+// can't approximate cleanly in SVG because SVG filters operate per-element
+// and can't reach across element boundaries the way alpha accumulation does.
+@CONFIG( version -> "1.0.0" )
+@QUICKFUNCS(
+  ~glow<object>(x, y, color, radius, strength) {
+    return { type = "splat", x = x, y = y,
+             sigma_x = radius, sigma_y = radius,
+             color = color, opacity = strength }
+  }
+)
+@DATA(
+  scene = { width = 600, height = 400, background = #080810 }
+  elements::
+
+    // ── Background atmosphere (splats, drawn first = furthest back) ──
+    glow(300, 200, #1a0533, 180, 0.8)
+    glow(180, 160, #0f1a40, 120, 0.6)
+    glow(420, 240, #001a20, 110, 0.6)
+
+    // ── Hard vector shapes ────────────────────────────────────────────
+    { type = "rect", x = 40, y = 140, width = 140, height = 120, rx = 8,
+      style = { fill = #0f3460, stroke = #4a9eff, stroke_width = 1.5, opacity = 0.9 } }
+
+    { type = "circle", cx = 300, cy = 200, r = 70,
+      style = { fill = #1a0533, stroke = #a78bfa, stroke_width = 2.0, opacity = 0.85 } }
+
+    { type = "rect", x = 420, y = 140, width = 140, height = 120, rx = 8,
+      style = { fill = #001a20, stroke = #22c55e, stroke_width = 1.5, opacity = 0.9 } }
+
+    // ── SDF shapes (mid layer) ────────────────────────────────────────
+    { type = "sdf", fill = #e94560,
+      transform = { type = "translate", x = 300, y = 200 },
+      tree = { type = "smooth_union", k = 0.35,
+        children = [ { type = "circle", cx = -24, cy =  0, r = 32 },
+                     { type = "circle", cx =  24, cy =  0, r = 32 },
+                     { type = "circle", cx =   0, cy = -28, r = 26 } ] } }
+
+    { type = "sdf", fill = #4a9eff,
+      transform = { type = "translate", x = 110, y = 200 },
+      tree = { type = "ring", cx = 0, cy = 0, r = 36, thickness = 12 } }
+
+    { type = "sdf", fill = #22c55e,
+      transform = { type = "translate", x = 490, y = 200 },
+      tree = { type = "arc", cx = 0, cy = 0, r = 36,
+               angle_start = -1.8, angle_end = 1.8, thickness = 10 } }
+
+    // ── Tight highlight splats on top of the SDF shapes (bloom effect) ──
+    glow(300, 200, #ff6b8a, 28, 0.6)
+    glow(300, 200, #ffffff, 10, 0.5)
+    glow(110, 200, #7ec8ff, 22, 0.55)
+    glow(110, 200, #ffffff,  8, 0.4)
+    glow(490, 200, #6effa0, 22, 0.55)
+    glow(490, 200, #ffffff,  8, 0.4)
+
+    // ── Ground reflection streak (anisotropic splat) ──────────────────
+    { type = "splat", x = 300, y = 395, sigma_x = 220, sigma_y = 12,
+      color = #e94560, opacity = 0.2 }
+)
