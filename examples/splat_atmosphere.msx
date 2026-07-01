@@ -1,0 +1,52 @@
+// examples/splat_atmosphere.msx
+// Gaussian splats — additive soft glowing ellipses.
+// Each splat is: opacity * exp(-(dx²/2σx² + dy²/2σy²))
+// They accumulate alpha over each other (painter's algorithm, back to
+// front). The result is painterly in a way hard vector shapes aren't —
+// smooth light bloom, atmospheric haze, soft shadows. This is what makes
+// MSX different from SVG: the two types of mark co-exist and compose.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 600, height = 400, background = #020408 }
+  elements::
+
+    // Background atmosphere — large, dim, overlapping color fields
+    { type = "splat", x = 180, y = 200, sigma_x = 140, sigma_y = 110,
+      color = #1a0533, opacity = 0.9 }
+    { type = "splat", x = 420, y = 200, sigma_x = 140, sigma_y = 110,
+      color = #001a33, opacity = 0.9 }
+    { type = "splat", x = 300, y = 220, sigma_x = 160, sigma_y = 100,
+      color = #0d0d2b, opacity = 0.8 }
+
+    // Mid-range color clouds
+    { type = "splat", x = 120, y = 160, sigma_x = 90, sigma_y = 70,
+      color = #533483, opacity = 0.7 }
+    { type = "splat", x = 480, y = 170, sigma_x = 85, sigma_y = 65,
+      color = #0f3460, opacity = 0.7 }
+    { type = "splat", x = 300, y = 340, sigma_x = 110, sigma_y = 50,
+      color = #1a0533, opacity = 0.6 }
+
+    // Accent glows — tighter, brighter, directional
+    { type = "splat", x = 150, y = 180, sigma_x = 55, sigma_y = 40,
+      color = #a78bfa, opacity = 0.75 }
+    { type = "splat", x = 460, y = 190, sigma_x = 50, sigma_y = 38,
+      color = #4a9eff, opacity = 0.8 }
+    { type = "splat", x = 290, y = 150, sigma_x = 45, sigma_y = 35,
+      color = #e94560, opacity = 0.55 }
+    { type = "splat", x = 310, y = 260, sigma_x = 40, sigma_y = 30,
+      color = #22c55e, opacity = 0.5 }
+
+    // Hot core highlights — small sigma = tight, bright center point
+    { type = "splat", x = 152, y = 182, sigma_x = 18, sigma_y = 14,
+      color = #ffffff, opacity = 0.85 }
+    { type = "splat", x = 458, y = 192, sigma_x = 16, sigma_y = 13,
+      color = #e8f4ff, opacity = 0.9 }
+    { type = "splat", x = 300, y = 155, sigma_x = 14, sigma_y = 11,
+      color = #ffe8ec, opacity = 0.7 }
+
+    // Anisotropic streaks — sigma_x >> sigma_y = elongated horizontally
+    { type = "splat", x = 300, y = 380, sigma_x = 200, sigma_y = 18,
+      color = #4a9eff, opacity = 0.3 }
+    { type = "splat", x = 300, y = 370, sigma_x = 120, sigma_y = 10,
+      color = #a78bfa, opacity = 0.25 }
+)
