@@ -1,7 +1,5 @@
 // core/msx-ast/src/lib.rs
-//! MSX scene graph — pure data types used by all other MSX crates.
-//! Zero external dependencies.
-
+pub mod animation;
 pub mod canvas;
 pub mod color;
 pub mod effect;
@@ -15,8 +13,7 @@ pub mod splat;
 pub mod style;
 pub mod transform;
 
-// ── Top-level re-exports ──────────────────────────────────────────────────────
-
+pub use animation::{AnimatedProperty, AnimationTrack, Easing, Keyframe, LoopMode};
 pub use canvas::{Canvas, Scene};
 pub use color::{Color, Paint};
 pub use effect::{Effect, EffectType};
