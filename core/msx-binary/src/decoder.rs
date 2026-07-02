@@ -66,6 +66,8 @@ pub fn read_string_pool(data: &[u8], cursor: &mut usize) -> io::Result<Vec<Strin
     Ok(pool)
 }
 
+// BUGFIX: was `pub fn lookup_string<'a>(pool: &'a [String], idx: u16) -> io::Result<&'a str>`
+// — clippy::needless_lifetimes, single input+output lifetime elides per Rust rules.
 pub fn lookup_string(pool: &[String], idx: u16) -> io::Result<&str> {
     pool.get(idx as usize)
         .map(|s| s.as_str())
@@ -84,19 +86,15 @@ pub fn read_color(data: &[u8], cursor: &mut usize) -> io::Result<Color> {
 pub fn read_paint(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<Paint> {
     let tag = read_u8(data, cursor)?;
     match tag {
-        t if t == Paint::TAG_NONE => Ok(Paint::None),
-        t if t == Paint::TAG_COLOR => {
+        t if t == Paint::TAG_NONE         => Ok(Paint::None),
+        t if t == Paint::TAG_COLOR        => {
             let c = read_color(data, cursor)?;
             Ok(Paint::Color(c))
         }
         t if t == Paint::TAG_GRADIENT_REF || t == Paint::TAG_PATTERN_REF => {
             let idx = read_u16(data, cursor)?;
             let s   = lookup_string(pool, idx)?.to_string();
-            if s == "currentColor" {
-                Ok(Paint::CurrentColor)
-            } else {
-                Ok(Paint::Ref(s))
-            }
+            if s == "currentColor" { Ok(Paint::CurrentColor) } else { Ok(Paint::Ref(s)) }
         }
         other => Err(bad(&format!("unknown paint tag 0x{:02x}", other))),
     }
@@ -107,8 +105,8 @@ pub fn read_paint(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
 pub fn read_transform(data: &[u8], cursor: &mut usize) -> io::Result<Transform> {
     let tag = read_u8(data, cursor)?;
     match tag {
-        TRANSFORM_NONE => Ok(Transform::None),
-        TRANSFORM_MATRIX => {
+        TRANSFORM_NONE      => Ok(Transform::None),
+        TRANSFORM_MATRIX    => {
             if *cursor + 24 > data.len() { return Err(eof("matrix truncated")); }
             let bytes: [u8; 24] = data[*cursor..*cursor + 24].try_into().unwrap();
             *cursor += 24;
@@ -119,37 +117,27 @@ pub fn read_transform(data: &[u8], cursor: &mut usize) -> io::Result<Transform> 
             let y = read_f32(data, cursor)?;
             Ok(Transform::Translate { x, y })
         }
-        TRANSFORM_SCALE => {
+        TRANSFORM_SCALE     => {
             let x = read_f32(data, cursor)?;
             let y = read_f32(data, cursor)?;
             Ok(Transform::Scale { x, y })
         }
-        TRANSFORM_ROTATE => {
+        TRANSFORM_ROTATE    => {
             let angle      = read_f32(data, cursor)?;
             let has_center = read_u8(data, cursor)? != 0;
-            let (cx, cy) = if has_center {
-                let cx = read_f32(data, cursor)?;
-                let cy = read_f32(data, cursor)?;
-                (Some(cx), Some(cy))
+            let (cx, cy)   = if has_center {
+                (Some(read_f32(data, cursor)?), Some(read_f32(data, cursor)?))
             } else {
                 (None, None)
             };
             Ok(Transform::Rotate { angle, cx, cy })
         }
-        TRANSFORM_SKEW_X => {
-            let a = read_f32(data, cursor)?;
-            Ok(Transform::SkewX(a))
-        }
-        TRANSFORM_SKEW_Y => {
-            let a = read_f32(data, cursor)?;
-            Ok(Transform::SkewY(a))
-        }
-        TRANSFORM_MULTIPLE => {
+        TRANSFORM_SKEW_X    => Ok(Transform::SkewX(read_f32(data, cursor)?)),
+        TRANSFORM_SKEW_Y    => Ok(Transform::SkewY(read_f32(data, cursor)?)),
+        TRANSFORM_MULTIPLE  => {
             let count = read_u8(data, cursor)? as usize;
             let mut v = Vec::with_capacity(count);
-            for _ in 0..count {
-                v.push(read_transform(data, cursor)?);
-            }
+            for _ in 0..count { v.push(read_transform(data, cursor)?); }
             Ok(Transform::Multiple(v))
         }
         other => Err(bad(&format!("unknown transform tag 0x{:02x}", other))),
@@ -171,20 +159,11 @@ pub fn read_id_flags(
     let flags         = read_u8(data, cursor)?;
     let has_id        = flags & 1 != 0;
     let has_transform = flags & 2 != 0;
-
     let id = if has_id {
         let idx = read_u16(data, cursor)?;
         Some(lookup_string(pool, idx)?.to_string())
-    } else {
-        None
-    };
-
-    let transform = if has_transform {
-        Some(read_transform(data, cursor)?)
-    } else {
-        None
-    };
-
+    } else { None };
+    let transform = if has_transform { Some(read_transform(data, cursor)?) } else { None };
     Ok((id, transform))
 }
 
@@ -193,53 +172,31 @@ pub fn read_id_flags(
 pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<Style> {
     let flags = read_u8(data, cursor)?;
     let mut s = Style::empty();
-
-    if flags & (1 << 0) != 0 {
-        s.fill = Some(read_paint(data, cursor, pool)?);
-    }
-    if flags & (1 << 1) != 0 {
-        s.stroke = Some(read_paint(data, cursor, pool)?);
-    }
-    if flags & (1 << 2) != 0 {
-        s.opacity = Some(read_f32(data, cursor)?);
-    }
-    if flags & (1 << 3) != 0 {
-        s.stroke_width = Some(read_f32(data, cursor)?);
-    }
+    if flags & (1 << 0) != 0 { s.fill         = Some(read_paint(data, cursor, pool)?); }
+    if flags & (1 << 1) != 0 { s.stroke       = Some(read_paint(data, cursor, pool)?); }
+    if flags & (1 << 2) != 0 { s.opacity      = Some(read_f32(data, cursor)?); }
+    if flags & (1 << 3) != 0 { s.stroke_width = Some(read_f32(data, cursor)?); }
     if flags & (1 << 4) != 0 {
-        s.fill_rule          = Some(FillRule::from_byte(read_u8(data, cursor)?));
-        s.stroke_linecap     = Some(LineCap::from_byte(read_u8(data, cursor)?));
-        s.stroke_linejoin    = Some(LineJoin::from_byte(read_u8(data, cursor)?));
-        s.stroke_miterlimit  = Some(read_f32(data, cursor)?);
+        s.fill_rule         = Some(FillRule::from_byte(read_u8(data, cursor)?));
+        s.stroke_linecap    = Some(LineCap::from_byte(read_u8(data, cursor)?));
+        s.stroke_linejoin   = Some(LineJoin::from_byte(read_u8(data, cursor)?));
+        s.stroke_miterlimit = Some(read_f32(data, cursor)?);
     }
     if flags & (1 << 5) != 0 {
         let fs_x100   = read_u16(data, cursor)?;
         s.font_size   = Some(fs_x100 as f64 / 100.0);
-
         let ff_idx    = read_u16(data, cursor)?;
         let ff        = lookup_string(pool, ff_idx)?.to_string();
         s.font_family = if ff.is_empty() { None } else { Some(ff) };
-
         let fw_byte   = read_u8(data, cursor)?;
-        s.font_weight = if fw_byte == 0 {
-            None
-        } else {
-            Some(FontWeight::from_byte(fw_byte - 1))
-        };
-
+        s.font_weight = if fw_byte == 0 { None } else { Some(FontWeight::from_byte(fw_byte - 1)) };
         let ta_byte   = read_u8(data, cursor)?;
-        s.text_anchor = if ta_byte == 0 {
-            None
-        } else {
-            Some(TextAnchor::from_byte(ta_byte - 1))
-        };
+        s.text_anchor = if ta_byte == 0 { None } else { Some(TextAnchor::from_byte(ta_byte - 1)) };
     }
     if flags & (1 << 6) != 0 {
         let count = read_u16(data, cursor)? as usize;
         let mut da = Vec::with_capacity(count);
-        for _ in 0..count {
-            da.push(read_f32(data, cursor)?);
-        }
+        for _ in 0..count { da.push(read_f32(data, cursor)?); }
         s.stroke_dasharray  = if da.is_empty() { None } else { Some(da) };
         s.stroke_dashoffset = Some(read_f32(data, cursor)?);
     }
@@ -248,7 +205,6 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         s.visibility_hidden = vd & 1 != 0;
         s.display_none      = vd & 2 != 0;
     }
-
     Ok(s)
 }
 
@@ -268,10 +224,10 @@ mod tests {
         assert_eq!(cursor, buf.len());
     }
 
-    #[test] fn paint_none_roundtrip()    { roundtrip_paint(Paint::None); }
-    #[test] fn paint_color_roundtrip()   { roundtrip_paint(Paint::Color(Color::rgba(10, 20, 30, 200))); }
-    #[test] fn paint_ref_roundtrip()     { roundtrip_paint(Paint::Ref("url(#sunset)".to_string())); }
-    #[test] fn paint_currentcolor_rt()   { roundtrip_paint(Paint::CurrentColor); }
+    #[test] fn paint_none_roundtrip()  { roundtrip_paint(Paint::None); }
+    #[test] fn paint_color_roundtrip() { roundtrip_paint(Paint::Color(Color::rgba(10, 20, 30, 200))); }
+    #[test] fn paint_ref_roundtrip()   { roundtrip_paint(Paint::Ref("url(#sunset)".to_string())); }
+    #[test] fn paint_currentcolor_rt() { roundtrip_paint(Paint::CurrentColor); }
 
     #[test]
     fn transform_translate_roundtrip() {
@@ -284,9 +240,7 @@ mod tests {
         if let Transform::Translate { x, y } = back {
             assert!((x - 10.5).abs() < 1e-4);
             assert!((y + 20.0).abs() < 1e-4);
-        } else {
-            panic!("expected Translate");
-        }
+        } else { panic!("expected Translate"); }
     }
 
     #[test]
@@ -300,9 +254,7 @@ mod tests {
             assert!((angle - 45.0).abs() < 1e-4);
             assert!((cx.unwrap() - 100.0).abs() < 1e-4);
             assert!((cy.unwrap() - 200.0).abs() < 1e-4);
-        } else {
-            panic!("expected Rotate");
-        }
+        } else { panic!("expected Rotate"); }
     }
 
     #[test]
@@ -312,15 +264,12 @@ mod tests {
         style.stroke       = Some(Paint::None);
         style.stroke_width = Some(2.5);
         style.opacity      = Some(0.8);
-
         let mut buf  = Vec::new();
         let mut pool = Vec::new();
         write_style(&mut buf, &style, &mut pool);
-
         let mut cursor = 0;
         let back = read_style(&buf, &mut cursor, &pool).unwrap();
         assert_eq!(cursor, buf.len());
-
         assert_eq!(back.fill, style.fill);
         assert_eq!(back.stroke, style.stroke);
         assert!((back.stroke_width.unwrap() - 2.5).abs() < 1e-3);
@@ -345,15 +294,12 @@ mod tests {
         let mut style = Style::empty();
         style.font_size   = Some(18.0);
         style.text_anchor = Some(TextAnchor::Middle);
-
         let mut buf  = Vec::new();
         let mut pool = Vec::new();
         write_style(&mut buf, &style, &mut pool);
         let mut cursor = 0;
         let back = read_style(&buf, &mut cursor, &pool).unwrap();
-
-        assert_eq!(back.font_weight, None,
-            "font_weight None must survive encode→decode unchanged");
+        assert_eq!(back.font_weight, None);
         assert_eq!(back.text_anchor, Some(TextAnchor::Middle));
         assert!((back.font_size.unwrap() - 18.0).abs() < 0.01);
     }
@@ -363,15 +309,12 @@ mod tests {
         let mut style = Style::empty();
         style.font_size   = Some(12.0);
         style.font_weight = Some(FontWeight::Bold);
-
         let mut buf  = Vec::new();
         let mut pool = Vec::new();
         write_style(&mut buf, &style, &mut pool);
         let mut cursor = 0;
         let back = read_style(&buf, &mut cursor, &pool).unwrap();
-
-        assert_eq!(back.text_anchor, None,
-            "text_anchor None must survive encode→decode unchanged");
+        assert_eq!(back.text_anchor, None);
         assert_eq!(back.font_weight, Some(FontWeight::Bold));
     }
-  }
+                                    }
