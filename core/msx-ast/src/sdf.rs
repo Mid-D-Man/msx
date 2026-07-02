@@ -13,57 +13,19 @@
 use crate::color::Paint;
 use crate::transform::Transform;
 
-/// Recursive SDF tree — a primitive or a compound operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SdfTree {
-    // ── Primitives ────────────────────────────────────────────────────────────
-
-    /// `length(p - center) - r`
     Circle { cx: f64, cy: f64, r: f64 },
-
-    /// Rounded rectangle.
-    Box {
-        x: f64, y: f64,
-        width: f64, height: f64,
-        corner_radius: f64,
-    },
-
-    /// Thick line segment SDF.
+    Box { x: f64, y: f64, width: f64, height: f64, corner_radius: f64 },
     Line { x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64 },
-
-    /// Annulus (ring).
     Ring { cx: f64, cy: f64, r: f64, thickness: f64 },
-
-    /// Arc segment.
-    Arc {
-        cx: f64, cy: f64, r: f64,
-        angle_start: f64,  // radians
-        angle_end:   f64,
-        thickness:   f64,
-    },
-
-    // ── Boolean operations ────────────────────────────────────────────────────
-
-    /// Hard union: `min(d₁, d₂, …)` — sharp seam at boundary.
+    Arc { cx: f64, cy: f64, r: f64, angle_start: f64, angle_end: f64, thickness: f64 },
     Union(Vec<SdfTree>),
-
-    /// Smooth union via polynomial blend — shapes merge like clay.
-    /// `k` is the blend radius: 0.0 = sharp, larger = heavier blend.
     SmoothUnion { children: Vec<SdfTree>, k: f64 },
-
-    /// Hard subtraction: `max(dₐ, -d_b)` — removes B from A.
     Subtract { a: Box<SdfTree>, b: Box<SdfTree> },
-
-    /// Smooth subtraction.
     SmoothSubtract { a: Box<SdfTree>, b: Box<SdfTree>, k: f64 },
-
-    /// Hard intersection: `max(dₐ, d_b)` — only the overlap remains.
     Intersect { a: Box<SdfTree>, b: Box<SdfTree> },
-
-    /// Smooth intersection.
     SmoothIntersect { a: Box<SdfTree>, b: Box<SdfTree>, k: f64 },
-
-    /// Inflate (positive) or deflate (negative) by `amount` scene units.
     Offset { child: Box<SdfTree>, amount: f64 },
 }
 
@@ -85,10 +47,6 @@ impl SdfTree {
     }
 }
 
-/// An SDF element in the scene tree — a renderable compound SDF shape.
-///
-/// Rendered by evaluating `tree` at each pixel: fill where d ≤ 0,
-/// stroke in the band |d| ≤ stroke_width/2.
 #[derive(Debug, Clone)]
 pub struct SdfNode {
     pub tree:         SdfTree,
@@ -114,7 +72,6 @@ impl SdfNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::Paint;
 
     #[test]
     fn sdf_tree_constructs() {
@@ -138,4 +95,4 @@ mod tests {
             .subtract(SdfTree::Circle { cx: 0.0, cy: 0.0, r: 30.0 });
         assert!(matches!(ring, SdfTree::Subtract { .. }));
     }
-            }
+                       }
