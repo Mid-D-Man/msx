@@ -72,9 +72,8 @@ impl GpuRenderer {
 
 impl Renderer for GpuRenderer {
     fn render(&self, scene: &Scene, target: &mut RenderTarget) {
-        let width = scene.canvas.width.round().max(1.0) as u32;
+        let width  = scene.canvas.width.round().max(1.0) as u32;
         let height = scene.canvas.height.round().max(1.0) as u32;
-        let canvas_f = (width as f32, height as f32);
 
         let offscreen = OffscreenTarget::new(&self.context.device, width, height);
 
@@ -131,11 +130,13 @@ mod tests {
             return;
         };
 
-        let mut style = Style::default();
-        style.fill = Some(Paint::Color(Color::rgb(10, 20, 30)));
-        style.stroke = Some(Paint::None);
-        style.stroke_width = Some(0.0);
-        style.opacity = Some(1.0);
+        let style = Style {
+            fill: Some(Paint::Color(Color::rgb(10, 20, 30))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
 
         let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::WHITE));
         scene.elements.push(Element::Rect(Rect {
@@ -176,11 +177,13 @@ mod tests {
             return;
         };
 
-        let mut style = Style::default();
-        style.fill = Some(Paint::Color(Color::rgb(255, 0, 0)));
-        style.stroke = Some(Paint::None);
-        style.stroke_width = Some(0.0);
-        style.opacity = Some(1.0);
+        let style = Style {
+            fill: Some(Paint::Color(Color::rgb(255, 0, 0))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
 
         let circle = Element::Circle(Circle { cx: 10.0, cy: 10.0, r: 8.0, id: None, transform: None, style });
         let mut layer = Layer::new(vec![circle]);
