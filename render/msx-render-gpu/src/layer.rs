@@ -131,6 +131,7 @@ impl LayerCompositor {
     /// Renders `layer`'s children into a fresh offscreen buffer (vector +
     /// SDF + splat passes, same as the top-level render), then composites
     /// that buffer onto `view` at the layer's opacity.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_layer(
         &self,
         device: &wgpu::Device,
@@ -158,7 +159,7 @@ impl LayerCompositor {
             &mut encoder,
             &buffer.view,
             &geometry,
-            wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }, // transparent, not the canvas background
+            wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
         );
         sdf_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f);
         splat_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f);
@@ -258,4 +259,4 @@ mod tests {
         collect_layers(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1, "only the outer layer should be found");
     }
-                                                     }
+    }
