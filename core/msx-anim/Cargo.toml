@@ -1,0 +1,11 @@
+[package]
+name        = "msx-anim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX animation resolver — evaluates keyframe tracks and bakes them into a static Scene"
+publish     = false
+
+[dependencies]
+msx-ast = { workspace = true }
