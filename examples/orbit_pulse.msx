@@ -1,0 +1,29 @@
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 400, height = 240, background = #0a0f1e }
+  duration = 1.2
+  loop_mode = "ping_pong"
+  elements::
+    { type = "rect", id = "wobble_box", x = 40, y = 40, width = 50, height = 50,
+      style = { fill = #f5a623, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "circle", id = "orbit_dot", cx = 200, cy = 170, r = 26,
+      style = { fill = #4a9eff, stroke = #e2e8f0, stroke_width = 2.0, opacity = 1.0 } }
+  animations::
+    { target_id = "wobble_box", property = "rotate",
+      keyframes = [ { time = 0.0, value = 0.0 },
+                    { time = 1.2, value = 30.0, easing = "ease_in_out" } ] }
+    { target_id = "orbit_dot", property = "translate_x",
+      keyframes = [ { time = 0.0, value = -140.0 },
+                    { time = 1.2, value = 140.0, easing = "ease_in_out" } ] }
+    { target_id = "orbit_dot", property = "scale_x",
+      keyframes = [ { time = 0.0, value = 1.0 },
+                    { time = 0.6, value = 1.4, easing = "ease_out" },
+                    { time = 1.2, value = 1.0, easing = "ease_in" } ] }
+    { target_id = "orbit_dot", property = "scale_y",
+      keyframes = [ { time = 0.0, value = 1.0 },
+                    { time = 0.6, value = 1.4, easing = "ease_out" },
+                    { time = 1.2, value = 1.0, easing = "ease_in" } ] }
+    { target_id = "orbit_dot", property = "opacity",
+      keyframes = [ { time = 0.0, value = 1.0 },
+                    { time = 1.2, value = 0.55, easing = "ease_in_out" } ] }
+)
