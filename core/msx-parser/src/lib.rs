@@ -17,6 +17,7 @@
 //! dispatch is hand-written, which type-tagged enums like `Element` and
 //! `SdfTree` need anyway.
 
+pub mod animation;
 pub mod canvas;
 pub mod dix_helpers;
 pub mod element;
@@ -28,6 +29,7 @@ pub mod splat;
 pub mod style;
 pub mod transform;
 
+pub use animation::{parse_animations, parse_duration, parse_loop_mode};
 pub use canvas::parse_canvas;
 pub use element::{parse_element, parse_elements};
 pub use gradient::{parse_defs, parse_stops};
@@ -63,15 +65,18 @@ pub fn parse_scene_from_data(data: &DixData) -> Result<Scene, String> {
 
     let canvas = canvas::parse_canvas(data)?;
     let mut scene = Scene::new(canvas);
-    scene.defs     = gradient::parse_defs(data, "", "defs")?;
-    scene.elements = element::parse_elements(data, "", "elements")?;
+    scene.defs       = gradient::parse_defs(data, "", "defs")?;
+    scene.elements   = element::parse_elements(data, "", "elements")?;
+    scene.animations = animation::parse_animations(data, "", "animations")?;
+    scene.duration   = animation::parse_duration(data)?;
+    scene.loop_mode  = animation::parse_loop_mode(data)?;
     Ok(scene)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{BlendMode, Color, Element, Paint, Transform};
+    use msx_ast::{AnimatedProperty, BlendMode, Color, Easing, Element, LoopMode, Paint, Transform};
 
     #[test]
     fn basic_rect_and_circle() {
@@ -190,5 +195,66 @@ mod tests {
         } else {
             panic!("expected Layer");
         }
+    }
+
+    #[test]
+    fn animation_tracks_duration_and_loop_mode() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 100, height = 100, background = #000000 }
+  duration = 2.0
+  loop_mode = "ping_pong"
+  elements::
+    { type = "circle", id = "dot", cx = 0, cy = 0, r = 5,
+      style = { fill = #ffffff, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+  animations::
+    { target_id = "dot", property = "translate_x",
+      keyframes = [ { time = 0.0, value = 0.0 },
+                    { time = 2.0, value = 50.0, easing = "ease_in_out" } ] }
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        assert_eq!(scene.duration, 2.0);
+        assert_eq!(scene.loop_mode, LoopMode::PingPong);
+        assert_eq!(scene.animations.len(), 1);
+
+        let track = &scene.animations[0];
+        assert_eq!(track.target_id, "dot");
+        assert_eq!(track.property, AnimatedProperty::TranslateX);
+        assert_eq!(track.keyframes.len(), 2);
+        assert_eq!(track.keyframes[1].easing, Easing::EaseInOut);
+        assert!(scene.is_animated());
+    }
+
+    #[test]
+    fn animations_default_to_empty_and_once() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #ffffff }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        assert!(scene.animations.is_empty());
+        assert_eq!(scene.duration, 0.0);
+        assert_eq!(scene.loop_mode, LoopMode::Once);
+        assert!(!scene.is_animated());
+    }
+
+    #[test]
+    fn animation_track_rejects_unknown_property() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #ffffff }
+  elements::
+  animations::
+    { target_id = "dot", property = "skew_x",
+      keyframes = [ { time = 0.0, value = 0.0 } ] }
+)
+"#;
+        assert!(parse_scene(src).is_err());
     }
 }
