@@ -113,7 +113,7 @@ jobs:
       - name: Render examples and collect corpus stats
         run: |
           BIN=./target/release/msx
-          mkdir -p results/svgs results/pngs
+          mkdir -p results/svgs results/pngs results/gifs
           {
             printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
             for src in examples/*.msx; do
@@ -143,6 +143,14 @@ jobs:
               # inline SVG for that single card.
               "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
                 echo "  WARN: rasterize failed for $stem" >&2
+
+              # Animate (msx-anim resolve_at_time, sampled to a looping
+              # GIF) — expected to fail for the majority of examples that
+              # have no animation tracks; that's not a warning, just a
+              # static scene, so it's silent unless it errors for another
+              # reason. The report falls back to the static PNG when no
+              # GIF exists for a given example.
+              "$BIN" animate "$src" -o "results/gifs/${stem}.gif" 2>/dev/null || true
 
               denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
               bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
@@ -192,6 +200,7 @@ jobs:
               stem     = os.path.splitext(os.path.basename(svg_path))[0]
               src_path = f'examples/{stem}.msx'
               png_path = f'results/pngs/{stem}.png'
+              gif_path = f'results/gifs/{stem}.gif'
 
               if not os.path.exists(src_path):
                   continue
@@ -206,25 +215,32 @@ jobs:
                   with open(png_path, 'rb') as f:
                       png_base64 = base64.b64encode(f.read()).decode('ascii')
 
+              anim_gif_base64 = ''
+              if os.path.exists(gif_path):
+                  with open(gif_path, 'rb') as f:
+                      anim_gif_base64 = base64.b64encode(f.read()).decode('ascii')
+
               row = stats.get(stem, {})
               entry = {
-                  'name':         stem,
-                  'source':       source,
-                  'svg':          svg_content,
-                  'png_base64':   png_base64,
-                  'source_bytes': row.get('source_bytes', os.path.getsize(src_path)),
-                  'binary_bytes': row.get('binary_bytes', 0),
-                  'svg_bytes':    row.get('svg_bytes',    os.path.getsize(svg_path)),
-                  'bin_pct':      row.get('bin_pct', 0.0),
-                  'svg_pct':      row.get('svg_pct', 0.0),
-                  'pass':         row.get('pass', False),
+                  'name':            stem,
+                  'source':          source,
+                  'svg':             svg_content,
+                  'png_base64':      png_base64,
+                  'anim_gif_base64': anim_gif_base64,
+                  'source_bytes':    row.get('source_bytes', os.path.getsize(src_path)),
+                  'binary_bytes':    row.get('binary_bytes', 0),
+                  'svg_bytes':       row.get('svg_bytes',    os.path.getsize(svg_path)),
+                  'bin_pct':         row.get('bin_pct', 0.0),
+                  'svg_pct':         row.get('svg_pct', 0.0),
+                  'pass':            row.get('pass', False),
               }
               results.append(entry)
               png_note = '' if png_base64 else ' [no native PNG]'
+              anim_note = ' [animated]' if anim_gif_base64 else ''
               print(f"  {stem}: {entry['source_bytes']}B src "
                     f"→ {entry['binary_bytes']}B bin "
                     f"→ {entry['svg_bytes']}B svg "
-                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}")
+                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}")
 
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
