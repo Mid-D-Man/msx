@@ -17,7 +17,13 @@ pub fn validate(data: &DixData) -> Result<(), String> {
             .optional_array("elements")
             .with_description("Top-level scene element array")
             .optional_array("defs")
-            .with_description("Gradient / pattern definitions"),
+            .with_description("Gradient / pattern definitions")
+            .optional_array("animations")
+            .with_description("Keyframe animation tracks, each targeting an element by id")
+            .optional("duration", ExpectedValueType::Any)
+            .with_description("Timeline length in seconds — 0 or omitted infers from the latest keyframe")
+            .optional("loop_mode", ExpectedValueType::Any)
+            .with_description("\"once\" (default) | \"loop\" | \"ping_pong\""),
     );
 
     if report.is_valid() {
@@ -25,4 +31,4 @@ pub fn validate(data: &DixData) -> Result<(), String> {
     } else {
         Err(format!("MSX schema validation failed:\n{}", report))
     }
-  }
+}
