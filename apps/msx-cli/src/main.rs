@@ -168,7 +168,7 @@ fn cmd_animate(input: &Path, output: Option<&Path>, fps: u32) -> Result<(), Stri
             .map_err(|e| format!("failed to set GIF loop: {}", e))?;
     }
     encoder
-        .encode_frames(frames.into_iter())
+        .encode_frames(frames)
         .map_err(|e| format!("GIF encode failed: {}", e))?;
 
     println!(
@@ -349,4 +349,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-                                     }
+                                                        }
