@@ -294,7 +294,7 @@ fn rect_path(r: &Rect) -> LyonPath {
         b.line_to(point(x, y + h));
         b.end(true);
     } else {
-        const K: f32 = 0.552_284_75;
+        const K: f32 = 0.552_284_8;
         let (kx, ky) = (rx * K, ry * K);
         b.begin(point(x + rx, y));
         b.line_to(point(x + w - rx, y));
@@ -312,7 +312,7 @@ fn rect_path(r: &Rect) -> LyonPath {
 
 fn ellipse_path(cx: f64, cy: f64, rx: f64, ry: f64) -> LyonPath {
     let (cx, cy, rx, ry) = (cx as f32, cy as f32, rx as f32, ry as f32);
-    const K: f32 = 0.552_284_75;
+    const K: f32 = 0.552_284_8;
     let (kx, ky) = (rx * K, ry * K);
     let mut b = LyonPath::builder();
     b.begin(point(cx + rx, cy));
@@ -557,4 +557,4 @@ fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_ro
         b.cubic_bezier_to(point(c1r.0, c1r.1), point(c2r.0, c2r.1), point(p2r.0, p2r.1));
         theta = theta_next;
     }
-                      }
+    }
