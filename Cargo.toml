@@ -3,6 +3,7 @@
 resolver = "2"
 members = [
     "core/msx-ast",
+    "core/msx-anim",
     "core/msx-binary",
     "core/msx-parser",
     "render/msx-render-core",
@@ -24,6 +25,7 @@ license    = "MIT"
 [workspace.dependencies]
 # Internal
 msx-ast         = { path = "core/msx-ast" }
+msx-anim        = { path = "core/msx-anim" }
 msx-binary      = { path = "core/msx-binary" }
 msx-parser      = { path = "core/msx-parser" }
 msx-render-core = { path = "render/msx-render-core" }
