@@ -42,6 +42,17 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Sample an animated .msx file's timeline (msx-anim) and export it as
+    /// a looping animated GIF via msx-render-cpu. Errors if the scene has
+    /// no animation tracks — use `rasterize` for a static render.
+    Animate {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Frames per second to sample the timeline at.
+        #[arg(long, default_value_t = 24)]
+        fps: u32,
+    },
     /// Print canvas/element/def stats for an .msx file (source or binary).
     Info { input: PathBuf },
     /// Parse + schema-validate DixScript source only; exit code reflects success.
@@ -58,6 +69,7 @@ fn main() {
         Command::Render { input, output } => cmd_render(input, output.as_deref()),
         Command::Compile { input, output, no_compress } => cmd_compile(input, output, *no_compress),
         Command::Rasterize { input, output } => cmd_rasterize(input, output.as_deref()),
+        Command::Animate { input, output, fps } => cmd_animate(input, output.as_deref(), *fps),
         Command::Info { input } => cmd_info(input),
         Command::Validate { input } => cmd_validate(input),
         Command::Roundtrip { input } => cmd_roundtrip(input),
@@ -97,6 +109,87 @@ fn cmd_rasterize(input: &Path, output: Option<&Path>) -> Result<(), String> {
     save_png(target, &out_path)?;
     println!("Wrote {} ({}x{})", out_path.display(), w, h);
     Ok(())
+}
+
+fn cmd_animate(input: &Path, output: Option<&Path>, fps: u32) -> Result<(), String> {
+    if fps == 0 {
+        return Err("--fps must be greater than 0".to_string());
+    }
+    let scene = load_scene(input)?;
+    if !scene.is_animated() {
+        return Err(
+            "scene has no animation tracks (or an effective duration of 0) — nothing to \
+             animate; use `msx rasterize` for a static render"
+                .to_string(),
+        );
+    }
+
+    let duration = scene.effective_duration();
+    let frame_dt = 1.0 / fps as f64;
+
+    // A `PingPong` timeline's forward+backward motion only exists across a
+    // full `duration * 2` cycle (see `LoopMode::resolve_time`) — sampling
+    // just `duration` would bake in only the forward half. `Once`/`Loop`
+    // both complete a full pass in a single `duration`-long span.
+    let playback_span = if scene.loop_mode == msx_ast::LoopMode::PingPong {
+        duration * 2.0
+    } else {
+        duration
+    };
+
+    let mut frames = Vec::new();
+    if scene.loop_mode == msx_ast::LoopMode::Once {
+        // Include the exact final frame so playback rests on it — a
+        // non-repeating GIF has nothing to loop back to.
+        let count = (playback_span / frame_dt).ceil().max(1.0) as u32;
+        for i in 0..=count {
+            let t = (i as f64 * frame_dt).min(playback_span);
+            frames.push(render_frame(&scene, t, frame_dt)?);
+        }
+    } else {
+        // Loop/PingPong: the sample at exactly `playback_span` is
+        // identical to the sample at `0` — that's what makes it a loop.
+        // Including both would bake in a one-frame stutter every repeat.
+        let count = (playback_span / frame_dt).round().max(1.0) as u32;
+        for i in 0..count {
+            let t = i as f64 * frame_dt;
+            frames.push(render_frame(&scene, t, frame_dt)?);
+        }
+    }
+    let frame_count = frames.len();
+
+    let out_path = output.map(PathBuf::from).unwrap_or_else(|| input.with_extension("gif"));
+    let file = std::fs::File::create(&out_path)
+        .map_err(|e| format!("failed to create {}: {}", out_path.display(), e))?;
+    let mut encoder = image::codecs::gif::GifEncoder::new(file);
+    if scene.loop_mode != msx_ast::LoopMode::Once {
+        encoder
+            .set_repeat(image::codecs::gif::Repeat::Infinite)
+            .map_err(|e| format!("failed to set GIF loop: {}", e))?;
+    }
+    encoder
+        .encode_frames(frames.into_iter())
+        .map_err(|e| format!("GIF encode failed: {}", e))?;
+
+    println!(
+        "Wrote {} ({} frames @ {}fps, {:.2}s timeline, loop_mode={:?})",
+        out_path.display(),
+        frame_count,
+        fps,
+        duration,
+        scene.loop_mode
+    );
+    Ok(())
+}
+
+/// Resolves the scene at time `t` (msx-anim) and rasterizes that static
+/// pose into one GIF-ready frame.
+fn render_frame(scene: &Scene, t: f64, frame_dt: f64) -> Result<image::Frame, String> {
+    let resolved = msx_anim::resolve_at_time(scene, t);
+    let target = render_to_target(&resolved);
+    let img = rgba_image_from_target(target)?;
+    let delay = image::Delay::from_saturating_duration(std::time::Duration::from_secs_f64(frame_dt));
+    Ok(image::Frame::from_parts(img, 0, 0, delay))
 }
 
 fn cmd_info(input: &Path) -> Result<(), String> {
@@ -200,10 +293,14 @@ fn render_to_target(scene: &Scene) -> RenderTarget {
 }
 
 fn save_png(target: RenderTarget, path: &Path) -> Result<(), String> {
-    let (width, height) = (target.width, target.height);
-    let img = image::RgbaImage::from_raw(width, height, target.into_bytes())
-        .ok_or_else(|| "failed to build image buffer from render target".to_string())?;
+    let img = rgba_image_from_target(target)?;
     img.save(path).map_err(|e| format!("failed to save {}: {}", path.display(), e))
+}
+
+fn rgba_image_from_target(target: RenderTarget) -> Result<image::RgbaImage, String> {
+    let (width, height) = (target.width, target.height);
+    image::RgbaImage::from_raw(width, height, target.into_bytes())
+        .ok_or_else(|| "failed to build image buffer from render target".to_string())
 }
 
 fn open_in_system_viewer(path: &Path) -> Result<(), String> {
@@ -252,4 +349,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-}
+                                     }
