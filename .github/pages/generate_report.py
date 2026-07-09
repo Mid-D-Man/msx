@@ -237,23 +237,33 @@ def svg_gallery_html(examples: list) -> str:
 
     cards = []
     for ex in examples:
-        name         = ex.get("name", "unknown")
-        source       = ex.get("source", "")
-        svg_content  = ex.get("svg", "")
-        png_base64   = ex.get("png_base64", "")
-        source_bytes = ex.get("source_bytes", 0)
-        binary_bytes = ex.get("binary_bytes", 0)
-        svg_bytes    = ex.get("svg_bytes", 0)
-        passed       = ex.get("pass", False)
+        name            = ex.get("name", "unknown")
+        source          = ex.get("source", "")
+        svg_content     = ex.get("svg", "")
+        png_base64      = ex.get("png_base64", "")
+        anim_gif_base64 = ex.get("anim_gif_base64", "")
+        source_bytes    = ex.get("source_bytes", 0)
+        binary_bytes    = ex.get("binary_bytes", 0)
+        svg_bytes       = ex.get("svg_bytes", 0)
+        passed          = ex.get("pass", False)
 
         msx_escaped = source.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         svg_escaped = svg_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
         # Pane 3 — the actual MSX render. MSX's primary output is a native
         # pixel buffer; SVG is one optional export target. This pane shows
-        # what msx-render-cpu actually produced (msx rasterize, embedded as
-        # base64 PNG). Falls back to inline SVG only if the PNG is missing.
-        if png_base64:
+        # what msx-render-cpu actually produced. An animated example (msx-
+        # anim's resolve_at_time sampled across the timeline) takes priority
+        # as a self-looping GIF — <img> loops it natively, no extra JS.
+        # Falls back to the static PNG, then to inline SVG rendered by the
+        # browser if neither raster exists.
+        if anim_gif_base64:
+            rendered_visual = (
+                f'<img class="native-render native-render--anim" '
+                f'src="data:image/gif;base64,{anim_gif_base64}" '
+                f'alt="{name} — animated native MSX render (msx-anim + msx-render-cpu)">'
+            )
+        elif png_base64:
             rendered_visual = (
                 f'<img class="native-render" '
                 f'src="data:image/png;base64,{png_base64}" '
@@ -271,6 +281,7 @@ def svg_gallery_html(examples: list) -> str:
         bin_pct  = (binary_bytes / max(svg_bytes, 1)) * 100 if svg_bytes > 0 else 0
         rt_badge = ('<span class="stat-chip green">✓ roundtrip</span>' if passed
                     else '<span class="stat-chip red">✗ roundtrip failed</span>')
+        anim_badge = '<span class="stat-chip accent">▶ animated</span>' if anim_gif_base64 else ''
 
         cards.append(f"""
 <div class="example-card">
@@ -282,6 +293,7 @@ def svg_gallery_html(examples: list) -> str:
       <span class="stat-chip purple">SVG {svg_bytes}B</span>
       <span class="stat-chip dim">bin/svg: {bin_pct:.1f}%</span>
       {rt_badge}
+      {anim_badge}
     </div>
   </div>
   <div class="example-body">
@@ -455,6 +467,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }}
   .svg-preview svg {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
+  .svg-preview img.native-render--anim {{ border-radius:6px; box-shadow:0 0 0 1px var(--accent), 0 0 16px -4px var(--accent); }}
   .native-render-note {{ color:var(--muted); font-size:.7rem; text-align:center; margin-bottom:8px; }}
 
   .example-divider {{
