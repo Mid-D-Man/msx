@@ -107,12 +107,100 @@ impl ConicGradient {
     }
 }
 
+/// A single named value fed into a shader as a uniform binding. Kept to
+/// the handful of scalar/vector shapes WGSL uniforms actually need —
+/// nothing here is animatable yet (see `ShaderDef` docs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShaderUniformValue {
+    Float(f32),
+    Vec2(f32, f32),
+    Vec3(f32, f32, f32),
+    Vec4(f32, f32, f32, f32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderUniform {
+    pub name:  String,
+    pub value: ShaderUniformValue,
+}
+
+impl ShaderUniform {
+    pub fn new(name: impl Into<String>, value: ShaderUniformValue) -> Self {
+        ShaderUniform { name: name.into(), value }
+    }
+}
+
+/// A custom WGSL fill, referenced by paint `"url(#id)"` exactly like a
+/// gradient — any element's `fill`/`stroke` can point at one.
+///
+/// `source_ref` is a path to a `.wgsl` file, relative to the `.msx`
+/// source it was authored in — it is **never** resolved WGSL text.
+/// DixScript has no raw/heredoc text-block syntax yet to embed shader
+/// source inline without either escaping every quote/brace by hand or
+/// pre-base64-encoding it through the existing `b:("...")` blob
+/// constructor; an external file reference sidesteps both and keeps
+/// compiled binaries small. `msx-cli compile` resolves and validates the
+/// reference at compile time; a real WGSL-executing renderer would
+/// resolve it again at render time.
+///
+/// FUTURE(raw-section): if/when DixScript grows a proper raw/heredoc
+/// text-block section, inline shader source becomes viable without the
+/// base64/escaping tradeoffs above. Migration path, so this doesn't need
+/// another redesign when that lands:
+///   1. Add `pub inline_source: Option<String>` here, alongside
+///      `source_ref` (which stays — external references remain useful
+///      even once inline is possible, e.g. for shared/reused shaders).
+///   2. `msx-parser`'s `"shader"` arm in `gradient.rs` (search
+///      `FUTURE(raw-section)` there too) gains a branch reading the new
+///      raw section instead of `source_ref` when present.
+///   3. Binary encode/decode (`msx-binary`'s `TAG_SHADER` arms in
+///      `compiler.rs`/`scene_decode.rs`) need one new optional field —
+///      everything else in this struct, and every renderer's
+///      `fallback_color` handling, is unaffected.
+///
+/// `fallback_color` is not optional: every renderer that can't execute
+/// WGSL (`msx-render-cpu`, `msx-render-svg`, and `msx-render-gpu` too,
+/// until it actually grows a WGSL-executing path) paints this flat color
+/// instead, so a shader-filled shape still renders *something* sane
+/// everywhere rather than turning invisible or panicking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderDef {
+    pub id:             String,
+    pub source_ref:     String,
+    pub entry_point:    String,
+    pub uniforms:       Vec<ShaderUniform>,
+    pub fallback_color: Color,
+}
+
+impl ShaderDef {
+    pub fn new(id: impl Into<String>, source_ref: impl Into<String>, fallback_color: Color) -> Self {
+        ShaderDef {
+            id: id.into(),
+            source_ref: source_ref.into(),
+            entry_point: "fs_main".to_string(),
+            uniforms: Vec::new(),
+            fallback_color,
+        }
+    }
+
+    pub fn with_entry_point(mut self, entry_point: impl Into<String>) -> Self {
+        self.entry_point = entry_point.into();
+        self
+    }
+
+    pub fn with_uniforms(mut self, uniforms: Vec<ShaderUniform>) -> Self {
+        self.uniforms = uniforms;
+        self
+    }
+}
+
 /// Scene-level definition — referenced by paint `"url(#id)"`.
 #[derive(Debug, Clone)]
 pub enum Def {
     LinearGradient(LinearGradient),
     RadialGradient(RadialGradient),
     ConicGradient(ConicGradient),
+    Shader(ShaderDef),
 }
 
 impl Def {
@@ -121,6 +209,7 @@ impl Def {
             Def::LinearGradient(g) => &g.id,
             Def::RadialGradient(g) => &g.id,
             Def::ConicGradient(g)  => &g.id,
+            Def::Shader(s)         => &s.id,
         }
     }
 
@@ -129,6 +218,19 @@ impl Def {
             Def::LinearGradient(g) => g.to_svg(),
             Def::RadialGradient(g) => g.to_svg(),
             Def::ConicGradient(g)  => g.to_svg(),
+            // SVG 1.1 can't execute WGSL and there's no paint-server
+            // element to emit — same "document the gap" approach as
+            // ConicGradient above. A shape whose fill/stroke references
+            // this id will resolve to an unmatched `url(#id)` and render
+            // as `none` in SVG export specifically; the CPU/GPU raster
+            // paths use `fallback_color` instead (see their `Def::Shader`
+            // handling), which is why SVG is documented as the export
+            // path and native raster as the primary one.
+            Def::Shader(s) => format!(
+                "<!-- shader '{}': WGSL has no SVG equivalent, renders as none in SVG export \
+                 (native raster paths use fallback_color {} instead) -->",
+                s.id, s.fallback_color.to_svg_hex()
+            ),
         }
     }
 }
@@ -143,5 +245,22 @@ mod tests {
         let s2 = Stop::from_bytes(&s.to_bytes());
         assert!((s.offset - s2.offset).abs() < 1e-4);
         assert_eq!(s.color, s2.color);
+    }
+
+    #[test]
+    fn shader_def_id_and_svg_fallback() {
+        let shader = ShaderDef::new("plasma_1", "shaders/plasma.wgsl", Color::rgb(107, 70, 255))
+            .with_entry_point("main_fs")
+            .with_uniforms(vec![
+                ShaderUniform::new("speed", ShaderUniformValue::Float(1.5)),
+                ShaderUniform::new("resolution", ShaderUniformValue::Vec2(800.0, 600.0)),
+            ]);
+        let def = Def::Shader(shader);
+
+        assert_eq!(def.id(), "plasma_1");
+        let svg = def.to_svg();
+        // No real paint-server element — just a documented, harmless comment.
+        assert!(svg.starts_with("<!--"));
+        assert!(svg.contains("plasma_1"));
     }
                }

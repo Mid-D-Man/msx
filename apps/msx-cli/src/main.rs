@@ -349,4 +349,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-                                                        }
+}

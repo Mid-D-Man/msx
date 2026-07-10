@@ -395,6 +395,10 @@ mod tests {
         let data = p.data();
         // Outside the original silhouette must still be fully transparent
         // — the glow is clipped, not spilling outward.
+        // Same `(row * width + col) * 4` pixel-index formula as the sibling
+        // tests above — row happens to be 1 here, which trips clippy's
+        // identity_op lint on `1 * 30`; kept as-is for consistency with them.
+        #[allow(clippy::identity_op)]
         let outside_idx = (1 * 30 + 1) * 4;
         assert_eq!(data[outside_idx + 3], 0);
     }

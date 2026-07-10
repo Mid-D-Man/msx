@@ -14,7 +14,7 @@ use std::io;
 
 use msx_ast::{
     Circle, Def, Element, Ellipse, GaussianSplat, Group, Layer, Line, Path, Polyline, Rect,
-    Scene, SdfNode, Style, Text, Use,
+    Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
 };
 
 use crate::encoder::*;
@@ -125,6 +125,40 @@ fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
             write_f32(out, g.cx); write_f32(out, g.cy); write_f32(out, g.angle);
             write_u16(out, g.stops.len() as u16);
             for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
+        }
+        Def::Shader(s) => {
+            write_u8(out, TAG_SHADER);
+            let id_idx          = intern_string(pool, &s.id);
+            let source_ref_idx  = intern_string(pool, &s.source_ref);
+            let entry_point_idx = intern_string(pool, &s.entry_point);
+            write_u16(out, id_idx);
+            write_u16(out, source_ref_idx);
+            write_u16(out, entry_point_idx);
+            write_color(out, s.fallback_color);
+            write_u16(out, s.uniforms.len() as u16);
+            for u in &s.uniforms {
+                let name_idx = intern_string(pool, &u.name);
+                write_u16(out, name_idx);
+                match u.value {
+                    ShaderUniformValue::Float(x) => {
+                        write_u8(out, 0);
+                        write_f32(out, x as f64);
+                    }
+                    ShaderUniformValue::Vec2(x, y) => {
+                        write_u8(out, 1);
+                        write_f32(out, x as f64); write_f32(out, y as f64);
+                    }
+                    ShaderUniformValue::Vec3(x, y, z) => {
+                        write_u8(out, 2);
+                        write_f32(out, x as f64); write_f32(out, y as f64); write_f32(out, z as f64);
+                    }
+                    ShaderUniformValue::Vec4(x, y, z, w) => {
+                        write_u8(out, 3);
+                        write_f32(out, x as f64); write_f32(out, y as f64);
+                        write_f32(out, z as f64); write_f32(out, w as f64);
+                    }
+                }
+            }
         }
     }
 }

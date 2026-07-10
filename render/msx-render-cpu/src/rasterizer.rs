@@ -186,11 +186,16 @@ fn flat_paint(c: Color, opacity: f32) -> SkPaint<'static> {
     p
 }
 
+/// Average color of a def's gradient stops — or, for a shader def, its
+/// author-declared `fallback_color`. `msx-render-cpu` can't execute WGSL,
+/// so every shader-filled shape paints flat with that fallback rather than
+/// turning invisible or panicking.
 fn average_stop_color(def: &Def) -> Color {
     let stops: &[msx_ast::Stop] = match def {
         Def::LinearGradient(g) => &g.stops,
         Def::RadialGradient(g) => &g.stops,
         Def::ConicGradient(g) => &g.stops,
+        Def::Shader(s) => return s.fallback_color,
     };
     if stops.is_empty() {
         return Color::BLACK;

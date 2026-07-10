@@ -127,4 +127,4 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
 
 fn apply_opacity(style: &mut Style, opacity_delta: f64) {
     style.opacity = Some(style.opacity.unwrap_or(1.0) * opacity_delta);
-                                      }
+}

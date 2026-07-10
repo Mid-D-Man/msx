@@ -76,7 +76,7 @@ pub fn parse_scene_from_data(data: &DixData) -> Result<Scene, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{AnimatedProperty, BlendMode, Color, Easing, Element, LoopMode, Paint, Transform};
+    use msx_ast::{AnimatedProperty, BlendMode, Color, Def, Easing, Element, LoopMode, Paint, ShaderUniformValue, Transform};
 
     #[test]
     fn basic_rect_and_circle() {
@@ -253,6 +253,86 @@ mod tests {
   animations::
     { target_id = "dot", property = "skew_x",
       keyframes = [ { time = 0.0, value = 0.0 } ] }
+)
+"#;
+        assert!(parse_scene(src).is_err());
+    }
+
+    #[test]
+    fn shader_def_with_uniforms() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 400, height = 300, background = #000000 }
+  defs::
+    { type = "shader", id = "plasma_1", source_ref = "shaders/plasma.wgsl",
+      entry_point = "main_fs", fallback_color = #6b46ff,
+      uniforms = [ { name = "speed", type = "float", value = 1.5 },
+                   { name = "resolution", type = "vec2", value = [800.0, 600.0] } ] }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        assert_eq!(scene.defs.len(), 1);
+        match &scene.defs[0] {
+            Def::Shader(s) => {
+                assert_eq!(s.id, "plasma_1");
+                assert_eq!(s.source_ref, "shaders/plasma.wgsl");
+                assert_eq!(s.entry_point, "main_fs");
+                assert_eq!(s.fallback_color, Color::rgb(0x6b, 0x46, 0xff));
+                assert_eq!(s.uniforms.len(), 2);
+                assert_eq!(s.uniforms[0].value, ShaderUniformValue::Float(1.5));
+                assert_eq!(s.uniforms[1].value, ShaderUniformValue::Vec2(800.0, 600.0));
+            }
+            other => panic!("expected Def::Shader, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shader_def_defaults_entry_point_and_uniforms() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "shader", id = "s", source_ref = "a.wgsl", fallback_color = #ff0000 }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        match &scene.defs[0] {
+            Def::Shader(s) => {
+                assert_eq!(s.entry_point, "fs_main");
+                assert!(s.uniforms.is_empty());
+            }
+            other => panic!("expected Def::Shader, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shader_def_requires_fallback_color() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "shader", id = "s", source_ref = "a.wgsl" }
+  elements::
+)
+"#;
+        assert!(parse_scene(src).is_err());
+    }
+
+    #[test]
+    fn shader_uniform_rejects_wrong_arity() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "shader", id = "s", source_ref = "a.wgsl", fallback_color = #ff0000,
+      uniforms = [ { name = "bad", type = "vec3", value = [1.0, 2.0] } ] }
+  elements::
 )
 "#;
         assert!(parse_scene(src).is_err());

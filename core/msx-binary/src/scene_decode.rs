@@ -5,8 +5,8 @@ use std::io;
 
 use msx_ast::{
     Canvas, Circle, ConicGradient, Def, Element, Ellipse, GaussianSplat, Group, Layer, Line,
-    LinearGradient, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, Stop, Text, Use,
-    ViewBox,
+    LinearGradient, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
+    ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
 };
 
 use crate::decoder::*;
@@ -108,6 +108,50 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let angle = read_f32(data, cursor)?;
             let stops = read_stops(data, cursor)?;
             Ok(Def::ConicGradient(ConicGradient::new(id, cx, cy, angle, stops)))
+        }
+        TAG_SHADER => {
+            let id_idx          = read_u16(data, cursor)?;
+            let source_ref_idx  = read_u16(data, cursor)?;
+            let entry_point_idx = read_u16(data, cursor)?;
+            let id          = pool.get(id_idx as usize).cloned().unwrap_or_default();
+            let source_ref  = pool.get(source_ref_idx as usize).cloned().unwrap_or_default();
+            let entry_point = pool.get(entry_point_idx as usize).cloned().unwrap_or_default();
+            let fallback_color = read_color(data, cursor)?;
+
+            let uniform_count = read_u16(data, cursor)? as usize;
+            let mut uniforms = Vec::with_capacity(uniform_count);
+            for _ in 0..uniform_count {
+                let name_idx = read_u16(data, cursor)?;
+                let name = pool.get(name_idx as usize).cloned().unwrap_or_default();
+                let kind = read_u8(data, cursor)?;
+                let value = match kind {
+                    0 => ShaderUniformValue::Float(read_f32(data, cursor)? as f32),
+                    1 => ShaderUniformValue::Vec2(
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                    ),
+                    2 => ShaderUniformValue::Vec3(
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                    ),
+                    3 => ShaderUniformValue::Vec4(
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                        read_f32(data, cursor)? as f32,
+                    ),
+                    other => return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unknown shader uniform kind 0x{:02x}", other),
+                    )),
+                };
+                uniforms.push(ShaderUniform { name, value });
+            }
+
+            let mut shader = ShaderDef::new(id, source_ref, fallback_color).with_entry_point(entry_point);
+            shader.uniforms = uniforms;
+            Ok(Def::Shader(shader))
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,

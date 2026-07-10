@@ -18,7 +18,7 @@ pub use canvas::{Canvas, Scene};
 pub use color::{Color, Paint};
 pub use effect::{Effect, EffectType};
 pub use element::{Circle, Ellipse, Element, Group, Line, Path, Polyline, Polygon, Rect, Text, Use};
-pub use gradient::{ConicGradient, Def, LinearGradient, RadialGradient, Stop};
+pub use gradient::{ConicGradient, Def, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, Stop};
 pub use layer::{BlendMode, Layer};
 pub use path::PathCommand;
 pub use primitives::{BoundingBox, Point, ViewBox, fmt_f64};

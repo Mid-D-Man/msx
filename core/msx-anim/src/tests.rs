@@ -411,4 +411,4 @@ fn group_containing_sdf_and_splat_children_animate_independently_of_the_group() 
 #[test]
 fn identity_matrix_check_sanity() {
     assert!(Matrix2D::identity().is_identity());
-        }
+}

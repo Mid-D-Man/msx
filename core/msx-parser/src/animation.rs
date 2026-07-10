@@ -81,4 +81,4 @@ fn parse_keyframes(data: &DixData, parent_prefix: &str, field: &str) -> Result<V
         out.push(Keyframe::new(time, value, easing));
     }
     Ok(out)
-                        }
+}

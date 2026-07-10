@@ -31,4 +31,4 @@ pub fn validate(data: &DixData) -> Result<(), String> {
     } else {
         Err(format!("MSX schema validation failed:\n{}", report))
     }
-}
+  }
