@@ -1,0 +1,47 @@
+// .mdix/replacements/replacements.mdix
+// Drops the msx-anim resolver (Phase 2), animations::/duration/loop_mode
+// DixScript parsing (Phase 3, parser half), the msx-cli `animate` GIF
+// subcommand, the Pages-report animation wiring, mixed SDF+splat
+// animation tests, and the Def::Shader embedding (external .wgsl
+// reference + binary codec + safe non-executing fallbacks) — everything
+// built across this conversation, all in one drop.
+//
+// Every other file in this folder sits at its real target path already
+// (core/msx-anim/src/lib.rs etc.) — nested paths resolve directly under
+// target_root, no search, no ambiguity, which is exactly why this was
+// worth doing over hand-copying: this file set has THREE lib.rs files,
+// TWO gradient.rs files, and several Cargo.toml files, all of which would
+// be genuinely ambiguous under plain basename search.
+
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "MidManStudio"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~target<object>(name, path) { return { name = name, path = path } }
+)
+
+@DATA(
+  target_root = "."
+
+  ignore::
+    "NOTES.md"
+
+  // The one flat (no-subdirectory) file in this drop, for the workspace
+  // root's Cargo.toml. It's named ROOT_Cargo.toml on disk here, NOT
+  // Cargo.toml — because the override lookup checks a file's bare
+  // basename before it checks whether the file is nested. Every crate in
+  // this workspace has its own Cargo.toml too (core/msx-anim/Cargo.toml,
+  // apps/msx-cli/Cargo.toml, ...), and those are real nested files in
+  // this same drop — an override keyed by the plain basename "Cargo.toml"
+  // would silently also catch and redirect THOSE onto this same
+  // destination instead of letting their nested paths resolve normally.
+  // A name that no other file's basename could ever collide with sidesteps
+  // that entirely. Verified against the real resolution order in
+  // lib_replacements.py before shipping this — it's not a hypothetical.
+  overrides::
+    target("ROOT_Cargo.toml", "Cargo.toml")
+)
