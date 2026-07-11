@@ -167,6 +167,24 @@ jobs:
             done
           } | tee results/corpus.csv
 
+      # ── Debug artifacts ─────────────────────────────────────────────────────
+      # The report embeds these as base64 (downscaled by the browser to fit a
+      # card), which is fine for browsing but bad for actually diagnosing a
+      # render — no way to zoom, no way to A/B the animated GIF against the
+      # static (unanimated, t=0) PNG for the same example to tell a real
+      # compositing bug apart from GIF color-quantization/dithering
+      # artifacts. Upload the raw files so both are one click away instead.
+      - name: Upload raw render outputs (debug artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-renders
+          path: |
+            results/pngs
+            results/gifs
+            results/svgs
+          retention-days: 14
+          if-no-files-found: warn
+
       # ── Build examples.json for the report ────────────────────────────────────
       # Combines rendered SVG content, the native PNG raster (base64,
       # self-contained — no extra asset files needed at deploy time), source
