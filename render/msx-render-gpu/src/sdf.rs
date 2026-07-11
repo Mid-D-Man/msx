@@ -224,7 +224,15 @@ impl SdfPipeline {
     /// something newly introduced by threading `defs` through here), so it
     /// passes an empty `Defs::build(&[])`; a `Paint::Ref` on an SDF inside
     /// a layer resolves to nothing until that's addressed too.
-    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
+    ///
+    /// `pub(crate)`, not `pub` — only ever called from within this crate
+    /// (`draw_all` below, and `layer.rs`), and it takes `Defs`, which is
+    /// itself `pub(crate)`; a `pub` function can't expose a `pub(crate)`
+    /// type in its signature (rustc's private-interfaces lint), so this
+    /// needs to match rather than the other way around — `Defs` staying
+    /// internal is the intentional design, not an oversight.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
         let mut nodes = Vec::new();
         collect_sdf_nodes(elements, base_transform, &mut nodes);
         for (node, transform) in &nodes {
@@ -232,6 +240,7 @@ impl SdfPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_one(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
         let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
         let combined = transform.concat(local);
@@ -507,4 +516,4 @@ mod tests {
         collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1);
     }
-        }
+                                    }
