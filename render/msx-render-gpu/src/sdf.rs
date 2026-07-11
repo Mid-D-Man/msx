@@ -14,6 +14,8 @@ use wgpu::util::DeviceExt;
 
 use msx_ast::{Color, Element, Matrix2D, Paint, SdfNode, SdfTree, Scene};
 
+use crate::vector::{average_stop_color, Defs};
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SdfOp {
@@ -210,20 +212,27 @@ impl SdfPipeline {
 
     pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
-        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas);
+        let defs = Defs::build(&scene.defs);
+        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs);
     }
 
     /// Entry point for `layer.rs`: draw just the `Sdf` shapes within one
-    /// layer's children, scoped to its own buffer.
-    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) {
+    /// layer's children, scoped to its own buffer. `layer.rs` doesn't have
+    /// the parent scene's `defs` available at its own call site today
+    /// (same pre-existing limitation `vector::tessellate_elements` has for
+    /// gradient/shader refs on ordinary shapes inside a layer — not
+    /// something newly introduced by threading `defs` through here), so it
+    /// passes an empty `Defs::build(&[])`; a `Paint::Ref` on an SDF inside
+    /// a layer resolves to nothing until that's addressed too.
+    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
         let mut nodes = Vec::new();
         collect_sdf_nodes(elements, base_transform, &mut nodes);
         for (node, transform) in &nodes {
-            self.draw_one(device, encoder, view, node, *transform, canvas);
+            self.draw_one(device, encoder, view, node, *transform, canvas, defs);
         }
     }
 
-    fn draw_one(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) {
+    fn draw_one(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
         let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
         let combined = transform.concat(local);
         let Some(inv) = invert_matrix(combined) else { return };
@@ -238,9 +247,9 @@ impl SdfPipeline {
         let screen_bounds = transform_bounds(local_bounds, combined);
         let (verts, indices) = quad_vertices(screen_bounds, canvas);
 
-        let fill_color = color_to_rgba(paint_color(&node.fill));
+        let fill_color = color_to_rgba(paint_color(&node.fill, defs));
         let (stroke_color, stroke_width, has_stroke) = match (&node.stroke, node.stroke_width) {
-            (Some(paint), Some(w)) => (color_to_rgba(paint_color(paint)), w as f32, 1.0f32),
+            (Some(paint), Some(w)) => (color_to_rgba(paint_color(paint, defs)), w as f32, 1.0f32),
             _ => ([0.0; 4], 0.0, 0.0f32),
         };
 
@@ -319,11 +328,25 @@ fn collect_sdf_nodes<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut
     }
 }
 
-fn paint_color(paint: &Paint) -> Color {
+fn paint_color(paint: &Paint, defs: &Defs) -> Color {
     match paint {
         Paint::Color(c) => *c,
         Paint::CurrentColor => Color::BLACK,
-        Paint::None | Paint::Ref(_) => Color::rgba(0, 0, 0, 0),
+        Paint::None => Color::rgba(0, 0, 0, 0),
+        Paint::Ref(reference) => {
+            // Same resolution vector.rs::paint_to_rgba uses for every
+            // other shape type — see average_stop_color's doc comment
+            // there. This used to unconditionally return transparent for
+            // any Paint::Ref here regardless of what it pointed at, since
+            // defs was never threaded into this call path at all.
+            match reference.strip_prefix("url(#").and_then(|s| s.strip_suffix(')')) {
+                Some(id) => match defs.get(id) {
+                    Some(def) => average_stop_color(def),
+                    None => Color::rgba(0, 0, 0, 0),
+                },
+                None => Color::rgba(0, 0, 0, 0),
+            }
+        }
     }
 }
 
@@ -484,4 +507,4 @@ mod tests {
         collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1);
     }
-                                     }
+        }
