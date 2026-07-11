@@ -258,10 +258,27 @@ def svg_gallery_html(examples: list) -> str:
         # Falls back to the static PNG, then to inline SVG rendered by the
         # browser if neither raster exists.
         if anim_gif_base64:
+            img_id = f"render-{name}"
+            # Lets you flip between the looping GIF and the static
+            # (unanimated, t=0) PNG for the same example without leaving
+            # the card — GIF encoding forces a quantized/dithered palette,
+            # so this is the fast way to tell "the render is actually
+            # wrong" apart from "GIF compression is just muddying a fine
+            # render" for anything that looks off in the animated version.
+            compare_html = ""
+            if png_base64:
+                compare_html = (
+                    f'<button type="button" class="compare-toggle" '
+                    f'data-gif="data:image/gif;base64,{anim_gif_base64}" '
+                    f'data-png="data:image/png;base64,{png_base64}" '
+                    f'data-target="{img_id}" onclick="msxToggleRender(this)">'
+                    f'compare static frame</button>'
+                )
             rendered_visual = (
-                f'<img class="native-render native-render--anim" '
+                f'<img id="{img_id}" class="native-render native-render--anim" '
                 f'src="data:image/gif;base64,{anim_gif_base64}" '
                 f'alt="{name} — animated native MSX render (msx-anim + msx-render-cpu)">'
+                f'{compare_html}'
             )
         elif png_base64:
             rendered_visual = (
@@ -468,6 +485,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .svg-preview svg {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render--anim {{ border-radius:6px; box-shadow:0 0 0 1px var(--accent), 0 0 16px -4px var(--accent); }}
+  .compare-toggle {{
+    display:block; margin:8px auto 0; padding:4px 10px; font-size:.7rem;
+    font-family:inherit; color:var(--accent); background:transparent;
+    border:1px solid var(--accent); border-radius:4px; cursor:pointer;
+  }}
+  .compare-toggle:hover {{ background:var(--accent); color:var(--bg, #0a0f1e); }}
   .native-render-note {{ color:var(--muted); font-size:.7rem; text-align:center; margin-bottom:8px; }}
 
   .example-divider {{
@@ -667,6 +690,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <a href="https://github.com/Mid-D-Man/DixScript-Rust">dixscript</a>
   </span>
 </footer>
+
+<script>
+function msxToggleRender(btn) {{
+  const img = document.getElementById(btn.dataset.target);
+  const showingGif = img.src.startsWith("data:image/gif");
+  img.src = showingGif ? btn.dataset.png : btn.dataset.gif;
+  btn.textContent = showingGif ? "back to animated" : "compare static frame";
+}}
+</script>
 
 </body>
 </html>
