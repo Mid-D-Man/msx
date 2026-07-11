@@ -1,0 +1,24 @@
+// examples/shader_placeholder.msx
+// Demonstrates a shader def referenced from a shape's fill, exactly like a
+// gradient (`Paint::Ref("url(#id)")`). `source_ref` is a path to a real
+// .wgsl file elsewhere in the repo, resolved/validated by `msx-cli compile`
+// — this .msx file never embeds shader source itself (see the
+// FUTURE(raw-section) note on ShaderDef in core/msx-ast/src/gradient.rs
+// for why, and what changes if DixScript ever grows a raw text section).
+//
+// No renderer executes WGSL yet, so every render path today paints this
+// rect with `fallback_color` — CPU/GPU raster paint it flat, and SVG
+// export renders it as `none` (documented gap, see Def::to_svg). That's
+// expected until msx-render-gpu grows a real WGSL-executing path.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #14141c }
+  defs::
+    { type = "shader", id = "plasma_1", source_ref = "shaders/plasma.wgsl",
+      entry_point = "fs_main", fallback_color = #6b46ff,
+      uniforms = [ { name = "speed", type = "float", value = 1.5 },
+                   { name = "resolution", type = "vec2", value = [300.0, 200.0] } ] }
+  elements::
+    { type = "rect", x = 40, y = 40, width = 220, height = 120, rx = 12,
+      style = { fill = "url(#plasma_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
