@@ -242,6 +242,7 @@ def svg_gallery_html(examples: list) -> str:
         svg_content     = ex.get("svg", "")
         png_base64      = ex.get("png_base64", "")
         anim_gif_base64 = ex.get("anim_gif_base64", "")
+        uses_shader     = ex.get("uses_shader", False)
         source_bytes    = ex.get("source_bytes", 0)
         binary_bytes    = ex.get("binary_bytes", 0)
         svg_bytes       = ex.get("svg_bytes", 0)
@@ -299,6 +300,12 @@ def svg_gallery_html(examples: list) -> str:
         rt_badge = ('<span class="stat-chip green">✓ roundtrip</span>' if passed
                     else '<span class="stat-chip red">✗ roundtrip failed</span>')
         anim_badge = '<span class="stat-chip accent">▶ animated</span>' if anim_gif_base64 else ''
+        shader_badge = (
+            '<span class="stat-chip accent" '
+            'title="Uses a Def::Shader fill — no renderer executes WGSL yet, '
+            'so this paints the def\'s flat fallback_color instead of the real shader.">'
+            '⚡ shader (fallback)</span>'
+        ) if uses_shader else ''
 
         cards.append(f"""
 <div class="example-card">
@@ -311,6 +318,7 @@ def svg_gallery_html(examples: list) -> str:
       <span class="stat-chip dim">bin/svg: {bin_pct:.1f}%</span>
       {rt_badge}
       {anim_badge}
+      {shader_badge}
     </div>
   </div>
   <div class="example-body">
