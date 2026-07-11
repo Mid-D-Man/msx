@@ -253,4 +253,43 @@ mod tests {
         let svg = render(&scene);
         assert!(svg.contains("<!-- sdf node 'circle'"));
     }
-                                                      }
+
+    #[test]
+    fn shader_def_emits_a_documented_comment_not_a_paint_server() {
+        use msx_ast::ShaderDef;
+        let mut scene = Scene::new(Canvas::new(10.0, 10.0, Color::WHITE));
+        scene.defs.push(Def::Shader(ShaderDef::new(
+            "plasma_1", "shaders/plasma.wgsl", Color::rgb(107, 70, 255),
+        )));
+
+        let svg = render(&scene);
+        assert!(svg.contains("<defs>"));
+        assert!(svg.contains("<!-- shader 'plasma_1'"));
+        // No linearGradient/radialGradient-style paint-server element for
+        // it — SVG has no WGSL equivalent, so there's nothing to actually
+        // resolve `url(#plasma_1)` against in a browser. That's expected
+        // and documented in the comment itself, not a bug in this export.
+        assert!(!svg.contains("<linearGradient") || !svg.contains(r#"id="plasma_1""#));
+    }
+
+    #[test]
+    fn shape_referencing_a_shader_def_still_gets_its_url_fill_attribute() {
+        use msx_ast::ShaderDef;
+        let mut scene = Scene::new(Canvas::new(10.0, 10.0, Color::WHITE));
+        scene.defs.push(Def::Shader(ShaderDef::new(
+            "plasma_1", "shaders/plasma.wgsl", Color::rgb(107, 70, 255),
+        )));
+        let mut style = Style::default();
+        style.fill = Some(Paint::Ref("url(#plasma_1)".to_string()));
+        style.stroke = Some(Paint::None);
+        scene.elements.push(Element::Rect(Rect::new(0.0, 0.0, 5.0, 5.0, style)));
+
+        let svg = render(&scene);
+        // The shape's own fill attribute is untouched by what kind of def
+        // it points at — Paint::to_svg_value() just echoes the raw
+        // "url(#id)" string the same way it would for a gradient. Whether
+        // that resolves to anything visible is entirely down to what's
+        // inside <defs>, which the previous test covers.
+        assert!(svg.contains(r#"fill="url(#plasma_1)""#));
+    }
+    }
