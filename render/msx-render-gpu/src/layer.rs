@@ -161,7 +161,7 @@ impl LayerCompositor {
             &geometry,
             wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
         );
-        sdf_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f);
+        sdf_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f, &vector::Defs::build(&[]));
         splat_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f);
         queue.submit(std::iter::once(encoder.finish()));
 
@@ -259,4 +259,4 @@ mod tests {
         collect_layers(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1, "only the outer layer should be found");
     }
-    }
+                }
