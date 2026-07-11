@@ -16,9 +16,10 @@ use tiny_skia::Pixmap;
 
 use crate::geom::{apply_matrix, invert_matrix, transform_bounds};
 use crate::pixel::{read_premul, write_premul};
+use crate::rasterizer::{average_stop_color, Defs};
 use msx_render_core::PremulColor;
 
-pub fn rasterize_sdf(pixmap: &mut Pixmap, node: &SdfNode, parent: Matrix2D) {
+pub fn rasterize_sdf(pixmap: &mut Pixmap, node: &SdfNode, parent: Matrix2D, defs: &Defs) {
     let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
     let combined = parent.concat(local);
     let Some(inv) = invert_matrix(combined) else { return };
@@ -36,8 +37,8 @@ pub fn rasterize_sdf(pixmap: &mut Pixmap, node: &SdfNode, parent: Matrix2D) {
         return;
     }
 
-    let fill_color = paint_to_color(&node.fill);
-    let stroke = node.stroke.as_ref().map(|s| (paint_to_color(s), node.stroke_width.unwrap_or(1.0) as f32));
+    let fill_color = paint_to_color(&node.fill, defs);
+    let stroke = node.stroke.as_ref().map(|s| (paint_to_color(s, defs), node.stroke_width.unwrap_or(1.0) as f32));
 
     let row_bytes = (width as usize) * 4;
     let row_start = (min_y as usize) * row_bytes;
@@ -81,13 +82,30 @@ fn antialiased(color: PremulColor, d: f32) -> PremulColor {
     PremulColor { r: color.r * coverage, g: color.g * coverage, b: color.b * coverage, a: color.a * coverage }
 }
 
-fn paint_to_color(paint: &Paint) -> PremulColor {
+fn paint_to_color(paint: &Paint, defs: &Defs) -> PremulColor {
     match paint {
         Paint::Color(c) => PremulColor::from_color(*c),
         Paint::CurrentColor => PremulColor::from_color(Color::BLACK),
-        // Gradient SDF fills aren't supported yet — same simplification
-        // `rasterizer.rs` makes for gradient-filled vector shapes.
-        Paint::None | Paint::Ref(_) => PremulColor::TRANSPARENT,
+        Paint::None => PremulColor::TRANSPARENT,
+        Paint::Ref(reference) => {
+            // Same resolution `rasterizer.rs::resolve_paint` uses for
+            // every other shape type: a real tiny-skia gradient shader
+            // isn't wired up yet, so a gradient ref paints its stops'
+            // average color, and a shader ref paints its declared
+            // `fallback_color` — either way, something sane rather than
+            // silently invisible. An SDF's fill/stroke can reference a
+            // def exactly the same way any other shape's can; this used
+            // to unconditionally return TRANSPARENT for any `Paint::Ref`
+            // here regardless of what it pointed at, independent of
+            // whether `rasterizer.rs`'s handling for other shapes agreed.
+            match reference.strip_prefix("url(#").and_then(|s| s.strip_suffix(')')) {
+                Some(id) => match defs.get(id) {
+                    Some(def) => PremulColor::from_color(average_stop_color(def)),
+                    None => PremulColor::TRANSPARENT,
+                },
+                None => PremulColor::TRANSPARENT,
+            }
+        }
     }
 }
 
@@ -206,4 +224,4 @@ mod tests {
         assert!((antialiased(c, -5.0).a - 1.0).abs() < 1e-4);
         assert!(antialiased(c, 5.0).a.abs() < 1e-4);
     }
-                     }
+                }
