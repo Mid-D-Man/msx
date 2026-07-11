@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use msx_ast::Scene;
+use msx_ast::{Def, Scene};
 use msx_render_core::{RenderTarget, Renderer};
 
 #[derive(Parser)]
@@ -95,9 +95,34 @@ fn cmd_render(input: &Path, output: Option<&Path>) -> Result<(), String> {
 
 fn cmd_compile(input: &Path, output: &Path, no_compress: bool) -> Result<(), String> {
     let scene = load_scene(input)?;
+    validate_shader_refs(&scene, input)?;
     let binary = msx_binary::compile(&scene, !no_compress).map_err(|e| format!("compile failed: {}", e))?;
     std::fs::write(output, &binary).map_err(|e| format!("failed to write {}: {}", output.display(), e))?;
     println!("Wrote {} ({} bytes)", output.display(), binary.len());
+    Ok(())
+}
+
+/// Confirms every `Def::Shader::source_ref` in the scene resolves to a
+/// real file, relative to `input`'s own directory — this is the "resolves
+/// and validates the reference at compile time" `ShaderDef`'s doc comment
+/// in msx-ast promises. Catches a typo'd/moved shader path here, at
+/// compile time, rather than it silently doing nothing at render time —
+/// every renderer today falls back to `fallback_color` regardless of
+/// whether `source_ref` even resolves, so a bad path otherwise wouldn't
+/// surface as an error anywhere at all.
+fn validate_shader_refs(scene: &Scene, input: &Path) -> Result<(), String> {
+    let base_dir = input.parent().unwrap_or_else(|| Path::new("."));
+    for def in &scene.defs {
+        if let Def::Shader(shader) = def {
+            let resolved = base_dir.join(&shader.source_ref);
+            if !resolved.is_file() {
+                return Err(format!(
+                    "shader def '{}': source_ref '{}' does not resolve to a file (looked for {})",
+                    shader.id, shader.source_ref, resolved.display()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -349,4 +374,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-}
+    }
