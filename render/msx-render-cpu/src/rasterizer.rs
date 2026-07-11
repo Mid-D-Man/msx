@@ -85,7 +85,7 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
         }
         Element::Group(g) => render_group(pixmap, g, transform, defs, index),
         Element::Use(u) => render_use(pixmap, u, transform, defs, index),
-        Element::Sdf(node) => rasterize_sdf(pixmap, node, transform),
+        Element::Sdf(node) => rasterize_sdf(pixmap, node, transform, defs),
         Element::Splat(s) => rasterize_splat(pixmap, s, transform),
         Element::Layer(l) => render_layer(pixmap, l, transform, defs, index),
     }
@@ -189,8 +189,10 @@ fn flat_paint(c: Color, opacity: f32) -> SkPaint<'static> {
 /// Average color of a def's gradient stops — or, for a shader def, its
 /// author-declared `fallback_color`. `msx-render-cpu` can't execute WGSL,
 /// so every shader-filled shape paints flat with that fallback rather than
-/// turning invisible or panicking.
-fn average_stop_color(def: &Def) -> Color {
+/// turning invisible or panicking. `pub(crate)` so `sdf_raster.rs` shares
+/// this instead of re-implementing its own — an SDF's fill/stroke can
+/// reference a def exactly the same way any other shape's can.
+pub(crate) fn average_stop_color(def: &Def) -> Color {
     let stops: &[msx_ast::Stop] = match def {
         Def::LinearGradient(g) => &g.stops,
         Def::RadialGradient(g) => &g.stops,
@@ -565,4 +567,4 @@ mod tests {
         assert_eq!(combined.e, 5.0);
         assert_eq!(combined.f, 5.0);
     }
-                }
+                                        }
