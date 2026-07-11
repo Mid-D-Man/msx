@@ -238,6 +238,12 @@ jobs:
                   with open(gif_path, 'rb') as f:
                       anim_gif_base64 = base64.b64encode(f.read()).decode('ascii')
 
+              # Simple text heuristic, not a real parse — reliable enough
+              # since `type = "shader"` is the literal required DixScript
+              # syntax for a shader def (see msx-parser/src/gradient.rs).
+              # Drives a report badge only; doesn't affect rendering.
+              uses_shader = 'type = "shader"' in source
+
               row = stats.get(stem, {})
               entry = {
                   'name':            stem,
@@ -245,6 +251,7 @@ jobs:
                   'svg':             svg_content,
                   'png_base64':      png_base64,
                   'anim_gif_base64': anim_gif_base64,
+                  'uses_shader':     uses_shader,
                   'source_bytes':    row.get('source_bytes', os.path.getsize(src_path)),
                   'binary_bytes':    row.get('binary_bytes', 0),
                   'svg_bytes':       row.get('svg_bytes',    os.path.getsize(svg_path)),
@@ -255,10 +262,11 @@ jobs:
               results.append(entry)
               png_note = '' if png_base64 else ' [no native PNG]'
               anim_note = ' [animated]' if anim_gif_base64 else ''
+              shader_note = ' [shader]' if uses_shader else ''
               print(f"  {stem}: {entry['source_bytes']}B src "
                     f"→ {entry['binary_bytes']}B bin "
                     f"→ {entry['svg_bytes']}B svg "
-                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}")
+                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}{shader_note}")
 
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
