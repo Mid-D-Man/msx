@@ -263,8 +263,9 @@ fn paint_to_rgba(paint: &Paint, opacity: f64, defs: &Defs) -> Option<[f32; 4]> {
 /// author-declared `fallback_color`. This vector-shader evaluator doesn't
 /// execute WGSL either (that's `source_ref`'s job, deferred until there's
 /// an actual WGSL-executing render path), so shader-filled shapes paint
-/// flat with that fallback here too, same as msx-render-cpu.
-fn average_stop_color(def: &Def) -> Color {
+/// flat with that fallback here too, same as msx-render-cpu. `pub(crate)`
+/// so `sdf.rs` shares this instead of re-implementing its own.
+pub(crate) fn average_stop_color(def: &Def) -> Color {
     let stops: &[msx_ast::Stop] = match def {
         Def::LinearGradient(g) => &g.stops,
         Def::RadialGradient(g) => &g.stops,
@@ -563,4 +564,4 @@ fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_ro
         b.cubic_bezier_to(point(c1r.0, c1r.1), point(c2r.0, c2r.1), point(p2r.0, p2r.1));
         theta = theta_next;
     }
-                      }
+        }
