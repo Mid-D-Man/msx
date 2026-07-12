@@ -487,19 +487,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .source-code--svg {{ background:var(--svg-tint); color:#c4b5fd; }}
 
   .svg-preview {{
-    flex:1; background:#ffffff; display:flex; align-items:center;
-    justify-content:center; padding:10px; min-height:180px;
+    flex:1; background:#ffffff; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; padding:10px; min-height:180px; gap:8px;
   }}
+  /* A native render (PNG/GIF) already has its own opaque background baked
+     in from the scene's own `background` — wrapping it in a bright white
+     frame is wasted contrast at best and jarring on a dark-themed page at
+     worst. Raw inline <svg> content (which can have transparent regions)
+     still gets the white backdrop so it stays visible. */
+  .svg-preview:has(img.native-render) {{ background:var(--surface2); }}
   .svg-preview svg {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render--anim {{ border-radius:6px; box-shadow:0 0 0 1px var(--accent), 0 0 16px -4px var(--accent); }}
   .compare-toggle {{
-    display:block; margin:8px auto 0; padding:4px 10px; font-size:.7rem;
+    padding:4px 10px; font-size:.7rem;
     font-family:inherit; color:var(--accent); background:transparent;
     border:1px solid var(--accent); border-radius:4px; cursor:pointer;
+    flex-shrink:0;
   }}
   .compare-toggle:hover {{ background:var(--accent); color:var(--bg, #0a0f1e); }}
-  .native-render-note {{ color:var(--muted); font-size:.7rem; text-align:center; margin-bottom:8px; }}
+  .native-render-note {{ color:var(--muted); font-size:.7rem; text-align:center; }}
 
   .example-divider {{
     display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -574,6 +581,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .pane-svg-src {{ border-right:none; border-bottom:1px solid var(--border); }}
     .source-code {{ max-height:200px; font-size:.67rem; }}
     .svg-preview {{ min-height:140px; }}
+    .chart {{ overflow:hidden; }}
     .example-header {{ flex-direction:column; align-items:flex-start; }}
     footer {{ padding:16px 20px; flex-direction:column; gap:4px; }}
   }}
