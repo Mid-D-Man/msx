@@ -42,6 +42,23 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Rasterize an .msx file to a PNG via msx-render-gpu instead of the
+    /// CPU rasterizer — the only path that actually executes `Def::Shader`
+    /// WGSL fills for real rather than painting them with `fallback_color`.
+    /// Only exists in builds compiled with `--features gpu` (pulls in the
+    /// full wgpu dependency tree, off by default — see msx-cli's
+    /// Cargo.toml). Falls back to a clear error, not a panic, if no GPU
+    /// adapter (real or software) is available on the machine running it.
+    #[cfg(feature = "gpu")]
+    RasterizeGpu {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Time (seconds) fed to every shader-def's free-running `time`
+        /// uniform — see msx-render-gpu's shader.rs for the convention.
+        #[arg(long, default_value_t = 0.0)]
+        time: f64,
+    },
     /// Sample an animated .msx file's timeline (msx-anim) and export it as
     /// a looping animated GIF via msx-render-cpu. Errors if the scene has
     /// no animation tracks — use `rasterize` for a static render.
@@ -69,6 +86,8 @@ fn main() {
         Command::Render { input, output } => cmd_render(input, output.as_deref()),
         Command::Compile { input, output, no_compress } => cmd_compile(input, output, *no_compress),
         Command::Rasterize { input, output } => cmd_rasterize(input, output.as_deref()),
+        #[cfg(feature = "gpu")]
+        Command::RasterizeGpu { input, output, time } => cmd_rasterize_gpu(input, output.as_deref(), *time),
         Command::Animate { input, output, fps } => cmd_animate(input, output.as_deref(), *fps),
         Command::Info { input } => cmd_info(input),
         Command::Validate { input } => cmd_validate(input),
@@ -133,6 +152,38 @@ fn cmd_rasterize(input: &Path, output: Option<&Path>) -> Result<(), String> {
     let out_path = output.map(PathBuf::from).unwrap_or_else(|| input.with_extension("png"));
     save_png(target, &out_path)?;
     println!("Wrote {} ({}x{})", out_path.display(), w, h);
+    Ok(())
+}
+
+/// GPU counterpart to `cmd_rasterize` — same shape, different backend.
+/// `GpuRenderer::new()` performs the whole instance → adapter → device
+/// handshake (see `msx-render-gpu::context::GpuContext`, including its
+/// two-stage real-then-software-fallback adapter request) and surfaces a
+/// clear `Err` rather than panicking if no adapter is available at all,
+/// which this function propagates as an ordinary CLI error rather than a
+/// crash — a machine with no GPU and no software fallback driver
+/// installed is an expected, diagnosable situation, not a bug.
+#[cfg(feature = "gpu")]
+fn cmd_rasterize_gpu(input: &Path, output: Option<&Path>, time: f64) -> Result<(), String> {
+    let scene = load_scene(input)?;
+    let renderer = msx_render_gpu::GpuRenderer::new().map_err(|e| format!("GPU renderer unavailable: {e}"))?;
+
+    let base_dir = input.parent().unwrap_or_else(|| Path::new("."));
+    let mut target = RenderTarget::new(
+        scene.canvas.width.round().max(1.0) as u32,
+        scene.canvas.height.round().max(1.0) as u32,
+    );
+    renderer.render_with_shader_dir(&scene, &mut target, base_dir, time as f32);
+
+    let (w, h) = (target.width, target.height);
+    // Deliberately a different default filename than `rasterize`'s
+    // (`.gpu.png` vs `.png`) so running both commands against the same
+    // input — the obvious way to compare CPU vs GPU output, or a
+    // flat-fallback render vs a real WGSL-executed one — doesn't have one
+    // silently overwrite the other.
+    let out_path = output.map(PathBuf::from).unwrap_or_else(|| input.with_extension("gpu.png"));
+    save_png(target, &out_path)?;
+    println!("Wrote {} ({}x{}, GPU, t={})", out_path.display(), w, h, time);
     Ok(())
 }
 
@@ -374,4 +425,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-    }
+        }
