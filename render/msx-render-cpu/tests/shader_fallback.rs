@@ -38,9 +38,11 @@ fn rect_filled_with_shader_ref_paints_fallback_color() {
     let mut scene = blank_scene(100.0, 100.0);
     scene.defs.push(Def::Shader(ShaderDef::new("plasma", "x.wgsl", fallback)));
 
-    let mut style = Style::default();
-    style.fill = Some(Paint::Ref("url(#plasma)".to_string()));
-    style.stroke = Some(Paint::None);
+    let style = Style {
+        fill: Some(Paint::Ref("url(#plasma)".to_string())),
+        stroke: Some(Paint::None),
+        ..Default::default()
+    };
     scene.elements.push(Element::Rect(Rect::new(10.0, 10.0, 50.0, 50.0, style)));
 
     let pixmap = render_to_pixmap(&scene);
@@ -89,8 +91,7 @@ fn sdf_stroke_and_fill_resolve_independently_against_different_defs() {
 fn unresolvable_ref_paints_nothing_rather_than_panicking() {
     let mut scene = blank_scene(60.0, 60.0);
     // Deliberately no matching def — "url(#does_not_exist)".
-    let mut style = Style::default();
-    style.fill = Some(Paint::Ref("url(#does_not_exist)".to_string()));
+    let style = Style { fill: Some(Paint::Ref("url(#does_not_exist)".to_string())), ..Default::default() };
     scene.elements.push(Element::Rect(Rect::new(0.0, 0.0, 60.0, 60.0, style)));
 
     let pixmap = render_to_pixmap(&scene); // must not panic
@@ -114,4 +115,4 @@ fn sdf_gradient_ref_still_works_after_the_defs_threading_fix() {
 
     let pixmap = render_to_pixmap(&scene);
     assert_pixel_is(&pixmap, 50, 50, Color::rgb(50, 50, 50)); // average of the two stops
-}
+                                  }
