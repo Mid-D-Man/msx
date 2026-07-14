@@ -242,6 +242,8 @@ def svg_gallery_html(examples: list) -> str:
         svg_content     = ex.get("svg", "")
         png_base64      = ex.get("png_base64", "")
         anim_gif_base64 = ex.get("anim_gif_base64", "")
+        gpu_png_base64  = ex.get("gpu_png_base64", "")
+        gpu_error       = ex.get("gpu_error", "")
         uses_shader     = ex.get("uses_shader", False)
         source_bytes    = ex.get("source_bytes", 0)
         binary_bytes    = ex.get("binary_bytes", 0)
@@ -258,6 +260,18 @@ def svg_gallery_html(examples: list) -> str:
         # as a self-looping GIF — <img> loops it natively, no extra JS.
         # Falls back to the static PNG, then to inline SVG rendered by the
         # browser if neither raster exists.
+        #
+        # A shader-using, NON-animated example with a real GPU render
+        # available takes priority over the plain CPU PNG instead — showing
+        # the actually-WGSL-executed result by default (msx-render-gpu, via
+        # `msx rasterize-gpu`) with a toggle to compare against what every
+        # other renderer still shows: the def's flat `fallback_color`. Kept
+        # mutually exclusive with the animated case rather than composed —
+        # `rasterize-gpu` only produces a single static (t=0) frame today,
+        # nothing in the corpus is both animated and shader-using yet, and
+        # bolting a third state onto the animated/static toggle for a
+        # combination that doesn't exist would just be speculative
+        # complexity. Revisit if/when that combination actually shows up.
         if anim_gif_base64:
             img_id = f"render-{name}"
             # Lets you flip between the looping GIF and the static
@@ -281,6 +295,23 @@ def svg_gallery_html(examples: list) -> str:
                 f'alt="{name} — animated native MSX render (msx-anim + msx-render-cpu)">'
                 f'{compare_html}'
             )
+        elif uses_shader and gpu_png_base64:
+            img_id = f"render-{name}"
+            compare_html = ""
+            if png_base64:
+                compare_html = (
+                    f'<button type="button" class="compare-toggle" '
+                    f'data-cpu="data:image/png;base64,{png_base64}" '
+                    f'data-gpu="data:image/png;base64,{gpu_png_base64}" '
+                    f'data-target="{img_id}" onclick="msxToggleShaderRender(this)">'
+                    f'compare CPU fallback</button>'
+                )
+            rendered_visual = (
+                f'<img id="{img_id}" class="native-render native-render--gpu" '
+                f'src="data:image/png;base64,{gpu_png_base64}" '
+                f'alt="{name} — real WGSL-executed render (msx-render-gpu)">'
+                f'{compare_html}'
+            )
         elif png_base64:
             rendered_visual = (
                 f'<img class="native-render" '
@@ -300,12 +331,27 @@ def svg_gallery_html(examples: list) -> str:
         rt_badge = ('<span class="stat-chip green">✓ roundtrip</span>' if passed
                     else '<span class="stat-chip red">✗ roundtrip failed</span>')
         anim_badge = '<span class="stat-chip accent">▶ animated</span>' if anim_gif_base64 else ''
-        shader_badge = (
-            '<span class="stat-chip accent" '
-            'title="Uses a Def::Shader fill — no renderer executes WGSL yet, '
-            'so this paints the def\'s flat fallback_color instead of the real shader.">'
-            '⚡ shader (fallback)</span>'
-        ) if uses_shader else ''
+        if uses_shader and gpu_png_base64:
+            shader_badge = (
+                '<span class="stat-chip green" '
+                'title="Real WGSL execution via msx-render-gpu — the image shown is the actual '
+                'shader output, not a flat fallback color.">'
+                '⚡ shader (GPU)</span>'
+            )
+        elif uses_shader:
+            fallback_reason = (
+                f' Last GPU render attempt: {gpu_error}.' if gpu_error else
+                ' No GPU render was attempted for this build (msx-cli compiled without '
+                '`--features gpu`, or no adapter — real or software — was available).'
+            )
+            shader_badge = (
+                '<span class="stat-chip accent" '
+                f'title="Uses a Def::Shader fill, but no real WGSL execution happened here — '
+                f'this paints the flat fallback_color from the def instead.{fallback_reason}">'
+                '⚡ shader (fallback)</span>'
+            )
+        else:
+            shader_badge = ''
 
         cards.append(f"""
 <div class="example-card">
@@ -499,6 +545,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .svg-preview svg {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render {{ max-width:100%; max-height:360px; height:auto; width:auto; display:block; }}
   .svg-preview img.native-render--anim {{ border-radius:6px; box-shadow:0 0 0 1px var(--accent), 0 0 16px -4px var(--accent); }}
+  .svg-preview img.native-render--gpu {{ border-radius:6px; box-shadow:0 0 0 1px var(--green, #22c55e), 0 0 16px -4px var(--green, #22c55e); }}
   .compare-toggle {{
     padding:4px 10px; font-size:.7rem;
     font-family:inherit; color:var(--accent); background:transparent;
@@ -713,6 +760,13 @@ function msxToggleRender(btn) {{
   const showingGif = img.src.startsWith("data:image/gif");
   img.src = showingGif ? btn.dataset.png : btn.dataset.gif;
   btn.textContent = showingGif ? "back to animated" : "compare static frame";
+}}
+
+function msxToggleShaderRender(btn) {{
+  const img = document.getElementById(btn.dataset.target);
+  const showingGpu = img.src === btn.dataset.gpu;
+  img.src = showingGpu ? btn.dataset.cpu : btn.dataset.gpu;
+  btn.textContent = showingGpu ? "back to GPU render" : "compare CPU fallback";
 }}
 </script>
 
