@@ -213,7 +213,7 @@ fn fill_and_stroke(
     canvas: (f32, f32),
     defs: &Defs,
     buffers: &mut VertexBuffers<Vertex, u32>,
-    mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
+    shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) {
     let opacity = style.opacity.unwrap_or(1.0);
 
@@ -227,7 +227,14 @@ fn fill_and_stroke(
         // falling through to the unchanged flat-fallback_color behavior
         // via paint_to_rgba/average_stop_color below — see this module's
         // doc comment and shader.rs's "known gaps" for why.
-        let routed_to_shader = if let Some(shapes) = shader_shapes.as_deref_mut() {
+        //
+        // A direct move (not `.as_deref_mut()`) is correct and sufficient
+        // here specifically because `shader_shapes` is used exactly once,
+        // right here, and never again for the rest of this function call —
+        // unlike `tessellate_elements_with`'s loop, which genuinely needs
+        // a fresh reborrow every iteration since it calls into this same
+        // collector repeatedly across multiple sibling elements.
+        let routed_to_shader = if let Some(shapes) = shader_shapes {
             if let Some(shader_def) = resolve_shader_def(fill, defs) {
                 let (vertices, indices) = fill_path_positions(path, transform, canvas);
                 shapes.push(PendingShaderShape { shader: shader_def.clone(), vertices, indices });
@@ -775,4 +782,4 @@ mod shader_routing_tests {
 
         assert!(!geometry.vertices.is_empty(), "with no collector, a shader ref must still flat-fill via fallback_color");
     }
-                }
+                  }
