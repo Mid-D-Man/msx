@@ -7,6 +7,20 @@
 //! is a thin wrapper over it. `layer.rs` calls `tessellate_elements`
 //! directly (scoped to just one layer's children) to render that layer
 //! into its own isolated buffer.
+//!
+//! `tessellate_scene_with_shaders` is a separate, `pub(crate)`-only
+//! sibling of `tessellate_scene` used exclusively by `lib.rs`'s top-level
+//! render path: it additionally pulls out any shape whose *fill*
+//! resolves to a `Def::Shader` into its own collection (see
+//! `shader.rs::PendingShaderShape`) instead of baking a flat color for
+//! it. Kept deliberately separate from the crate's public
+//! `tessellate_scene`/`tessellate_elements` (both re-exported from
+//! `lib.rs`) rather than changing their signatures — those stay flat
+//! geometry in, flat geometry out, so nothing outside this crate that
+//! might already depend on that shape breaks, and `layer.rs` keeps
+//! calling the plain, unchanged `tessellate_elements` (shader fills
+//! inside a `Layer` intentionally still paint flat — see `shader.rs`'s
+//! module doc for why that's scoped out for now, not an oversight).
 
 use std::collections::HashMap;
 
@@ -19,6 +33,8 @@ use lyon::tessellation::{
 };
 
 use msx_ast::{path::PathCommand, Color, Def, Element, Line, Matrix2D, Paint, Polyline, Rect, Scene, Style, Use};
+
+use crate::shader::PendingShaderShape;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -74,7 +90,18 @@ pub fn tessellate_scene(scene: &Scene) -> VectorGeometry {
     let defs = Defs::build(&scene.defs);
     let index = ElementIndex::build(&scene.elements);
     let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
-    tessellate_elements_with(&scene.elements, Matrix2D::identity(), canvas, &defs, &index)
+    tessellate_elements_with(&scene.elements, Matrix2D::identity(), canvas, &defs, &index, None)
+}
+
+/// `lib.rs`'s shader-aware top-level render path only — see this module's
+/// doc comment for why it's kept separate from `tessellate_scene`.
+pub(crate) fn tessellate_scene_with_shaders(scene: &Scene) -> (VectorGeometry, Vec<PendingShaderShape>) {
+    let defs = Defs::build(&scene.defs);
+    let index = ElementIndex::build(&scene.elements);
+    let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
+    let mut shader_shapes = Vec::new();
+    let geometry = tessellate_elements_with(&scene.elements, Matrix2D::identity(), canvas, &defs, &index, Some(&mut shader_shapes));
+    (geometry, shader_shapes)
 }
 
 /// Entry point for `layer.rs`: tessellate just one layer's children,
@@ -84,13 +111,20 @@ pub fn tessellate_scene(scene: &Scene) -> VectorGeometry {
 pub fn tessellate_elements(elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) -> VectorGeometry {
     let defs = Defs::build(&[]);
     let index = ElementIndex::build(elements);
-    tessellate_elements_with(elements, base_transform, canvas, &defs, &index)
+    tessellate_elements_with(elements, base_transform, canvas, &defs, &index, None)
 }
 
-fn tessellate_elements_with(elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, index: &ElementIndex) -> VectorGeometry {
+fn tessellate_elements_with(
+    elements: &[Element],
+    base_transform: Matrix2D,
+    canvas: (f32, f32),
+    defs: &Defs,
+    index: &ElementIndex,
+    mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
+) -> VectorGeometry {
     let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     for element in elements {
-        tessellate_element(element, base_transform, canvas, defs, index, &mut buffers);
+        tessellate_element(element, base_transform, canvas, defs, index, &mut buffers, shader_shapes.as_deref_mut());
     }
     VectorGeometry { vertices: buffers.vertices, indices: buffers.indices }
 }
@@ -102,28 +136,29 @@ fn tessellate_element(
     defs: &Defs,
     index: &ElementIndex,
     buffers: &mut VertexBuffers<Vertex, u32>,
+    mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) {
     match element {
         Element::Rect(r) => {
             let path = rect_path(r);
-            fill_and_stroke(&path, &r.style, combine(transform, r.transform.as_ref()), canvas, defs, buffers);
+            fill_and_stroke(&path, &r.style, combine(transform, r.transform.as_ref()), canvas, defs, buffers, shader_shapes);
         }
         Element::Circle(c) => {
             let path = ellipse_path(c.cx, c.cy, c.r, c.r);
-            fill_and_stroke(&path, &c.style, combine(transform, c.transform.as_ref()), canvas, defs, buffers);
+            fill_and_stroke(&path, &c.style, combine(transform, c.transform.as_ref()), canvas, defs, buffers, shader_shapes);
         }
         Element::Ellipse(e) => {
             let path = ellipse_path(e.cx, e.cy, e.rx, e.ry);
-            fill_and_stroke(&path, &e.style, combine(transform, e.transform.as_ref()), canvas, defs, buffers);
+            fill_and_stroke(&path, &e.style, combine(transform, e.transform.as_ref()), canvas, defs, buffers, shader_shapes);
         }
         Element::Line(l) => stroke_only_line(l, combine(transform, l.transform.as_ref()), canvas, buffers),
         Element::Polyline(p) | Element::Polygon(p) => {
             let path = polyline_path(p);
-            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers);
+            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers, shader_shapes);
         }
         Element::Path(p) => {
             let path = msx_path_to_lyon(p);
-            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers);
+            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers, shader_shapes);
         }
         Element::Text(_) => {
             // No font shaping/rasterization here either — same gap as
@@ -132,10 +167,10 @@ fn tessellate_element(
         Element::Group(g) => {
             let combined = combine(transform, g.transform.as_ref());
             for child in &g.children {
-                tessellate_element(child, combined, canvas, defs, index, buffers);
+                tessellate_element(child, combined, canvas, defs, index, buffers, shader_shapes.as_deref_mut());
             }
         }
-        Element::Use(u) => tessellate_use(u, transform, canvas, defs, index, buffers),
+        Element::Use(u) => tessellate_use(u, transform, canvas, defs, index, buffers, shader_shapes),
         Element::Sdf(_) | Element::Splat(_) => {
             // sdf.rs / splat.rs handle these in their own passes.
         }
@@ -146,12 +181,20 @@ fn tessellate_element(
     }
 }
 
-fn tessellate_use(u: &Use, parent: Matrix2D, canvas: (f32, f32), defs: &Defs, index: &ElementIndex, buffers: &mut VertexBuffers<Vertex, u32>) {
+fn tessellate_use(
+    u: &Use,
+    parent: Matrix2D,
+    canvas: (f32, f32),
+    defs: &Defs,
+    index: &ElementIndex,
+    buffers: &mut VertexBuffers<Vertex, u32>,
+    shader_shapes: Option<&mut Vec<PendingShaderShape>>,
+) {
     let id = u.href.strip_prefix('#').unwrap_or(&u.href);
     let Some(target) = index.get(id) else { return };
     let offset = Matrix2D::translate(u.x, u.y);
     let local = u.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-    tessellate_element(target, parent.concat(offset.concat(local)), canvas, defs, index, buffers);
+    tessellate_element(target, parent.concat(offset.concat(local)), canvas, defs, index, buffers, shader_shapes);
 }
 
 fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
@@ -163,12 +206,43 @@ fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
 
 // ── Fill + stroke ────────────────────────────────────────────────────────────
 
-fn fill_and_stroke(path: &LyonPath, style: &Style, transform: Matrix2D, canvas: (f32, f32), defs: &Defs, buffers: &mut VertexBuffers<Vertex, u32>) {
+fn fill_and_stroke(
+    path: &LyonPath,
+    style: &Style,
+    transform: Matrix2D,
+    canvas: (f32, f32),
+    defs: &Defs,
+    buffers: &mut VertexBuffers<Vertex, u32>,
+    mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
+) {
     let opacity = style.opacity.unwrap_or(1.0);
 
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
-        if let Some(rgba) = paint_to_rgba(fill, opacity, defs) {
-            fill_path(path, rgba, transform, canvas, buffers);
+        // A fill that resolves to a real Def::Shader gets pulled out into
+        // its own draw, executed for real by shader.rs — but only when a
+        // collector was actually provided (the top-level scene path via
+        // tessellate_scene_with_shaders). Every other caller
+        // (tessellate_scene, tessellate_elements, and therefore
+        // layer.rs) still has no collector, so shader fills there keep
+        // falling through to the unchanged flat-fallback_color behavior
+        // via paint_to_rgba/average_stop_color below — see this module's
+        // doc comment and shader.rs's "known gaps" for why.
+        let routed_to_shader = if let Some(shapes) = shader_shapes.as_deref_mut() {
+            if let Some(shader_def) = resolve_shader_def(fill, defs) {
+                let (vertices, indices) = fill_path_positions(path, transform, canvas);
+                shapes.push(PendingShaderShape { shader: shader_def.clone(), vertices, indices });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !routed_to_shader {
+            if let Some(rgba) = paint_to_rgba(fill, opacity, defs) {
+                fill_path(path, rgba, transform, canvas, buffers);
+            }
         }
     }
 
@@ -179,6 +253,20 @@ fn fill_and_stroke(path: &LyonPath, style: &Style, transform: Matrix2D, canvas: 
                 stroke_path(path, rgba, width, transform, canvas, buffers);
             }
         }
+    }
+}
+
+/// If `paint` is a `url(#id)` reference that resolves to a real
+/// `Def::Shader` (not a gradient), returns it. Used to decide whether a
+/// fill should be routed to `shader.rs` for real WGSL execution instead
+/// of the flat `fallback_color`/average-stop-color treatment every other
+/// paint reference gets.
+fn resolve_shader_def<'a>(paint: &Paint, defs: &Defs<'a>) -> Option<&'a msx_ast::ShaderDef> {
+    let Paint::Ref(reference) = paint else { return None };
+    let id = reference.strip_prefix("url(#")?.strip_suffix(')')?;
+    match defs.get(id)? {
+        Def::Shader(shader) => Some(shader),
+        _ => None,
     }
 }
 
@@ -211,6 +299,23 @@ fn fill_path(path: &LyonPath, rgba: [f32; 4], transform: Matrix2D, canvas: (f32,
             vertex_from_point(v.position().x, v.position().y, rgba, transform, canvas)
         }),
     );
+}
+
+/// Position-only sibling of `fill_path`, for shapes whose fill routes to
+/// `shader.rs` instead of being baked flat — there's no per-vertex color
+/// to compute here, the user's fragment shader supplies it entirely.
+fn fill_path_positions(path: &LyonPath, transform: Matrix2D, canvas: (f32, f32)) -> (Vec<[f32; 2]>, Vec<u32>) {
+    let mut buffers: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
+    let mut tess = FillTessellator::new();
+    let _ = tess.tessellate_path(
+        path,
+        &FillOptions::default(),
+        &mut BuffersBuilder::new(&mut buffers, |v: FillVertex| {
+            let (tx, ty) = apply_matrix(transform, (v.position().x, v.position().y));
+            to_clip_space(tx, ty, canvas.0, canvas.1)
+        }),
+    );
+    (buffers.vertices, buffers.indices)
 }
 
 fn stroke_path(path: &LyonPath, rgba: [f32; 4], width: f32, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
@@ -565,3 +670,109 @@ fn append_arc(b: &mut LyonPathBuilder, from: (f32, f32), radii: (f32, f32), x_ro
         theta = theta_next;
     }
         }
+
+#[cfg(test)]
+mod shader_routing_tests {
+    use super::*;
+    use msx_ast::{Canvas, Rect, ShaderDef, ShaderUniform, ShaderUniformValue};
+
+    fn shader_style() -> Style {
+        Style {
+            fill: Some(Paint::Ref("url(#plasma_1)".to_string())),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        }
+    }
+
+    fn flat_style() -> Style {
+        Style {
+            fill: Some(Paint::Color(Color::rgb(10, 20, 30))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        }
+    }
+
+    fn rect(style: Style) -> Element {
+        Element::Rect(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style })
+    }
+
+    /// A rect whose fill resolves to a real `Def::Shader` must be pulled
+    /// entirely out of the flat vertex batch and into the shader-shapes
+    /// collector — not drawn twice, not left behind as a flat fallback
+    /// fill (that fallback path is `lib.rs`'s job, only when the
+    /// shader's `source_ref` fails to resolve at render time).
+    #[test]
+    fn shader_filled_rect_is_routed_to_the_shader_collector_not_the_flat_batch() {
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::Shader(
+            ShaderDef::new("plasma_1", "shaders/plasma.wgsl", Color::rgb(0x6b, 0x46, 0xff))
+                .with_uniforms(vec![ShaderUniform::new("speed", ShaderUniformValue::Float(1.5))]),
+        ));
+        scene.elements.push(rect(shader_style()));
+
+        let (geometry, shader_shapes) = tessellate_scene_with_shaders(&scene);
+
+        assert!(geometry.vertices.is_empty(), "shader-filled rect must not also land in the flat batch");
+        assert_eq!(shader_shapes.len(), 1);
+        assert_eq!(shader_shapes[0].shader.id, "plasma_1");
+        assert!(!shader_shapes[0].vertices.is_empty(), "the shape still needs real tessellated geometry to draw with");
+        assert!(!shader_shapes[0].indices.is_empty());
+    }
+
+    /// An ordinary flat-colored rect in the same scene must be completely
+    /// unaffected — still lands in the normal batch, never touches the
+    /// shader collector.
+    #[test]
+    fn flat_filled_rect_is_unaffected_by_shader_routing() {
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.elements.push(rect(flat_style()));
+
+        let (geometry, shader_shapes) = tessellate_scene_with_shaders(&scene);
+
+        assert!(!geometry.vertices.is_empty());
+        assert!(shader_shapes.is_empty());
+    }
+
+    /// A gradient ref (not a shader def) must keep resolving through the
+    /// ordinary flat-fill path — `resolve_shader_def` has to distinguish
+    /// `Def::Shader` from every other `Def` variant, not just check "is
+    /// this a `Paint::Ref` at all".
+    #[test]
+    fn gradient_ref_is_not_mistaken_for_a_shader_ref() {
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::LinearGradient(msx_ast::LinearGradient {
+            id: "grad_1".to_string(),
+            x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0,
+            stops: vec![msx_ast::Stop::new(0.0, Color::rgb(255, 0, 0))],
+        }));
+        let style = Style { fill: Some(Paint::Ref("url(#grad_1)".to_string())), ..flat_style() };
+        scene.elements.push(rect(style));
+
+        let (geometry, shader_shapes) = tessellate_scene_with_shaders(&scene);
+
+        assert!(!geometry.vertices.is_empty(), "gradient-filled rect must still land in the flat batch");
+        assert!(shader_shapes.is_empty());
+    }
+
+    /// The plain, non-shader-aware `tessellate_scene`/`tessellate_elements`
+    /// entry points (what `layer.rs` and any external caller actually
+    /// use) must keep their exact pre-existing behavior: a shader ref
+    /// still resolves via `average_stop_color`'s `fallback_color` path
+    /// and lands in the flat batch, since there's no collector to divert
+    /// it to. This is the "shader fills inside a Layer still paint flat"
+    /// gap, demonstrated directly rather than just asserted in a comment.
+    #[test]
+    fn plain_tessellate_scene_still_flat_fills_shader_refs_no_collector_available() {
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::Shader(ShaderDef::new("plasma_1", "shaders/plasma.wgsl", Color::rgb(0x6b, 0x46, 0xff))));
+        scene.elements.push(rect(shader_style()));
+
+        let geometry = tessellate_scene(&scene);
+
+        assert!(!geometry.vertices.is_empty(), "with no collector, a shader ref must still flat-fill via fallback_color");
+    }
+                }
