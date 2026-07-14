@@ -20,5 +20,15 @@ msx-parser      = { workspace = true }
 msx-render-core = { workspace = true }
 msx-render-cpu  = { workspace = true }
 msx-render-svg  = { workspace = true }
+msx-render-gpu  = { workspace = true, optional = true }
 clap            = { workspace = true }
 image           = { workspace = true }
+
+# `gpu` pulls in msx-render-gpu (and, transitively, all of wgpu) only when
+# explicitly asked for. Off by default: wgpu is by far the heaviest/most
+# volatile dependency in this whole workspace (see msx-render-gpu's own
+# lib.rs doc on API risk), and most msx-cli builds — including every CI
+# job today — have no need for it at all. `cargo build --features gpu`
+# (or `--all-features`) opts in.
+[features]
+gpu = ["dep:msx-render-gpu"]
