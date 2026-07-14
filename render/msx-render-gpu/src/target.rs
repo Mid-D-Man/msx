@@ -30,7 +30,22 @@ pub struct OffscreenTarget {
 }
 
 impl OffscreenTarget {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    /// `usage` is the caller's responsibility, not a hardcoded default —
+    /// this constructor is shared by two genuinely different needs:
+    /// `lib.rs`'s top-level scene target only ever gets rendered into and
+    /// then copied out for CPU readback (`RENDER_ATTACHMENT | COPY_SRC`),
+    /// while `layer.rs`'s per-layer buffer additionally needs to be
+    /// *sampled* by the composite shader afterward (`TEXTURE_BINDING` on
+    /// top of that). A single hardcoded usage value here previously
+    /// covered only the first case — layer compositing failed with a real
+    /// wgpu validation error the moment it actually ran against a real
+    /// adapter for the first time ("Usage flags ... do not contain
+    /// required usage flags TextureUsages(TEXTURE_BINDING)"), since
+    /// nothing about the *type* of a missing usage flag is wrong, only
+    /// its runtime validity for a specific later operation — exactly the
+    /// kind of gap only a real GPU adapter's driver can catch, no matter
+    /// how carefully the surrounding Rust is type-checked.
+    pub fn new(device: &wgpu::Device, width: u32, height: u32, usage: wgpu::TextureUsages) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("msx offscreen target"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -38,9 +53,7 @@ impl OffscreenTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            // RENDER_ATTACHMENT so every pipeline in this crate can draw
-            // into it, COPY_SRC so `read_back` can copy it out to a buffer.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -120,4 +133,4 @@ impl OffscreenTarget {
 
         target
     }
-              }
+}
