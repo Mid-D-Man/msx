@@ -290,7 +290,7 @@ fn pack_uniforms(def: &ShaderDef, time: f32) -> Vec<u8> {
 
     fn push(bytes: &mut Vec<u8>, data: &[u8], align: usize, max_align: &mut usize) {
         *max_align = (*max_align).max(align);
-        while bytes.len() % align != 0 {
+        while !bytes.len().is_multiple_of(align) {
             bytes.push(0);
         }
         bytes.extend_from_slice(data);
@@ -329,7 +329,7 @@ fn pack_uniforms(def: &ShaderDef, time: f32) -> Vec<u8> {
     // WGSL struct size is rounded up to the struct's own alignment,
     // which equals the largest member alignment for a flat struct like
     // this (no nested struct/array members here to complicate it).
-    while bytes.len() % max_align != 0 {
+    while !bytes.len().is_multiple_of(max_align) {
         bytes.push(0);
     }
     bytes
@@ -399,4 +399,4 @@ mod tests {
         let time = f32::from_le_bytes(bytes[12..16].try_into().unwrap());
         assert_eq!(time, 9.0);
     }
-}
+    }
