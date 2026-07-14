@@ -45,6 +45,28 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # msx-render-gpu (wgpu) needs a GPU adapter to do anything, and
+      # GitHub's hosted runners have no real GPU. Mesa's software
+      # implementations — lavapipe (Vulkan) and llvmpipe (GL), both CPU-
+      # backed — are the standard, well-established fix for this exact
+      # situation (used by wgpu's own ecosystem and widely documented).
+      # msx-render-gpu is offscreen-only (see its lib.rs doc: no window
+      # `Surface` anywhere in this project), so this doesn't need Xvfb or
+      # any other display-server setup — that's only a concern for
+      # Surface-backed/windowed rendering, which nothing here does.
+      #
+      # Package names checked directly against a real Ubuntu 24.04
+      # (noble) apt index, not assumed: `libegl1-mesa` doesn't exist on
+      # noble at all (an older Debian/Ubuntu name — Mesa's EGL support
+      # folded into generic `libegl1` some releases back); the correct
+      # current name is `libegl1`. `libgl1-mesa-dri` turned out to already
+      # be preinstalled on a stock noble image, but is listed explicitly
+      # anyway rather than relied on implicitly — runner base images
+      # change over time, and an explicit install here is a no-op (not an
+      # error) if it's already present.
+      - name: Install software GPU drivers (lavapipe/llvmpipe, for headless wgpu)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libgl1-mesa-dri libegl1
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -85,8 +107,15 @@ jobs:
       # --workspace: without it this built only the root facade package,
       # which has no [[bin]] of its own — meaning target/release/msx (the CLI
       # binary the next step shells out to) was never actually produced.
+      # --features gpu: enables msx-cli's `rasterize-gpu` subcommand (behind
+      # a Cargo feature specifically so this doesn't force wgpu into every
+      # build of this binary — see msx-cli's Cargo.toml). Only msx-cli
+      # actually has a `gpu` feature to enable; every other --workspace
+      # member silently ignores a feature flag it doesn't define, so this
+      # is safe to pass workspace-wide rather than needing a separate -p
+      # msx-cli build.
       - name: Build release binary
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --features gpu
 
       # ── Benchmarks ────────────────────────────────────────────────────────────
       - name: Run criterion benchmarks
@@ -113,7 +142,7 @@ jobs:
       - name: Render examples and collect corpus stats
         run: |
           BIN=./target/release/msx
-          mkdir -p results/svgs results/pngs results/gifs
+          mkdir -p results/svgs results/pngs results/gifs results/gpu_pngs results/gpu_errors
           {
             printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
             for src in examples/*.msx; do
@@ -143,6 +172,22 @@ jobs:
               # inline SVG for that single card.
               "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
                 echo "  WARN: rasterize failed for $stem" >&2
+
+              # GPU rasterize (real WGSL execution for Def::Shader fills —
+              # see msx-render-gpu's shader.rs) — non-fatal for the same
+              # reason `animate` below is: expected to be a flat/identical-
+              # looking render for the majority of examples that don't use
+              # a shader def at all, and even for the one that does, "no
+              # GPU adapter available" is a legitimate, non-broken outcome
+              # on some runner, not a code bug. stderr is captured per
+              # example so the report can surface the actual reason in the
+              # shader badge tooltip rather than a generic "unavailable".
+              if ! "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
+                    2>"results/gpu_errors/${stem}.txt"; then
+                : # non-fatal — examples.json reads gpu_errors/*.txt if present
+              else
+                rm -f "results/gpu_errors/${stem}.txt"
+              fi
 
               # Animate (msx-anim resolve_at_time, sampled to a looping
               # GIF) — expected to fail for the majority of examples that
@@ -181,6 +226,7 @@ jobs:
           path: |
             results/pngs
             results/gifs
+            results/gpu_pngs
             results/svgs
           retention-days: 14
           if-no-files-found: warn
@@ -219,6 +265,8 @@ jobs:
               src_path = f'examples/{stem}.msx'
               png_path = f'results/pngs/{stem}.png'
               gif_path = f'results/gifs/{stem}.gif'
+              gpu_path = f'results/gpu_pngs/{stem}.gpu.png'
+              gpu_err_path = f'results/gpu_errors/{stem}.txt'
 
               if not os.path.exists(src_path):
                   continue
@@ -238,6 +286,20 @@ jobs:
                   with open(gif_path, 'rb') as f:
                       anim_gif_base64 = base64.b64encode(f.read()).decode('ascii')
 
+              # Real WGSL-executed render via msx-render-gpu, when the
+              # `gpu` feature was built and a GPU adapter (real or
+              # software) was available on the runner. gpu_error carries
+              # *why* it's missing when it is — surfaced in the report's
+              # shader badge tooltip rather than left as an unexplained gap.
+              gpu_png_base64 = ''
+              if os.path.exists(gpu_path):
+                  with open(gpu_path, 'rb') as f:
+                      gpu_png_base64 = base64.b64encode(f.read()).decode('ascii')
+              gpu_error = ''
+              if os.path.exists(gpu_err_path):
+                  with open(gpu_err_path, 'r', errors='replace') as f:
+                      gpu_error = f.read().strip()[:300]  # report tooltip, not a log dump
+
               # Simple text heuristic, not a real parse — reliable enough
               # since `type = "shader"` is the literal required DixScript
               # syntax for a shader def (see msx-parser/src/gradient.rs).
@@ -251,6 +313,8 @@ jobs:
                   'svg':             svg_content,
                   'png_base64':      png_base64,
                   'anim_gif_base64': anim_gif_base64,
+                  'gpu_png_base64':  gpu_png_base64,
+                  'gpu_error':       gpu_error,
                   'uses_shader':     uses_shader,
                   'source_bytes':    row.get('source_bytes', os.path.getsize(src_path)),
                   'binary_bytes':    row.get('binary_bytes', 0),
@@ -263,10 +327,11 @@ jobs:
               png_note = '' if png_base64 else ' [no native PNG]'
               anim_note = ' [animated]' if anim_gif_base64 else ''
               shader_note = ' [shader]' if uses_shader else ''
+              gpu_note = ' [gpu]' if gpu_png_base64 else (' [gpu: ' + gpu_error[:40] + ']' if uses_shader and gpu_error else '')
               print(f"  {stem}: {entry['source_bytes']}B src "
                     f"→ {entry['binary_bytes']}B bin "
                     f"→ {entry['svg_bytes']}B svg "
-                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}{shader_note}")
+                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}{shader_note}{gpu_note}")
 
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
@@ -306,6 +371,17 @@ jobs:
           echo "## MSX Build #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Branch: \`${{ github.ref_name }}\`  Commit: \`${GITHUB_SHA:0:8}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          gpu_total=$(find results/gpu_pngs -name '*.gpu.png' 2>/dev/null | wc -l)
+          example_total=$(find examples -maxdepth 1 -name '*.msx' 2>/dev/null | wc -l)
+          shader_total=$(grep -l 'type = "shader"' examples/*.msx 2>/dev/null | wc -l)
+          shader_gpu_ok=0
+          for f in $(grep -l 'type = "shader"' examples/*.msx 2>/dev/null); do
+            stem=$(basename "${f%.msx}")
+            [ -f "results/gpu_pngs/${stem}.gpu.png" ] && shader_gpu_ok=$((shader_gpu_ok + 1))
+          done
+          echo "GPU renders: $gpu_total/$example_total example(s) via msx-render-gpu; $shader_gpu_ok/$shader_total with real WGSL shader execution" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### Example compression table" >> $GITHUB_STEP_SUMMARY
