@@ -108,7 +108,12 @@ impl GpuRenderer {
         let width  = scene.canvas.width.round().max(1.0) as u32;
         let height = scene.canvas.height.round().max(1.0) as u32;
 
-        let offscreen = OffscreenTarget::new(&self.context.device, width, height);
+        // RENDER_ATTACHMENT so every pipeline in this crate can draw into
+        // it, COPY_SRC so read_back can copy it out to a buffer for CPU
+        // readback — nothing ever samples the top-level target itself
+        // (unlike layer.rs's per-layer buffer below), so no
+        // TEXTURE_BINDING here.
+        let offscreen = OffscreenTarget::new(&self.context.device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
 
         // Pass 1: every non-layer element — vector, shader fills, SDF,
         // splat — into the shared buffer/view.
@@ -253,4 +258,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-                                                      }
+                                             }
