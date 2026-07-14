@@ -118,4 +118,62 @@ impl VectorPipeline {
             pass.draw_indexed(0..geometry.indices.len() as u32, 0, 0..1);
         }
     }
-                    }
+
+    /// Flat-fills already-tessellated position-only geometry with a
+    /// single solid color, layered atop whatever's already in `view`
+    /// (`LoadOp::Load`, not `Clear` — this is never the first draw in a
+    /// pass). Reuses this same pipeline (it already accepts position+
+    /// color vertices; a flat fill is just every vertex sharing one
+    /// color), so no second pipeline/shader module is needed.
+    ///
+    /// Exists specifically for `shader.rs`'s graceful-fallback path:
+    /// `lib.rs` calls this when a shader-def's `source_ref` fails to
+    /// resolve at render time, painting the shape with its declared
+    /// `fallback_color` instead — same "always paint something sane"
+    /// principle every renderer applies to shader-filled shapes, just
+    /// reached via a different call path (a *runtime* failure rather
+    /// than "no WGSL-executing renderer exists at all").
+    pub fn draw_fallback_fill(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        positions: &[[f32; 2]],
+        indices: &[u32],
+        color: msx_ast::Color,
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+        let rgba = [color.r as f32 / 255.0, color.g as f32 / 255.0, color.b as f32 / 255.0, color.a as f32 / 255.0];
+        let vertices: Vec<Vertex> = positions.iter().map(|&position| Vertex { position, color: rgba }).collect();
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("msx shader-fallback vertex buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("msx shader-fallback index buffer"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("msx shader-fallback pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+    }
+    }
