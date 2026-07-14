@@ -148,12 +148,13 @@ mod tests {
     };
 
     fn style_solid(color: Color) -> Style {
-        let mut s = Style::default();
-        s.fill = Some(Paint::Color(color));
-        s.stroke = Some(Paint::None);
-        s.stroke_width = Some(0.0);
-        s.opacity = Some(1.0);
-        s
+        Style {
+            fill: Some(Paint::Color(color)),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -279,9 +280,7 @@ mod tests {
         scene.defs.push(Def::Shader(ShaderDef::new(
             "plasma_1", "shaders/plasma.wgsl", Color::rgb(107, 70, 255),
         )));
-        let mut style = Style::default();
-        style.fill = Some(Paint::Ref("url(#plasma_1)".to_string()));
-        style.stroke = Some(Paint::None);
+        let style = Style { fill: Some(Paint::Ref("url(#plasma_1)".to_string())), stroke: Some(Paint::None), ..Default::default() };
         scene.elements.push(Element::Rect(Rect::new(0.0, 0.0, 5.0, 5.0, style)));
 
         let svg = render(&scene);
@@ -292,4 +291,4 @@ mod tests {
         // inside <defs>, which the previous test covers.
         assert!(svg.contains(r#"fill="url(#plasma_1)""#));
     }
-    }
+                                                    }
