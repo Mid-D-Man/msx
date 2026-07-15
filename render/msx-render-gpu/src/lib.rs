@@ -239,15 +239,35 @@ mod tests {
     /// hand-audited to have the exact same vec3-alignment mistake.
     #[test]
     fn renders_a_splat_if_a_gpu_adapter_is_available() {
+        // A true Gaussian (`GaussianSplat::evaluate_at` is a plain
+        // `exp(-dist²/(2σ²))`, no cutoff) never reaches exactly zero at
+        // any finite distance — only asymptotically approaches it. An
+        // earlier version of this test used sigma=10 with the "far"
+        // corner only ~2.7σ away, which is close enough for a real,
+        // correct ~2.7% contribution ([1,6,4] out of 255) — that was this
+        // test's own wrong assumption, not a rendering bug. sigma=5 here
+        // instead, checked against the splat's own `effective_radius`
+        // rather than trusted by eye, so this margin is a property of the
+        // math, not a coincidence of these particular numbers. Checked
+        // ahead of the GPU-adapter skip below since it's pure arithmetic
+        // — no reason to hide a math assertion behind "only runs if this
+        // machine happens to have a GPU".
+        let splat = GaussianSplat::new(20.0, 20.0, 5.0, 5.0, Color::rgb(30, 200, 120), 1.0);
+        let corner_distance = ((19.0_f64).powi(2) * 2.0).sqrt(); // (20,20) to (1,1)
+        let far_radius = splat.effective_radius(0.0001); // radius where contribution < 0.01%
+        assert!(
+            far_radius < corner_distance,
+            "test's own safety margin is broken (far_radius {far_radius} >= corner_distance {corner_distance}) — \
+             the corner pixel checked below is no longer guaranteed to read as background"
+        );
+
         let Ok(renderer) = GpuRenderer::new() else {
             eprintln!("skipping: no GPU adapter available in this environment");
             return;
         };
 
         let mut scene = Scene::new(Canvas::new(40.0, 40.0, Color::BLACK));
-        scene.elements.push(Element::Splat(GaussianSplat::new(
-            20.0, 20.0, 10.0, 10.0, Color::rgb(30, 200, 120), 1.0,
-        )));
+        scene.elements.push(Element::Splat(splat));
 
         let mut target = RenderTarget::new(40, 40);
         renderer.render(&scene, &mut target);
@@ -257,10 +277,12 @@ mod tests {
         // tolerance here since this is checking "the pipeline actually
         // drew something recognizable", not re-deriving the gaussian
         // falloff math (already covered by splat.rs's own unit tests).
+        // Unaffected by the sigma change above: distance 0 evaluates to
+        // the same peak value regardless of sigma.
         let px = target.get_pixel(20, 20);
         assert!(px[0] < 60 && px[1] > 160 && px[2] > 90, "expected something close to (30,200,120) at the splat center, got {:?}", px);
-        // Far corner, well outside the splat's effective radius, should
-        // still be the untouched black background.
+        // Far corner, now genuinely (not just apparently) outside the
+        // splat's meaningful contribution — see far_radius check above.
         assert_eq!(target.get_pixel(1, 1), [0, 0, 0, 255]);
     }
 
@@ -295,4 +317,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-    }
+            }
