@@ -36,11 +36,35 @@ use crate::target::OffscreenTarget;
 use crate::vector;
 use crate::VectorPipeline;
 
+// `#[repr(C)]` alone is not enough to match WGSL's memory layout here.
+// The WGSL struct is:
+//     struct CompositeParams { opacity: f32, _pad: vec3<f32> }
+// WGSL's `vec3<f32>` requires its own field to start at a 16-byte-aligned
+// offset (not just occupy 12 bytes) — so `_pad` actually starts at byte
+// 16, not byte 4, and the struct's overall size then rounds up to a
+// multiple of its own alignment (16, from the vec3 member): 4 (opacity)
+// + 12 (implicit padding before the vec3 can start) + 12 (the vec3
+// itself) + 4 (trailing round-up to 32) = 32 bytes total.
+//
+// A plain Rust `[f32; 3]` has alignment 4, not 16 — `#[repr(C)]` never
+// inserts WGSL's mandatory pre-vec3 padding or the final round-up, so
+// the naive `opacity: f32, _pad: [f32; 3]` shape below produces an
+// honestly-computed but wrong 16-byte struct. This was a real, live
+// instance of the exact bug class `shader.rs::pack_uniforms` was written
+// carefully to avoid (see its module doc) — caught only because a real
+// wgpu validation error ("Buffer is bound with size 16 where the shader
+// expects 32") surfaced it, the same way the TEXTURE_BINDING bug above
+// only surfaced against a real adapter.
+//
+// `_pad`'s actual value is never read by the shader (only `params.opacity`
+// is) — the padding only needs to be BIG ENOUGH (32 bytes total), not
+// shaped to mirror the WGSL side field-by-field, since none of it is
+// individually meaningful either way.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeParams {
     opacity: f32,
-    _pad: [f32; 3],
+    _pad: [f32; 7],
 }
 
 pub struct LayerCompositor {
@@ -179,7 +203,7 @@ impl LayerCompositor {
     }
 
     fn composite(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, src_view: &wgpu::TextureView, opacity: f32) {
-        let params = CompositeParams { opacity, _pad: [0.0; 3] };
+        let params = CompositeParams { opacity, _pad: [0.0; 7] };
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx layer composite params"),
             contents: bytemuck::bytes_of(&params),
@@ -241,6 +265,22 @@ mod tests {
     use super::*;
     use msx_ast::{Element as MsxElement, Group};
 
+    /// `composite.wgsl`'s `struct CompositeParams { opacity: f32, _pad:
+    /// vec3<f32> }` is 32 bytes under WGSL's own uniform-address-space
+    /// layout rules (the `vec3<f32>` field needs a 16-byte-aligned start
+    /// offset, not just its own 12 bytes — see the type's doc comment for
+    /// the full arithmetic). This Rust-side type has to match that exact
+    /// byte size or `create_bind_group`/the draw call fails a real wgpu
+    /// validation check at runtime — which is exactly what happened
+    /// (`Buffer is bound with size 16 where the shader expects 32`)
+    /// before this test existed. A plain `size_of` assertion here is
+    /// cheap, needs no GPU adapter to run, and would have caught this
+    /// before it ever reached real hardware.
+    #[test]
+    fn composite_params_matches_the_wgsl_struct_size() {
+        assert_eq!(std::mem::size_of::<CompositeParams>(), 32);
+    }
+
     #[test]
     fn collect_layers_finds_top_level_layer() {
         let layer = Layer::new(vec![]);
@@ -269,4 +309,4 @@ mod tests {
         collect_layers(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1, "only the outer layer should be found");
     }
-                                                   }
+                    }
