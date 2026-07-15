@@ -178,7 +178,7 @@ impl Renderer for GpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{BlendMode, Canvas, Circle, Color, Element, Layer, Paint, Rect, SdfNode, SdfTree, Style};
+    use msx_ast::{BlendMode, Canvas, Circle, Color, Element, GaussianSplat, Layer, Paint, Rect, SdfNode, SdfTree, Style};
 
     #[test]
     fn renders_a_filled_rect_if_a_gpu_adapter_is_available() {
@@ -227,6 +227,43 @@ mod tests {
         assert_eq!(target.get_pixel(1, 1), [0, 0, 0, 255]);
     }
 
+    /// `renders_a_filled_rect`/`renders_an_sdf_circle`/
+    /// `renders_a_layer_at_half_opacity` cover vector, SDF, and layer
+    /// compositing against a real adapter — splat had no equivalent test
+    /// at all, meaning `splat.rs`'s GPU path (its own pipeline, its own
+    /// `CanvasParams` uniform, its own instanced-vertex-buffer setup) had
+    /// never actually run against real validation. The other three found
+    /// two real bugs (`TEXTURE_BINDING`, `CompositeParams`'s size) that
+    /// no amount of type-checking caught — worth closing this specific
+    /// gap rather than assuming splat is fine just because it wasn't
+    /// hand-audited to have the exact same vec3-alignment mistake.
+    #[test]
+    fn renders_a_splat_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let mut scene = Scene::new(Canvas::new(40.0, 40.0, Color::BLACK));
+        scene.elements.push(Element::Splat(GaussianSplat::new(
+            20.0, 20.0, 10.0, 10.0, Color::rgb(30, 200, 120), 1.0,
+        )));
+
+        let mut target = RenderTarget::new(40, 40);
+        renderer.render(&scene, &mut target);
+
+        // Dead center of an opacity-1.0 splat should read very close to
+        // the splat's own peak color, not the black background — a loose
+        // tolerance here since this is checking "the pipeline actually
+        // drew something recognizable", not re-deriving the gaussian
+        // falloff math (already covered by splat.rs's own unit tests).
+        let px = target.get_pixel(20, 20);
+        assert!(px[0] < 60 && px[1] > 160 && px[2] > 90, "expected something close to (30,200,120) at the splat center, got {:?}", px);
+        // Far corner, well outside the splat's effective radius, should
+        // still be the untouched black background.
+        assert_eq!(target.get_pixel(1, 1), [0, 0, 0, 255]);
+    }
+
     #[test]
     fn renders_a_layer_at_half_opacity_if_a_gpu_adapter_is_available() {
         let Ok(renderer) = GpuRenderer::new() else {
@@ -258,4 +295,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-                                             }
+    }
