@@ -1,0 +1,26 @@
+// examples/shader_checkerboard.msx
+// Second real shader-def example alongside shader_placeholder.msx —
+// exercises msx-render-gpu's real WGSL-execution path (shader.rs) with
+// the simplest possible test pattern instead of an organic effect, so a
+// wrong render is immediately obvious rather than merely "looks a bit
+// off" (see shaders/checkerboard.wgsl's header for the full rationale).
+//
+// Rendering status, same caveat as every shader-def example in this repo:
+// only `msx rasterize-gpu` (msx-render-gpu, built with --features gpu)
+// actually executes this WGSL. `msx rasterize` (CPU) and `msx render`
+// (SVG) both fall back to flat `fallback_color` — see Def::Shader's doc
+// comment in core/msx-ast/src/gradient.rs.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #14141c }
+  defs::
+    { type = "shader", id = "checker_1", source_ref = "shaders/checkerboard.wgsl",
+      entry_point = "fs_main", fallback_color = #3a3a4a,
+      uniforms = [ { name = "cells", type = "float", value = 10.0 },
+                   { name = "resolution", type = "vec2", value = [300.0, 200.0] },
+                   { name = "color_a", type = "vec3", value = [0.9, 0.9, 0.95] },
+                   { name = "color_b", type = "vec3", value = [0.16, 0.16, 0.22] } ] }
+  elements::
+    { type = "rect", x = 20, y = 20, width = 260, height = 160, rx = 8,
+      style = { fill = "url(#checker_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

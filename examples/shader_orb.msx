@@ -1,0 +1,30 @@
+// examples/shader_orb.msx
+// Third real shader-def example, alongside shader_placeholder.msx
+// (plasma) and shader_checkerboard.msx (diagnostic grid) — this one is
+// the "something cool" of the set: a raymarched, softly-lit, rim-glowing
+// orb floating against a gradient void. It's also the heaviest WGSL of
+// the three by a wide margin (a real sphere-tracing loop, not a single
+// analytic expression per pixel) and the first to exercise two
+// consecutive vec3 uniforms back to back — see shaders/orb_raymarch.wgsl's
+// header for exactly why that's a genuinely new case, not just a new
+// picture.
+//
+// Rendering status, same caveat as every shader-def example in this repo:
+// only `msx rasterize-gpu` (msx-render-gpu, built with --features gpu)
+// actually executes this WGSL. `msx rasterize` (CPU) and `msx render`
+// (SVG) both fall back to flat `fallback_color` — see Def::Shader's doc
+// comment in core/msx-ast/src/gradient.rs.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #05050a }
+  defs::
+    { type = "shader", id = "orb_1", source_ref = "shaders/orb_raymarch.wgsl",
+      entry_point = "fs_main", fallback_color = #7c5cff,
+      uniforms = [ { name = "resolution", type = "vec2", value = [300.0, 200.0] },
+                   { name = "base_color", type = "vec3", value = [0.35, 0.25, 0.95] },
+                   { name = "rim_color", type = "vec3", value = [0.4, 0.85, 1.0] },
+                   { name = "speed", type = "float", value = 1.0 } ] }
+  elements::
+    { type = "rect", x = 0, y = 0, width = 300, height = 200,
+      style = { fill = "url(#orb_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
