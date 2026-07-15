@@ -147,7 +147,17 @@ impl LayerCompositor {
         let local = layer.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
         let combined = parent_transform.concat(local);
 
-        let buffer = OffscreenTarget::new(device, canvas.0, canvas.1);
+        // RENDER_ATTACHMENT + COPY_SRC for the same reasons as the
+        // top-level target (lib.rs), PLUS TEXTURE_BINDING — unlike that
+        // top-level target, this buffer gets *sampled* by composite()'s
+        // shader afterward (see the "msx layer composite bind group"
+        // below), so it must be usable as a shader-bound texture too.
+        // Missing this exact flag was a real, previously-undetected bug:
+        // it type-checks fine either way (both are just
+        // `wgpu::TextureUsages` values), so only a real wgpu validation
+        // error against a real adapter ever caught it.
+        let buffer_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING;
+        let buffer = OffscreenTarget::new(device, canvas.0, canvas.1, buffer_usage);
         let canvas_f = (canvas.0 as f32, canvas.1 as f32);
         let geometry = vector::tessellate_elements(&layer.children, combined, canvas_f);
 
@@ -259,4 +269,4 @@ mod tests {
         collect_layers(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1, "only the outer layer should be found");
     }
-                }
+                                                   }
