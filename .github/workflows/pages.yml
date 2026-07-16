@@ -142,7 +142,7 @@ jobs:
       - name: Render examples and collect corpus stats
         run: |
           BIN=./target/release/msx
-          mkdir -p results/svgs results/pngs results/gifs results/gpu_pngs results/gpu_errors
+          mkdir -p results/svgs results/pngs results/gifs results/gpu_pngs results/gpu_errors results/gpu_gifs results/gpu_gif_errors
           {
             printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
             for src in examples/*.msx; do
@@ -197,6 +197,34 @@ jobs:
               # GIF exists for a given example.
               "$BIN" animate "$src" -o "results/gifs/${stem}.gif" 2>/dev/null || true
 
+              # GPU animate (animate-gpu: msx-anim keyframes AND the
+              # shader-def time uniform, sampled together — see
+              # cmd_animate_gpu's doc comment). Only worth running for
+              # examples that could actually look different from a single
+              # static GPU/CPU frame — a plain SDF/splat example with no
+              # shader def and no animations:: block would just produce N
+              # identical frames, wasted CI time and report bytes for
+              # nothing a static PNG doesn't already show. --duration 4
+              # is a fixed sweep length rather than reading the scene's
+              # own `duration` field — deliberately simple for now since
+              # nothing in the corpus combines msx-anim keyframes with a
+              # shader-def yet, so there's no real scene whose intended
+              # length this could clash with. Revisit (read the scene's
+              # own duration when it has one) the moment that combination
+              # exists. --fps 12, not the CLI's own default of 24 — half
+              # the frame count keeps this reasonable on the software
+              # (lavapipe) adapter this runner uses, which is measurably
+              # slower per-frame than a real GPU.
+              if grep -q 'type = "shader"' "$src" || grep -q 'animations::' "$src"; then
+                if ! "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
+                      --duration 4 --fps 12 \
+                      2>"results/gpu_gif_errors/${stem}.txt"; then
+                  : # non-fatal — examples.json reads gpu_gif_errors/*.txt if present
+                else
+                  rm -f "results/gpu_gif_errors/${stem}.txt"
+                fi
+              fi
+
               denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
               bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
               svg_pct=$(awk "BEGIN{printf \"%.1f\",$svg_bytes/$denom*100}")
@@ -227,6 +255,7 @@ jobs:
             results/pngs
             results/gifs
             results/gpu_pngs
+            results/gpu_gifs
             results/svgs
           retention-days: 14
           if-no-files-found: warn
@@ -267,6 +296,8 @@ jobs:
               gif_path = f'results/gifs/{stem}.gif'
               gpu_path = f'results/gpu_pngs/{stem}.gpu.png'
               gpu_err_path = f'results/gpu_errors/{stem}.txt'
+              gpu_gif_path = f'results/gpu_gifs/{stem}.gpu.gif'
+              gpu_gif_err_path = f'results/gpu_gif_errors/{stem}.txt'
 
               if not os.path.exists(src_path):
                   continue
@@ -300,6 +331,22 @@ jobs:
                   with open(gpu_err_path, 'r', errors='replace') as f:
                       gpu_error = f.read().strip()[:300]  # report tooltip, not a log dump
 
+              # animate-gpu output — samples the msx-anim keyframe clock
+              # AND the shader-def time uniform together (see
+              # cmd_animate_gpu). Only produced for examples that use a
+              # shader def or have their own animations:: block (the
+              # pages.yml step that runs it is gated the same way), so
+              # this is empty for the majority of examples by design, not
+              # by failure.
+              gpu_gif_base64 = ''
+              if os.path.exists(gpu_gif_path):
+                  with open(gpu_gif_path, 'rb') as f:
+                      gpu_gif_base64 = base64.b64encode(f.read()).decode('ascii')
+              gpu_gif_error = ''
+              if os.path.exists(gpu_gif_err_path):
+                  with open(gpu_gif_err_path, 'r', errors='replace') as f:
+                      gpu_gif_error = f.read().strip()[:300]
+
               # Simple text heuristic, not a real parse — reliable enough
               # since `type = "shader"` is the literal required DixScript
               # syntax for a shader def (see msx-parser/src/gradient.rs).
@@ -315,6 +362,8 @@ jobs:
                   'anim_gif_base64': anim_gif_base64,
                   'gpu_png_base64':  gpu_png_base64,
                   'gpu_error':       gpu_error,
+                  'gpu_gif_base64':  gpu_gif_base64,
+                  'gpu_gif_error':   gpu_gif_error,
                   'uses_shader':     uses_shader,
                   'source_bytes':    row.get('source_bytes', os.path.getsize(src_path)),
                   'binary_bytes':    row.get('binary_bytes', 0),
@@ -328,10 +377,12 @@ jobs:
               anim_note = ' [animated]' if anim_gif_base64 else ''
               shader_note = ' [shader]' if uses_shader else ''
               gpu_note = ' [gpu]' if gpu_png_base64 else (' [gpu: ' + gpu_error[:40] + ']' if uses_shader and gpu_error else '')
+              gpu_gif_note = (' [gpu-animated]' if gpu_gif_base64 else
+                               (' [gpu-animated: ' + gpu_gif_error[:40] + ']' if gpu_gif_error else ''))
               print(f"  {stem}: {entry['source_bytes']}B src "
                     f"→ {entry['binary_bytes']}B bin "
                     f"→ {entry['svg_bytes']}B svg "
-                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}{shader_note}{gpu_note}")
+                    f"({'PASS' if entry['pass'] else 'FAIL'}){png_note}{anim_note}{shader_note}{gpu_note}{gpu_gif_note}")
 
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
@@ -382,6 +433,10 @@ jobs:
             [ -f "results/gpu_pngs/${stem}.gpu.png" ] && shader_gpu_ok=$((shader_gpu_ok + 1))
           done
           echo "GPU renders: $gpu_total/$example_total example(s) via msx-render-gpu; $shader_gpu_ok/$shader_total with real WGSL shader execution" >> $GITHUB_STEP_SUMMARY
+
+          gpu_gif_total=$(find results/gpu_gifs -name '*.gpu.gif' 2>/dev/null | wc -l)
+          gpu_gif_candidates=$(grep -lE 'type = "shader"|animations::' examples/*.msx 2>/dev/null | wc -l)
+          echo "GPU animations: $gpu_gif_total/$gpu_gif_candidates candidate example(s) (shader-def or animations:: present) via animate-gpu" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### Example compression table" >> $GITHUB_STEP_SUMMARY
