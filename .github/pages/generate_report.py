@@ -244,6 +244,8 @@ def svg_gallery_html(examples: list) -> str:
         anim_gif_base64 = ex.get("anim_gif_base64", "")
         gpu_png_base64  = ex.get("gpu_png_base64", "")
         gpu_error       = ex.get("gpu_error", "")
+        gpu_gif_base64  = ex.get("gpu_gif_base64", "")
+        gpu_gif_error   = ex.get("gpu_gif_error", "")
         uses_shader     = ex.get("uses_shader", False)
         source_bytes    = ex.get("source_bytes", 0)
         binary_bytes    = ex.get("binary_bytes", 0)
@@ -255,24 +257,55 @@ def svg_gallery_html(examples: list) -> str:
 
         # Pane 3 — the actual MSX render. MSX's primary output is a native
         # pixel buffer; SVG is one optional export target. This pane shows
-        # what msx-render-cpu actually produced. An animated example (msx-
-        # anim's resolve_at_time sampled across the timeline) takes priority
-        # as a self-looping GIF — <img> loops it natively, no extra JS.
-        # Falls back to the static PNG, then to inline SVG rendered by the
-        # browser if neither raster exists.
+        # what a renderer actually produced, in priority order:
         #
-        # A shader-using, NON-animated example with a real GPU render
-        # available takes priority over the plain CPU PNG instead — showing
-        # the actually-WGSL-executed result by default (msx-render-gpu, via
-        # `msx rasterize-gpu`) with a toggle to compare against what every
-        # other renderer still shows: the def's flat `fallback_color`. Kept
-        # mutually exclusive with the animated case rather than composed —
-        # `rasterize-gpu` only produces a single static (t=0) frame today,
-        # nothing in the corpus is both animated and shader-using yet, and
-        # bolting a third state onto the animated/static toggle for a
-        # combination that doesn't exist would just be speculative
-        # complexity. Revisit if/when that combination actually shows up.
-        if anim_gif_base64:
+        # 1. animate-gpu output (gpu_gif_base64) — samples BOTH the
+        #    msx-anim keyframe clock and the shader-def time uniform at the
+        #    same t per frame (see apps/msx-cli's cmd_animate_gpu). Top
+        #    priority because it's a strict superset of what states 2 and 3
+        #    below show individually: for a shader-only scene it's the
+        #    shader genuinely animating (not the single frozen t=0 frame
+        #    rasterize-gpu produces); for a scene that also has keyframes,
+        #    it's the only one of the three that shows both moving
+        #    together instead of picking one to represent and leaving the
+        #    other static or flat.
+        # 2. anim_gif_base64 — msx-anim keyframes only, via msx-render-cpu
+        #    (`msx animate`). Any shader-def present still just paints
+        #    fallback_color, every frame — CPU never executes WGSL.
+        # 3. gpu_png_base64 — a single real WGSL-executed frame at t=0
+        #    (`msx rasterize-gpu`), no animation of either clock. Falls
+        #    back here when animate-gpu wasn't run (no shader def and no
+        #    animations:: block, so pages.yml's gate skipped it — see that
+        #    step's own comment) or failed for a scene that otherwise did
+        #    render statically.
+        # 4. The plain static CPU PNG, then inline SVG rendered by the
+        #    browser, if nothing else is available.
+        if uses_shader and gpu_gif_base64:
+            img_id = f"render-{name}"
+            # Compare against whatever the CPU-only equivalent would have
+            # shown — the keyframe-animated GIF if this scene has tracks
+            # (still flat-fallback shader, but at least keyframes moving),
+            # else the plain static PNG. Reuses msxToggleShaderRender,
+            # which just swaps img.src between two data URIs regardless of
+            # whether they're a GIF or a PNG underneath.
+            cpu_side = anim_gif_base64 or png_base64
+            cpu_mime = "gif" if anim_gif_base64 else "png"
+            compare_html = ""
+            if cpu_side:
+                compare_html = (
+                    f'<button type="button" class="compare-toggle" '
+                    f'data-cpu="data:image/{cpu_mime};base64,{cpu_side}" '
+                    f'data-gpu="data:image/gif;base64,{gpu_gif_base64}" '
+                    f'data-target="{img_id}" onclick="msxToggleShaderRender(this)">'
+                    f'compare CPU fallback</button>'
+                )
+            rendered_visual = (
+                f'<img id="{img_id}" class="native-render native-render--gpu native-render--anim" '
+                f'src="data:image/gif;base64,{gpu_gif_base64}" '
+                f'alt="{name} — animated, real WGSL-executed render (msx-render-gpu)">'
+                f'{compare_html}'
+            )
+        elif anim_gif_base64:
             img_id = f"render-{name}"
             # Lets you flip between the looping GIF and the static
             # (unanimated, t=0) PNG for the same example without leaving
@@ -330,15 +363,73 @@ def svg_gallery_html(examples: list) -> str:
         bin_pct  = (binary_bytes / max(svg_bytes, 1)) * 100 if svg_bytes > 0 else 0
         rt_badge = ('<span class="stat-chip green">✓ roundtrip</span>' if passed
                     else '<span class="stat-chip red">✗ roundtrip failed</span>')
-        anim_badge = '<span class="stat-chip accent">▶ animated</span>' if anim_gif_base64 else ''
-        if uses_shader and gpu_png_base64:
+        # Badges — computed as their own state-driven decision, not nested
+        # off the render-pane's if/elif chain above, so a state like "the
+        # static GPU frame worked but this specific animate-gpu attempt
+        # failed" is reported honestly regardless of whether the scene
+        # happens to also have keyframes. (An earlier version of this
+        # block nested the animate-gpu-failure message inside the
+        # `anim_gif_base64` branch specifically, which meant a shader-only
+        # scene with a failed animate-gpu attempt silently fell back to
+        # the plain, no-explanation "⚡ shader (GPU)" badge — caught by
+        # actually running this against a synthetic failure case rather
+        # than assuming the nesting was fine.)
+        if uses_shader and gpu_gif_base64:
+            # Folded into one badge rather than a separate "animated" chip
+            # plus a separate "shader" chip — those two would otherwise
+            # describe the SAME gif from two angles, reading as more
+            # coverage than one combined claim already says just as
+            # clearly.
+            anim_badge = ''
             shader_badge = (
                 '<span class="stat-chip green" '
-                'title="Real WGSL execution via msx-render-gpu — the image shown is the actual '
-                'shader output, not a flat fallback color.">'
-                '⚡ shader (GPU)</span>'
+                'title="Real WGSL execution via msx-render-gpu, AND the msx-anim keyframe '
+                'clock if this scene has one — both sampled at the same t per frame '
+                '(animate-gpu). The GIF shown is genuinely animated, not a frozen t=0 '
+                'snapshot.">'
+                '⚡▶ shader animated (GPU)</span>'
             )
+        elif uses_shader and gpu_png_base64:
+            anim_badge = '<span class="stat-chip accent">▶ animated</span>' if anim_gif_base64 else ''
+            gif_fail_note = f' animate-gpu attempt failed: {gpu_gif_error}.' if gpu_gif_error else ''
+            if anim_gif_base64:
+                # Keyframes are moving (state 2 in the render pane above);
+                # the shader itself is still frozen — say so explicitly
+                # rather than reusing the plain green GPU badge below,
+                # which would otherwise silently overclaim what's shown.
+                shader_badge = (
+                    '<span class="stat-chip accent" '
+                    'title="Real WGSL execution, but only a single static (t=0) frame — the '
+                    f'shader itself is not animating here, only the msx-anim keyframe tracks '
+                    f'are.{gif_fail_note}">'
+                    '⚡ shader (GPU, static)</span>'
+                )
+            else:
+                shader_badge = (
+                    '<span class="stat-chip green" '
+                    'title="Real WGSL execution via msx-render-gpu — the image shown is the '
+                    'actual shader output, not a flat fallback color. Single static (t=0) '
+                    f'frame only.{gif_fail_note}">'
+                    '⚡ shader (GPU)</span>'
+                )
+        elif anim_gif_base64:
+            anim_badge = '<span class="stat-chip accent">▶ animated</span>'
+            if uses_shader:
+                fallback_reason = (
+                    f' Last GPU render attempt: {gpu_error}.' if gpu_error else
+                    ' No GPU render was attempted for this build (msx-cli compiled without '
+                    '`--features gpu`, or no adapter — real or software — was available).'
+                )
+                shader_badge = (
+                    '<span class="stat-chip accent" '
+                    f'title="Uses a Def::Shader fill, but no real WGSL execution happened here — '
+                    f'this paints the flat fallback_color from the def instead.{fallback_reason}">'
+                    '⚡ shader (fallback)</span>'
+                )
+            else:
+                shader_badge = ''
         elif uses_shader:
+            anim_badge = ''
             fallback_reason = (
                 f' Last GPU render attempt: {gpu_error}.' if gpu_error else
                 ' No GPU render was attempted for this build (msx-cli compiled without '
@@ -351,6 +442,7 @@ def svg_gallery_html(examples: list) -> str:
                 '⚡ shader (fallback)</span>'
             )
         else:
+            anim_badge = ''
             shader_badge = ''
 
         cards.append(f"""
