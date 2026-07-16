@@ -70,6 +70,32 @@ enum Command {
         #[arg(long, default_value_t = 24)]
         fps: u32,
     },
+    /// GPU counterpart to `Animate` — samples BOTH clocks that can move in
+    /// this project at once (the msx-anim keyframe timeline AND a
+    /// shader-def's `time` uniform) at the same `t` per frame and exports
+    /// the result as a GIF via msx-render-gpu. `RasterizeGpu` only ever
+    /// drove the shader clock for a single static frame; this is what
+    /// actually animates it. Only exists in builds compiled with
+    /// `--features gpu` — see `RasterizeGpu`.
+    #[cfg(feature = "gpu")]
+    AnimateGpu {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Frames per second to sample at.
+        #[arg(long, default_value_t = 24)]
+        fps: u32,
+        /// Sweep length in seconds. Required unless the scene has its own
+        /// `animations::` keyframe tracks to infer a length from (see
+        /// `cmd_animate_gpu`'s doc comment) — a pure shader-time sweep has
+        /// no timeline length of its own.
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Export a single-pass (non-repeating) GIF instead of the
+        /// default infinite loop.
+        #[arg(long)]
+        no_loop: bool,
+    },
     /// Print canvas/element/def stats for an .msx file (source or binary).
     Info { input: PathBuf },
     /// Parse + schema-validate DixScript source only; exit code reflects success.
@@ -89,6 +115,9 @@ fn main() {
         #[cfg(feature = "gpu")]
         Command::RasterizeGpu { input, output, time } => cmd_rasterize_gpu(input, output.as_deref(), *time),
         Command::Animate { input, output, fps } => cmd_animate(input, output.as_deref(), *fps),
+        #[cfg(feature = "gpu")]
+        Command::AnimateGpu { input, output, fps, duration, no_loop } =>
+            cmd_animate_gpu(input, output.as_deref(), *fps, *duration, *no_loop),
         Command::Info { input } => cmd_info(input),
         Command::Validate { input } => cmd_validate(input),
         Command::Roundtrip { input } => cmd_roundtrip(input),
@@ -268,6 +297,124 @@ fn render_frame(scene: &Scene, t: f64, frame_dt: f64) -> Result<image::Frame, St
     Ok(image::Frame::from_parts(img, 0, 0, delay))
 }
 
+/// GPU counterpart to `cmd_animate` — same shape, but drives BOTH clocks
+/// that can move in this project at once, not just one:
+///
+/// 1. `msx-anim`'s keyframe timeline (`resolve_at_time`, TRS + opacity,
+///    applies uniformly across every element type including SDF/Splat/
+///    Layer — see `core/msx-anim/src/resolver.rs`'s `apply_delta`), and
+/// 2. `msx-render-gpu`'s shader-def `time` uniform (`render_with_shader_dir`,
+///    currently only reaches vector-shape shader fills — see `shader.rs`'s
+///    known gaps for what it doesn't reach yet: SDF, Splat, anything
+///    inside a `Layer`).
+///
+/// Both are sampled at the SAME `t` per frame, so a scene that ever ends
+/// up using both systems together advances them in lockstep rather than
+/// needing two separate exports stitched by hand. `cmd_rasterize_gpu`
+/// only ever drove clock 2, for one static frame; this is what actually
+/// animates it.
+///
+/// `--duration` is required UNLESS the scene has its own keyframe
+/// timeline (`scene.is_animated()`), in which case `scene.effective_duration()`
+/// is used automatically — a pure shader-time sweep (no `animations::`
+/// block at all, e.g. `shader_orb.msx`) has no timeline length of its own
+/// to infer, so it has to be told explicitly how long to sample.
+///
+/// Deliberately simpler than `cmd_animate` in one respect: no special
+/// `PingPong` playback-span doubling. `scene.loop_mode` still isn't
+/// consulted for anything here (unlike `cmd_animate`, which reads it to
+/// decide GIF repeat) — repeat is controlled directly by `--no-loop`
+/// instead, since `PingPong`'s forward+backward half only makes sense for
+/// the keyframe clock, and no example in this repo combines `PingPong`
+/// keyframes with a shader-def yet. Add it the moment that combination
+/// actually exists, rather than speculatively now.
+#[cfg(feature = "gpu")]
+fn cmd_animate_gpu(
+    input: &Path,
+    output: Option<&Path>,
+    fps: u32,
+    duration: Option<f64>,
+    no_loop: bool,
+) -> Result<(), String> {
+    if fps == 0 {
+        return Err("--fps must be greater than 0".to_string());
+    }
+    let scene = load_scene(input)?;
+    let base_dir = input.parent().unwrap_or_else(|| Path::new("."));
+
+    let duration = match duration {
+        Some(d) if d > 0.0 => d,
+        Some(_) => return Err("--duration must be greater than 0".to_string()),
+        None => {
+            let d = scene.effective_duration();
+            if d <= 0.0 {
+                return Err(
+                    "scene has no animation tracks, so it has no timeline length of its \
+                     own to infer — pass --duration <seconds> explicitly to sample the \
+                     shader's time uniform over an arbitrary span"
+                        .to_string(),
+                );
+            }
+            d
+        }
+    };
+
+    let renderer = msx_render_gpu::GpuRenderer::new().map_err(|e| format!("GPU renderer unavailable: {e}"))?;
+    let frame_dt = 1.0 / fps as f64;
+    let count = (duration / frame_dt).round().max(1.0) as u32;
+
+    let mut frames = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let t = i as f64 * frame_dt;
+        // Keyframe clock: only actually changes anything if the scene has
+        // tracks at all — `resolve_at_time` is a no-op clone otherwise,
+        // so this is always safe to call regardless of what triggered
+        // this function (an explicit --duration on a shader-only scene,
+        // or an inferred one on a keyframed scene).
+        let resolved = msx_anim::resolve_at_time(&scene, t);
+
+        let mut target = RenderTarget::new(
+            resolved.canvas.width.round().max(1.0) as u32,
+            resolved.canvas.height.round().max(1.0) as u32,
+        );
+        // Shader clock: fed straight through, independent of whatever
+        // resolve_at_time did or didn't change above.
+        renderer.render_with_shader_dir(&resolved, &mut target, base_dir, t as f32);
+
+        let img = rgba_image_from_target(target)?;
+        let delay = image::Delay::from_saturating_duration(std::time::Duration::from_secs_f64(frame_dt));
+        frames.push(image::Frame::from_parts(img, 0, 0, delay));
+    }
+    let frame_count = frames.len();
+
+    // Deliberately `.gpu.gif`, distinct from both `cmd_animate`'s `.gif`
+    // and `cmd_rasterize_gpu`'s `.gpu.png` — running all three against
+    // the same input (the obvious way to compare "CPU keyframes only" vs
+    // "GPU shader, single frame" vs "GPU shader, animated") shouldn't
+    // have any of them silently overwrite another.
+    let out_path = output.map(PathBuf::from).unwrap_or_else(|| input.with_extension("gpu.gif"));
+    let file = std::fs::File::create(&out_path)
+        .map_err(|e| format!("failed to create {}: {}", out_path.display(), e))?;
+    let mut encoder = image::codecs::gif::GifEncoder::new(file);
+    if !no_loop {
+        encoder
+            .set_repeat(image::codecs::gif::Repeat::Infinite)
+            .map_err(|e| format!("failed to set GIF loop: {}", e))?;
+    }
+    encoder
+        .encode_frames(frames)
+        .map_err(|e| format!("GIF encode failed: {}", e))?;
+
+    println!(
+        "Wrote {} ({} frames @ {}fps, {:.2}s sweep, GPU)",
+        out_path.display(),
+        frame_count,
+        fps,
+        duration,
+    );
+    Ok(())
+}
+
 fn cmd_info(input: &Path) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
     let is_binary = bytes.len() >= 4 && &bytes[0..4] == b"MSX\0";
@@ -425,4 +572,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-        }
+    }
