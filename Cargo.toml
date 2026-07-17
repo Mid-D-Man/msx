@@ -70,7 +70,7 @@ version.workspace  = true
 edition.workspace  = true
 authors.workspace  = true
 license.workspace  = true
-description = "MSX — MidStroke eXchange vector format (workspace facade)"
+description = "MSX — MidStroke eXtension vector format (workspace facade)"
 publish     = false
 
 [dependencies]
