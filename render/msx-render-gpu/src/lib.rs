@@ -51,6 +51,7 @@ mod context;
 mod layer;
 mod pipeline;
 mod sdf;
+mod sdf_shader;
 mod shader;
 mod splat;
 mod target;
@@ -68,6 +69,7 @@ use std::path::Path;
 
 use msx_ast::{Matrix2D, Scene};
 use msx_render_core::{RenderTarget, Renderer};
+use sdf_shader::{SdfShaderComposite, SdfShaderContext};
 use shader::ShaderFillPipeline;
 
 pub struct GpuRenderer {
@@ -76,6 +78,7 @@ pub struct GpuRenderer {
     sdf_pipeline: SdfPipeline,
     splat_pipeline: SplatPipeline,
     shader_pipeline: ShaderFillPipeline,
+    sdf_shader_composite: SdfShaderComposite,
     layer_compositor: LayerCompositor,
 }
 
@@ -87,8 +90,9 @@ impl GpuRenderer {
         let sdf_pipeline = SdfPipeline::new(&context.device, format);
         let splat_pipeline = SplatPipeline::new(&context.device, format);
         let shader_pipeline = ShaderFillPipeline::new(&context.device, format);
+        let sdf_shader_composite = SdfShaderComposite::new(&context.device, format);
         let layer_compositor = LayerCompositor::new(&context.device, format);
-        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, layer_compositor })
+        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, sdf_shader_composite, layer_compositor })
     }
 
     /// Renders exactly like the `Renderer` trait's `render`, but with
@@ -142,7 +146,18 @@ impl GpuRenderer {
                 self.vector_pipeline.draw_fallback_fill(&self.context.device, &mut encoder, &offscreen.view, &shape.vertices, &shape.indices, shape.shader.fallback_color);
             }
         }
-        self.sdf_pipeline.draw_all(&self.context.device, &mut encoder, &offscreen.view, scene);
+        self.sdf_pipeline.draw_all(
+            &self.context.device,
+            &mut encoder,
+            &offscreen.view,
+            scene,
+            Some(&SdfShaderContext {
+                shader_pipeline: &self.shader_pipeline,
+                composite: &self.sdf_shader_composite,
+                shader_base_dir,
+                time,
+            }),
+        );
         self.splat_pipeline.draw_all(&self.context.device, &mut encoder, &offscreen.view, scene);
         self.context.queue.submit(std::iter::once(encoder.finish()));
 
@@ -317,4 +332,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-            }
+                                  }
