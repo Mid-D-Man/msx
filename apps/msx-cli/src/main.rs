@@ -13,7 +13,7 @@ use msx_ast::{Def, Scene};
 use msx_render_core::{RenderTarget, Renderer};
 
 #[derive(Parser)]
-#[command(name = "msx", version, about = "MSX — MidStroke eXchange CLI")]
+#[command(name = "msx", version, about = "MSX — MidStroke eXtension CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -572,4 +572,4 @@ mod tests {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
     }
-    }
+            }
