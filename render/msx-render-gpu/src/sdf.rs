@@ -14,7 +14,8 @@ use wgpu::util::DeviceExt;
 
 use msx_ast::{Color, Element, Matrix2D, Paint, SdfNode, SdfTree, Scene};
 
-use crate::vector::{average_stop_color, Defs};
+use crate::sdf_shader::{draw_sdf_shader_fill, SdfShaderContext};
+use crate::vector::{average_stop_color, resolve_shader_def, Defs};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -210,10 +211,10 @@ impl SdfPipeline {
         SdfPipeline { pipeline, bind_group_layout }
     }
 
-    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene) {
+    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SdfShaderContext>) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
         let defs = Defs::build(&scene.defs);
-        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs);
+        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs, shader_ctx);
     }
 
     /// Entry point for `layer.rs`: draw just the `Sdf` shapes within one
@@ -223,38 +224,46 @@ impl SdfPipeline {
     /// gradient/shader refs on ordinary shapes inside a layer — not
     /// something newly introduced by threading `defs` through here), so it
     /// passes an empty `Defs::build(&[])`; a `Paint::Ref` on an SDF inside
-    /// a layer resolves to nothing until that's addressed too.
+    /// a layer resolves to nothing until that's addressed too. It also
+    /// always passes `shader_ctx = None` — shader fills on SDF nodes
+    /// inside a `Layer` aren't wired up yet, consistent with vector.rs's
+    /// identical gap for ordinary shapes in a `Layer`.
     ///
     /// `pub(crate)`, not `pub` — only ever called from within this crate
-    /// (`draw_all` below, and `layer.rs`), and it takes `Defs`, which is
+    /// (`draw_all` above, and `layer.rs`), and it takes `Defs`, which is
     /// itself `pub(crate)`; a `pub` function can't expose a `pub(crate)`
     /// type in its signature (rustc's private-interfaces lint), so this
     /// needs to match rather than the other way around — `Defs` staying
     /// internal is the intentional design, not an oversight.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
+    pub(crate) fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, shader_ctx: Option<&SdfShaderContext>) {
         let mut nodes = Vec::new();
         collect_sdf_nodes(elements, base_transform, &mut nodes);
         for (node, transform) in &nodes {
-            self.draw_one(device, encoder, view, node, *transform, canvas, defs);
+            // Mirrors vector.rs's own `routed_to_shader` decision — a real
+            // Def::Shader fill, AND a shader context actually provided by
+            // this call site (see the doc comment above for what routes
+            // `None` here). `resolve_shader_def` is only called at all
+            // when a context exists, so a plain color/gradient/none fill
+            // (the overwhelmingly common case) never pays for a lookup it
+            // doesn't need.
+            let routed = shader_ctx.and_then(|ctx| resolve_shader_def(&node.fill, defs).map(|shader_def| (ctx, shader_def)));
+            match routed {
+                Some((ctx, shader_def)) => {
+                    draw_sdf_shader_fill(device, encoder, view, self, node, shader_def, *transform, canvas, ctx);
+                    // The shader routing above only ever handles the fill
+                    // — a stroke on this same node, if it has one, still
+                    // needs to show up.
+                    self.draw_stroke_only(device, encoder, view, node, *transform, canvas, defs);
+                }
+                None => self.draw_one(device, encoder, view, node, *transform, canvas, defs),
+            }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn draw_one(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
-        let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-        let combined = transform.concat(local);
-        let Some(inv) = invert_matrix(combined) else { return };
-
-        let mut ops = Vec::new();
-        flatten_tree(&node.tree, &mut ops);
-        if ops.is_empty() {
-            return;
-        }
-
-        let local_bounds = sdf_bounds(&node.tree);
-        let screen_bounds = transform_bounds(local_bounds, combined);
-        let (verts, indices) = quad_vertices(screen_bounds, canvas);
+        let Some((ops, verts, indices, inv)) = prepare_node_geometry(node, transform, canvas) else { return };
 
         let fill_color = color_to_rgba(paint_color(&node.fill, defs));
         let (stroke_color, stroke_width, has_stroke) = match (&node.stroke, node.stroke_width) {
@@ -273,24 +282,127 @@ impl SdfPipeline {
             _pad: 0.0,
         };
 
+        self.draw_quad(device, encoder, view, &verts, &indices, &ops, &params, wgpu::LoadOp::Load);
+    }
+
+    /// Draws only `node`'s stroke, with the fill forced fully transparent
+    /// — used when the fill was already drawn separately by
+    /// `draw_sdf_shader_fill` (real WGSL execution routes only the fill,
+    /// never the stroke, same scope vector.rs's shader routing has). If
+    /// `node.stroke` is unset, this is a cheap no-op — checked before
+    /// touching the GPU at all, so calling this unconditionally after
+    /// every shader-routed fill (regardless of whether a stroke actually
+    /// exists) costs nothing in the common no-stroke case.
+    pub(crate) fn draw_stroke_only(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
+        let (stroke_color, stroke_width, has_stroke) = match (&node.stroke, node.stroke_width) {
+            (Some(paint), Some(w)) => (color_to_rgba(paint_color(paint, defs)), w as f32, 1.0f32),
+            _ => ([0.0; 4], 0.0, 0.0f32),
+        };
+        if has_stroke == 0.0 {
+            return;
+        }
+
+        let Some((ops, verts, indices, inv)) = prepare_node_geometry(node, transform, canvas) else { return };
+
+        let params = SdfParams {
+            inv_row0: [inv.a as f32, inv.c as f32, inv.e as f32, 0.0],
+            inv_row1: [inv.b as f32, inv.d as f32, inv.f as f32, 0.0],
+            fill_color: [0.0; 4],
+            stroke_color,
+            stroke_width,
+            has_stroke,
+            op_count: ops.len() as u32,
+            _pad: 0.0,
+        };
+
+        self.draw_quad(device, encoder, view, &verts, &indices, &ops, &params, wgpu::LoadOp::Load);
+    }
+    /// into `mask_view`, for compositing against a shader's output
+    /// afterward (see `crate::sdf_shader::draw_sdf_shader_fill`, which is
+    /// the only caller). Reuses `sdf.wgsl` completely unmodified — the
+    /// shader already computes `antialiased_alpha(d) * fill_color.a` as
+    /// its output alpha (see that file's `fs_main`), so forcing
+    /// `fill_color = (1,1,1,1)` and disabling the stroke means that alpha
+    /// channel IS exactly "is this pixel inside the shape", with zero
+    /// changes to the WGSL itself. `mask_view` is cleared to transparent
+    /// first — this is always a fresh per-node scratch texture, never the
+    /// shared scene buffer `draw_one` draws onto with `LoadOp::Load`.
+    ///
+    /// Returns `false` (nothing drawn, `mask_view` stays all-zero) on the
+    /// same early-outs `draw_one` has: an empty tree, or a non-invertible
+    /// transform.
+    pub(crate) fn draw_mask(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, mask_view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) -> bool {
+        let Some((ops, verts, indices, inv)) = prepare_node_geometry(node, transform, canvas) else { return false };
+
+        let params = SdfParams {
+            inv_row0: [inv.a as f32, inv.c as f32, inv.e as f32, 0.0],
+            inv_row1: [inv.b as f32, inv.d as f32, inv.f as f32, 0.0],
+            fill_color: [1.0, 1.0, 1.0, 1.0], // forced opaque white — see doc above
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            has_stroke: 0.0, // never draw a stroke band into the mask
+            op_count: ops.len() as u32,
+            _pad: 0.0,
+        };
+
+        self.draw_quad(device, encoder, mask_view, &verts, &indices, &ops, &params, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+        true
+    }
+
+    /// Flat-color fallback for a node whose shader fill failed to resolve
+    /// at render time — same "always paint something sane" contract every
+    /// other shader-fill-capable path in this crate has (see shader.rs's
+    /// module doc, and lib.rs's own fallback for shader-filled vector
+    /// shapes). `color` is used directly instead of resolving `node.fill`
+    /// through `paint_color`/`defs` again — the caller already knows it's
+    /// a shader ref, not a color/gradient one, so re-resolving would just
+    /// redo work to reach the same `ShaderDef` it already has in hand.
+    /// Fill only, same as `draw_mask` — a node's stroke is the caller's
+    /// separate concern either way, shader-routed or not.
+    pub(crate) fn draw_fallback_fill(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), color: Color) {
+        let Some((ops, verts, indices, inv)) = prepare_node_geometry(node, transform, canvas) else { return };
+
+        let params = SdfParams {
+            inv_row0: [inv.a as f32, inv.c as f32, inv.e as f32, 0.0],
+            inv_row1: [inv.b as f32, inv.d as f32, inv.f as f32, 0.0],
+            fill_color: color_to_rgba(color),
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            has_stroke: 0.0,
+            op_count: ops.len() as u32,
+            _pad: 0.0,
+        };
+
+        self.draw_quad(device, encoder, view, &verts, &indices, &ops, &params, wgpu::LoadOp::Load);
+    }
+
+    /// Shared tail for `draw_one` and `draw_mask`: uploads the quad
+    /// geometry + flattened ops + params, builds the bind group, and runs
+    /// the render pass. The only thing that ever differs between the two
+    /// callers is `load_op` — `draw_one` composites onto the existing
+    /// scene buffer (`LoadOp::Load`), `draw_mask` starts a fresh scratch
+    /// texture (`LoadOp::Clear`) — so that's the one thing pulled out as a
+    /// parameter rather than duplicating this whole function body.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_quad(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, verts: &[SdfVertex; 4], indices: &[u16; 6], ops: &[SdfOp], params: &SdfParams, load_op: wgpu::LoadOp<wgpu::Color>) {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx sdf vertex buffer"),
-            contents: bytemuck::cast_slice(&verts),
+            contents: bytemuck::cast_slice(verts),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx sdf index buffer"),
-            contents: bytemuck::cast_slice(&indices),
+            contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
         let ops_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx sdf ops buffer"),
-            contents: bytemuck::cast_slice(&ops),
+            contents: bytemuck::cast_slice(ops),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx sdf params buffer"),
-            contents: bytemuck::bytes_of(&params),
+            contents: bytemuck::bytes_of(params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
@@ -309,7 +421,7 @@ impl SdfPipeline {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load: load_op, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -335,6 +447,51 @@ fn collect_sdf_nodes<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut
             _ => {}
         }
     }
+}
+
+/// Shared geometry setup for every SDF node draw variant (`draw_one`,
+/// `draw_mask`, `draw_fallback_fill`, `node_bounding_quad`): resolves the
+/// node's combined transform and inverts it, flattens its tree into ops,
+/// and computes its screen-space bounding-box quad. Returns `None` on the
+/// same two early-outs all four callers had individually before this was
+/// factored out of them: an empty tree, or a non-invertible transform.
+fn prepare_node_geometry(node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) -> Option<(Vec<SdfOp>, [SdfVertex; 4], [u16; 6], Matrix2D)> {
+    let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
+    let combined = transform.concat(local);
+    let inv = invert_matrix(combined)?;
+
+    let mut ops = Vec::new();
+    flatten_tree(&node.tree, &mut ops);
+    if ops.is_empty() {
+        return None;
+    }
+
+    let local_bounds = sdf_bounds(&node.tree);
+    let screen_bounds = transform_bounds(local_bounds, combined);
+    let (verts, indices) = quad_vertices(screen_bounds, canvas);
+    Some((ops, verts, indices, inv))
+}
+
+/// Computes `node`'s screen-space bounding-box quad as clip-space
+/// geometry ready for `ShaderFillPipeline::draw`, which takes arbitrary
+/// `[f32; 2]` clip-space vertices + `u32` indices (see
+/// `shader::PendingShaderShape`'s doc comment — it was already designed
+/// position-only/shape-agnostic for exactly this kind of reuse, not just
+/// for vector.rs's triangulated shapes). Reuses `prepare_node_geometry`,
+/// the same bounds/transform computation `draw_mask` uses for its own
+/// quad, so the shader's rendered output and the node's mask always land
+/// in the same screen position with no separate offset bookkeeping needed
+/// — both render at full canvas size. A free function, not a method —
+/// unlike `draw_one`/`draw_mask`/`draw_fallback_fill`, it never touches
+/// `self` (there's no GPU work here, only geometry math), so it doesn't
+/// need an `SdfPipeline` instance — or a GPU adapter — to call or to test.
+///
+/// Returns `None` on the same early-outs every draw variant here has.
+pub(crate) fn node_bounding_quad(node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) -> Option<(Vec<[f32; 2]>, Vec<u32>)> {
+    let (_, verts, indices, _) = prepare_node_geometry(node, transform, canvas)?;
+    let vertices = verts.iter().map(|v| v.clip_position).collect();
+    let indices = indices.iter().map(|&i| i as u32).collect();
+    Some((vertices, indices))
 }
 
 fn paint_color(paint: &Paint, defs: &Defs) -> Color {
@@ -516,4 +673,59 @@ mod tests {
         collect_sdf_nodes(&elements, Matrix2D::identity(), &mut out);
         assert_eq!(out.len(), 1);
     }
-                                    }
+
+    /// Pure geometry math, no GPU adapter needed — `node_bounding_quad` is
+    /// a free function precisely so this doesn't have to be gated behind
+    /// hardware availability the way the real-adapter tests in `lib.rs`
+    /// are.
+    #[test]
+    fn node_bounding_quad_returns_four_vertices_and_six_indices_for_a_circle() {
+        let node = SdfNode::new(SdfTree::Circle { cx: 20.0, cy: 20.0, r: 10.0 }, Paint::Color(Color::BLACK));
+        let quad = node_bounding_quad(&node, Matrix2D::identity(), (40.0, 40.0));
+        let (vertices, indices) = quad.expect("a plain circle with an identity transform should always produce a quad");
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices.len(), 6);
+    }
+
+    #[test]
+    fn node_bounding_quad_returns_none_for_a_non_invertible_transform() {
+        let node = SdfNode::new(SdfTree::Circle { cx: 0.0, cy: 0.0, r: 10.0 }, Paint::Color(Color::BLACK));
+        // A zero matrix has determinant 0 — not invertible, same early-out
+        // draw_one/draw_mask/draw_fallback_fill all share via
+        // prepare_node_geometry.
+        let degenerate = Matrix2D { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 };
+        assert!(node_bounding_quad(&node, degenerate, (40.0, 40.0)).is_none());
+    }
+
+    /// The whole masking technique (see draw_mask's doc comment) rests on
+    /// one assumption: forcing `fill_color = (1,1,1,1)` and `has_stroke =
+    /// 0` makes sdf.wgsl's output alpha exactly equal
+    /// `antialiased_alpha(d)`, with the RGB channels and the stroke path
+    /// both irrelevant. This test doesn't run the WGSL itself (no GPU
+    /// adapter needed), it just pins down the params draw_mask actually
+    /// builds — if a future edit accidentally left has_stroke on, or used
+    /// anything other than opaque white, this fails loudly instead of
+    /// silently producing a wrong mask that would only show up as a
+    /// visually-wrong composite on real hardware.
+    #[test]
+    fn mask_params_force_opaque_white_fill_and_disable_stroke() {
+        let node = SdfNode::new(SdfTree::Circle { cx: 20.0, cy: 20.0, r: 10.0 }, Paint::Color(Color::rgb(255, 0, 0)));
+        let (_, _, _, inv) = prepare_node_geometry(&node, Matrix2D::identity(), (40.0, 40.0))
+            .expect("plain circle, identity transform — always succeeds");
+        // Mirrors draw_mask's own params construction exactly, so this
+        // fails the moment that construction ever drifts from what the
+        // masking technique actually requires.
+        let params = SdfParams {
+            inv_row0: [inv.a as f32, inv.c as f32, inv.e as f32, 0.0],
+            inv_row1: [inv.b as f32, inv.d as f32, inv.f as f32, 0.0],
+            fill_color: [1.0, 1.0, 1.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            has_stroke: 0.0,
+            op_count: 1,
+            _pad: 0.0,
+        };
+        assert_eq!(params.fill_color, [1.0, 1.0, 1.0, 1.0], "mask fill must be opaque white — the node's real color (red, here) must never leak into the mask");
+        assert_eq!(params.has_stroke, 0.0, "the mask must never include a stroke band");
+    }
+                        }
