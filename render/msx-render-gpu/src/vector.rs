@@ -267,8 +267,10 @@ fn fill_and_stroke(
 /// `Def::Shader` (not a gradient), returns it. Used to decide whether a
 /// fill should be routed to `shader.rs` for real WGSL execution instead
 /// of the flat `fallback_color`/average-stop-color treatment every other
-/// paint reference gets.
-fn resolve_shader_def<'a>(paint: &Paint, defs: &Defs<'a>) -> Option<&'a msx_ast::ShaderDef> {
+/// paint reference gets. `pub(crate)`, not private — `sdf.rs` reuses this
+/// exact function for the same decision on SDF node fills rather than
+/// duplicating it.
+pub(crate) fn resolve_shader_def<'a>(paint: &Paint, defs: &Defs<'a>) -> Option<&'a msx_ast::ShaderDef> {
     let Paint::Ref(reference) = paint else { return None };
     let id = reference.strip_prefix("url(#")?.strip_suffix(')')?;
     match defs.get(id)? {
@@ -782,4 +784,4 @@ mod shader_routing_tests {
 
         assert!(!geometry.vertices.is_empty(), "with no collector, a shader ref must still flat-fill via fallback_color");
     }
-                  }
+    }
