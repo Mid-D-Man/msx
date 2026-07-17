@@ -1,4 +1,4 @@
-# MSX — MidStroke eXchange
+# MSX — MidStroke eXtension
 ## Format Specification v0.1.0
 
 ---
