@@ -121,7 +121,16 @@ impl SplatPipeline {
         SplatPipeline { pipeline, bind_group_layout }
     }
 
-    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SplatShaderContext>) {
+    /// `pub(crate)`, not `pub` (despite `SplatPipeline` itself being
+    /// re-exported publicly via `lib.rs`'s `pub use splat::SplatPipeline;`)
+    /// — same reasoning as `SdfPipeline::draw_all`: `shader_ctx:
+    /// Option<&SplatShaderContext>` takes a `pub(crate)` type, so external
+    /// code could only ever call this with `None` anyway, and rustc's
+    /// `private_interfaces` lint correctly flags that mismatch as a hard
+    /// error under this project's `-D warnings` CI (this is the exact
+    /// warning a real CI run surfaced). Nothing outside this crate
+    /// constructs an `SplatPipeline` directly today.
+    pub(crate) fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SplatShaderContext>) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
         let defs = Defs::build(&scene.defs);
         self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs, shader_ctx);
@@ -146,8 +155,16 @@ impl SplatPipeline {
     /// visible within splats specifically too. Not worth a more complex
     /// multi-batch scheme for effects that are typically atmospheric/
     /// particle-like, where exact inter-splat z-order rarely matters.
+    ///
+    /// `pub(crate)`, not `pub` — mirrors `SdfPipeline::draw_all_elements`'s
+    /// own reasoning exactly: this takes both `Defs` and
+    /// `Option<&SplatShaderContext>`, both `pub(crate)` types, so a `pub`
+    /// signature here is a `private_interfaces` violation under this
+    /// project's `-D warnings` CI (the actual warning a real CI run
+    /// surfaced) regardless of `SplatPipeline` itself being re-exported
+    /// publicly.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, shader_ctx: Option<&SplatShaderContext>) {
+    pub(crate) fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, shader_ctx: Option<&SplatShaderContext>) {
         let mut splats = Vec::new();
         collect_splats(elements, base_transform, &mut splats);
 

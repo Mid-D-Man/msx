@@ -211,7 +211,17 @@ impl SdfPipeline {
         SdfPipeline { pipeline, bind_group_layout }
     }
 
-    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SdfShaderContext>) {
+    /// `pub(crate)`, not `pub` (despite `SdfPipeline` itself being
+    /// re-exported publicly via `lib.rs`'s `pub use sdf::SdfPipeline;`) —
+    /// `shader_ctx: Option<&SdfShaderContext>` takes a `pub(crate)` type,
+    /// so external code could only ever call this with `None` anyway;
+    /// rustc's `private_interfaces` lint correctly flags that mismatch
+    /// (public method, non-public parameter type) as a hard error under
+    /// this project's `-D warnings` CI. Nothing outside this crate
+    /// constructs an `SdfPipeline` directly today — everything goes
+    /// through `GpuRenderer` — so narrowing this to `pub(crate)` costs
+    /// nothing real.
+    pub(crate) fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SdfShaderContext>) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
         let defs = Defs::build(&scene.defs);
         self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs, shader_ctx);
