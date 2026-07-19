@@ -27,21 +27,5 @@
 @DATA(
   target_root = "."
 
-  ignore::
-    "NOTES.md"
-
-  // The one flat (no-subdirectory) file in this drop, for the workspace
-  // root's Cargo.toml. It's named ROOT_Cargo.toml on disk here, NOT
-  // Cargo.toml — because the override lookup checks a file's bare
-  // basename before it checks whether the file is nested. Every crate in
-  // this workspace has its own Cargo.toml too (core/msx-anim/Cargo.toml,
-  // apps/msx-cli/Cargo.toml, ...), and those are real nested files in
-  // this same drop — an override keyed by the plain basename "Cargo.toml"
-  // would silently also catch and redirect THOSE onto this same
-  // destination instead of letting their nested paths resolve normally.
-  // A name that no other file's basename could ever collide with sidesteps
-  // that entirely. Verified against the real resolution order in
-  // lib_replacements.py before shipping this — it's not a hypothetical.
-  overrides::
-    target("ROOT_Cargo.toml", "Cargo.toml")
+  
 )
