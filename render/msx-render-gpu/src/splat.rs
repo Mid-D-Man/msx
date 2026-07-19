@@ -4,12 +4,18 @@
 //! math as `msx-splat::gaussian::evaluate`, transcribed to WGSL. Far
 //! simpler than `sdf.rs`'s flattened-tree machine: splats have no
 //! recursive structure, so one instance buffer covers the whole scene's
-//! splats (minus anything inside a `Layer` — see below) in a single draw
-//! call regardless of count.
+//! flat/gradient-filled splats (minus anything inside a `Layer` — see
+//! below) in a single draw call regardless of count.
 //!
 //! Quad corners come from `@builtin(vertex_index)` rather than a vertex
 //! buffer — every instance shares the same four corners, only the
 //! per-instance transform differs.
+//!
+//! A splat whose `fill` resolves to a real `Def::Shader` is NOT part of
+//! that batch — see `splat_shader.rs` for why (short version: the batch
+//! can't accommodate per-instance shader execution, so shader-filled
+//! splats are collected separately and drawn one at a time via the same
+//! mask+color+composite technique `sdf_shader.rs` uses for SDF nodes).
 //!
 //! `collect_splats` does NOT recurse into `Element::Layer` children, same
 //! reason as `sdf.rs::collect_sdf_nodes` — `layer.rs` handles those in its
@@ -17,7 +23,11 @@
 
 use wgpu::util::DeviceExt;
 
-use msx_ast::{Element, GaussianSplat, Matrix2D, Scene};
+use msx_ast::{Color, Element, GaussianSplat, Matrix2D, Scene};
+
+use crate::sdf::paint_color;
+use crate::splat_shader::{draw_splat_shader_fill, SplatShaderContext};
+use crate::vector::{resolve_shader_def, Defs};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -111,25 +121,91 @@ impl SplatPipeline {
         SplatPipeline { pipeline, bind_group_layout }
     }
 
-    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene) {
+    pub fn draw_all(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, scene: &Scene, shader_ctx: Option<&SplatShaderContext>) {
         let canvas = (scene.canvas.width as f32, scene.canvas.height as f32);
-        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas);
+        let defs = Defs::build(&scene.defs);
+        self.draw_all_elements(device, encoder, view, &scene.elements, Matrix2D::identity(), canvas, &defs, shader_ctx);
     }
 
     /// Entry point for `layer.rs`: draw just the `Splat` shapes within one
-    /// layer's children, scoped to its own buffer.
-    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) {
-        let mut instances = Vec::new();
-        collect_splats(elements, base_transform, &mut instances);
-        if instances.is_empty() {
-            return;
+    /// layer's children, scoped to its own buffer. Always passes
+    /// `shader_ctx = None` at that call site — shader-filled splats inside
+    /// a `Layer` aren't wired up yet, consistent with `sdf.rs`'s identical
+    /// gap for shader-filled SDF nodes in a `Layer`.
+    ///
+    /// Ordering note: shader-routed splats draw individually, in document
+    /// order, as they're found; flat/gradient splats are gathered and
+    /// drawn as ONE batched instanced call at the end, for the same
+    /// performance reason the whole batching scheme exists. A scene
+    /// mixing flat and shader-filled splats can therefore end up with the
+    /// shader-filled ones rendering as if they were all behind (or ahead
+    /// of) the flat batch, rather than precisely interleaved in document
+    /// order — the same coarse, already-pre-existing granularity this
+    /// crate's fixed "vector → shader fills → SDF → splat" pass order
+    /// (see `lib.rs`) already has between element *types*, just now
+    /// visible within splats specifically too. Not worth a more complex
+    /// multi-batch scheme for effects that are typically atmospheric/
+    /// particle-like, where exact inter-splat z-order rarely matters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_all_elements(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32), defs: &Defs, shader_ctx: Option<&SplatShaderContext>) {
+        let mut splats = Vec::new();
+        collect_splats(elements, base_transform, &mut splats);
+
+        let mut flat_instances = Vec::new();
+        for (splat, transform) in &splats {
+            // Mirrors sdf.rs's own routing decision exactly: resolve_shader_def
+            // only runs when a shader context was actually provided AND the
+            // splat has a `fill` at all — a splat with no `fill` (every splat
+            // that existed before this session, and any that still just use
+            // `color` today) never pays for a defs lookup.
+            let routed = shader_ctx.and_then(|ctx| {
+                splat.fill.as_ref().and_then(|paint| resolve_shader_def(paint, defs)).map(|shader_def| (ctx, shader_def))
+            });
+            match routed {
+                Some((ctx, shader_def)) => {
+                    draw_splat_shader_fill(device, encoder, view, self, splat, shader_def, *transform, canvas, ctx);
+                }
+                None => flat_instances.push(to_instance(splat, *transform, Some(defs))),
+            }
         }
 
+        if !flat_instances.is_empty() {
+            self.draw_instances(device, encoder, view, &flat_instances, canvas, wgpu::LoadOp::Load);
+        }
+    }
+
+    /// Renders one splat's own Gaussian falloff as a standalone mask into
+    /// `mask_view`, for compositing against a shader's output afterward
+    /// (see `splat_shader::draw_splat_shader_fill`, the only caller).
+    /// Reuses `splat.wgsl` completely unmodified — forcing `color =
+    /// (1,1,1,1)` means its existing `gaussian * color.a` output alpha IS
+    /// exactly the falloff shape, same trick `sdf.rs::draw_mask` uses for
+    /// SDF nodes. `mask_view` is cleared to transparent first — a fresh
+    /// per-splat scratch texture, never the shared scene buffer
+    /// `draw_instances` draws onto with `LoadOp::Load`.
+    pub(crate) fn draw_mask(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, mask_view: &wgpu::TextureView, splat: &GaussianSplat, transform: Matrix2D, canvas: (f32, f32)) {
+        let mut instance = to_instance(splat, transform, None);
+        instance.color = [1.0, 1.0, 1.0, 1.0];
+        self.draw_instances(device, encoder, mask_view, &[instance], canvas, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+    }
+
+    /// Shared tail for the batched draw and `draw_mask`: uploads the
+    /// instance buffer + canvas params, builds the bind group, and runs
+    /// the render pass. The only thing that ever differs between callers
+    /// is `load_op` (batched drawing composites onto the existing scene
+    /// buffer, `draw_mask` starts a fresh scratch texture) and the
+    /// instance count — so those are the two things pulled out as
+    /// parameters rather than duplicating this whole function body.
+    /// `pub(crate)`, not private — `splat_shader.rs`'s fallback path (a
+    /// shader whose `source_ref` failed to resolve) reuses this directly
+    /// for a single precomputed instance, same reasoning as `draw_mask`'s
+    /// own visibility.
+    pub(crate) fn draw_instances(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, instances: &[SplatInstance], canvas: (f32, f32), load_op: wgpu::LoadOp<wgpu::Color>) {
         let canvas_params = CanvasParams { width: canvas.0, height: canvas.1, _pad0: 0.0, _pad1: 0.0 };
 
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx splat instance buffer"),
-            contents: bytemuck::cast_slice(&instances),
+            contents: bytemuck::cast_slice(instances),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let canvas_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -149,7 +225,7 @@ impl SplatPipeline {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load: load_op, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -162,11 +238,22 @@ impl SplatPipeline {
     }
 }
 
+/// Gathers every splat under `elements` into `(splat, transform)` pairs —
+/// deliberately untouched by `defs`/shader-routing at collection time
+/// (mirrors `sdf.rs::collect_sdf_nodes` exactly): a `GaussianSplat`
+/// reference is tied to `elements`' own lifetime, but a resolved
+/// `&ShaderDef` would be tied to `Defs`'s own, separate lifetime (the
+/// `&[Def]` slice `Defs::build` was constructed from) — mixing the two in
+/// one stored tuple would require unifying two lifetimes that have no
+/// reason to actually be the same. Routing happens per-item instead, in
+/// `draw_all_elements`'s loop, resolved and used within the same
+/// iteration rather than carried in a longer-lived collection.
+///
 /// Does NOT recurse into `Element::Layer` — see module docs.
-fn collect_splats(elements: &[Element], transform: Matrix2D, out: &mut Vec<SplatInstance>) {
+fn collect_splats<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut Vec<(&'a GaussianSplat, Matrix2D)>) {
     for el in elements {
         match el {
-            Element::Splat(s) => out.push(to_instance(s, transform)),
+            Element::Splat(s) => out.push((s, transform)),
             Element::Group(g) => {
                 let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
                 collect_splats(&g.children, transform.concat(local), out);
@@ -182,10 +269,22 @@ fn collect_splats(elements: &[Element], transform: Matrix2D, out: &mut Vec<Splat
 /// sigma/rotation stay in the splat's own local frame. A reasonable gap —
 /// getting this fully right means transforming the gaussian's covariance,
 /// not just its center.
-fn to_instance(s: &GaussianSplat, transform: Matrix2D) -> SplatInstance {
+///
+/// `defs`, when given, resolves `s.fill` (flat color / gradient average —
+/// never a shader ref, `collect_splats` already routed those to `shader`
+/// before this is ever called for them) the same way every other
+/// element's `Paint::Ref` is resolved in this crate. `None` is only ever
+/// passed by `draw_mask`, which immediately overwrites `.color` anyway —
+/// resolving `fill` there would be wasted work.
+pub(crate) fn to_instance(s: &GaussianSplat, transform: Matrix2D, defs: Option<&Defs>) -> SplatInstance {
     let (cx, cy) = apply_matrix(transform, (s.x as f32, s.y as f32));
     let radius_x = effective_radius_axis(s.sigma_x, 0.02);
     let radius_y = effective_radius_axis(s.sigma_y, 0.02);
+
+    let resolved: Color = match (defs, &s.fill) {
+        (Some(defs), Some(paint)) => paint_color(paint, defs),
+        _ => s.color,
+    };
 
     SplatInstance {
         center: [cx, cy],
@@ -193,10 +292,10 @@ fn to_instance(s: &GaussianSplat, transform: Matrix2D) -> SplatInstance {
         rotation: s.rotation as f32,
         sigma: [s.sigma_x as f32, s.sigma_y as f32],
         color: [
-            s.color.r as f32 / 255.0,
-            s.color.g as f32 / 255.0,
-            s.color.b as f32 / 255.0,
-            (s.color.a as f64 / 255.0 * s.opacity) as f32,
+            resolved.r as f32 / 255.0,
+            resolved.g as f32 / 255.0,
+            resolved.b as f32 / 255.0,
+            (resolved.a as f64 / 255.0 * s.opacity) as f32,
         ],
     }
 }
@@ -205,23 +304,23 @@ fn to_instance(s: &GaussianSplat, transform: Matrix2D) -> SplatInstance {
 /// `max(sigma_x, sigma_y)` for a single combined cull radius — here each
 /// axis gets its own extent so a strongly anisotropic splat gets a snugly
 /// rotated quad instead of an oversized square.
-fn effective_radius_axis(sigma: f64, threshold: f64) -> f32 {
+pub(crate) fn effective_radius_axis(sigma: f64, threshold: f64) -> f32 {
     (sigma * (-2.0 * threshold.ln()).sqrt()) as f32
 }
 
-fn apply_matrix(m: Matrix2D, p: (f32, f32)) -> (f32, f32) {
+pub(crate) fn apply_matrix(m: Matrix2D, p: (f32, f32)) -> (f32, f32) {
     (m.a as f32 * p.0 + m.c as f32 * p.1 + m.e as f32, m.b as f32 * p.0 + m.d as f32 * p.1 + m.f as f32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Color, Element as MsxElement, Group, Layer};
+    use msx_ast::{Color, Def, Element as MsxElement, Group, Layer, LinearGradient, Paint, Stop};
 
     #[test]
     fn to_instance_bakes_opacity_into_alpha() {
         let splat = GaussianSplat::circle(10.0, 20.0, 5.0, Color::rgba(255, 0, 0, 200), 0.5);
-        let instance = to_instance(&splat, Matrix2D::identity());
+        let instance = to_instance(&splat, Matrix2D::identity(), None);
         assert_eq!(instance.center, [10.0, 20.0]);
         let expected_alpha = (200.0 / 255.0) * 0.5;
         assert!((instance.color[3] - expected_alpha as f32).abs() < 1e-4);
@@ -255,4 +354,49 @@ mod tests {
         collect_splats(&elements, Matrix2D::identity(), &mut out);
         assert!(out.is_empty(), "splats inside a Layer must not be collected by the main pass");
     }
+
+    /// A splat's `fill`, when it's a gradient ref (not a shader), must
+    /// resolve through `paint_color`'s gradient-average path when built
+    /// into a `SplatInstance` for the flat batch — not silently keep
+    /// using the plain `color` field just because `fill` is also present.
+    /// This exercises `to_instance` directly (the function
+    /// `draw_all_elements` actually calls for anything that *isn't*
+    /// routed to the shader path), since `resolve_shader_def` itself now
+    /// lives in `draw_all_elements`'s own loop, not in `collect_splats`.
+    #[test]
+    fn to_instance_resolves_a_gradient_fill_instead_of_the_plain_color_field() {
+        let gradient = LinearGradient::new("g".to_string(), 0.0, 0.0, 10.0, 0.0, vec![
+            Stop::new(0.0, Color::rgb(0, 0, 0)),
+            Stop::new(1.0, Color::rgb(255, 255, 255)),
+        ]);
+        let defs_vec = vec![Def::LinearGradient(gradient)];
+        let defs = Defs::build(&defs_vec);
+
+        let mut splat = GaussianSplat::circle(5.0, 5.0, 2.0, Color::rgb(255, 0, 0), 1.0);
+        splat.fill = Some(Paint::Ref("url(#g)".to_string()));
+
+        let instance = to_instance(&splat, Matrix2D::identity(), Some(&defs));
+        // (0+255)/2 = 127 — the gradient average, not red (255,0,0), which
+        // is what `splat.color` (unused here) would have produced.
+        assert!((instance.color[0] - 127.0 / 255.0).abs() < 1e-3, "red channel should be the gradient average");
+        assert!(instance.color[1] < 0.01, "green channel should be ~0 — plain `color` must not be used when `fill` is set");
     }
+
+    /// `resolve_shader_def` (used by `draw_all_elements`'s own routing
+    /// loop, not `collect_splats`) must correctly identify a `fill`
+    /// pointing at a real `Def::Shader` — confirms the exact lookup
+    /// `draw_all_elements` relies on to decide "this splat needs the
+    /// individual mask+color+composite path, not the batch".
+    #[test]
+    fn resolve_shader_def_finds_a_shader_ref_on_a_splats_fill() {
+        let shader_def = msx_ast::ShaderDef::new("s".to_string(), "s.wgsl".to_string(), Color::rgb(1, 2, 3));
+        let defs_vec = vec![Def::Shader(shader_def)];
+        let defs = Defs::build(&defs_vec);
+
+        let mut splat = GaussianSplat::circle(5.0, 5.0, 2.0, Color::rgb(255, 0, 0), 1.0);
+        splat.fill = Some(Paint::Ref("url(#s)".to_string()));
+
+        let found = splat.fill.as_ref().and_then(|paint| resolve_shader_def(paint, &defs));
+        assert!(found.is_some(), "a fill referencing a real Def::Shader must resolve via resolve_shader_def");
+    }
+}

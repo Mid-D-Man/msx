@@ -1,0 +1,38 @@
+// examples/splat_shader_fill.msx
+// Tests GaussianSplat::fill with a Def::Shader reference — the actual
+// point of this session's GPU work: real WGSL execution masked to the
+// splat's own Gaussian falloff (SplatPipeline::draw_mask +
+// ShaderFillPipeline::draw + MaskedShaderComposite, see splat_shader.rs),
+// not the shader painted flat across a bounding box.
+//
+// Reuses shaders/plasma.wgsl (already in the repo, see
+// shader_placeholder.msx) rather than introducing new WGSL — the point of
+// this file is exercising the splat-specific masking path, not testing a
+// new shader.
+//
+// Rendering status, same caveat as every shader-def example in this repo:
+// only `msx rasterize-gpu`/`animate-gpu` (msx-render-gpu, built with
+// --features gpu) execute this WGSL and apply the real Gaussian mask.
+// `msx rasterize` (CPU) and `msx render` (SVG) both resolve the fill to
+// plasma's own `fallback_color` and paint it flat within the splat's
+// (approximated, CPU/SVG-only) falloff shape.
+//
+// The plain flat-color splat on the left is there so the masking is
+// obvious at a glance on the GPU render: if the mask were broken (e.g.
+// painting the shader across the full bounding square instead of the
+// true falloff), the right splat would show hard corners the left one
+// doesn't have.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #05050a }
+  defs::
+    { type = "shader", id = "plasma_1", source_ref = "shaders/plasma.wgsl",
+      entry_point = "fs_main", fallback_color = #6a3de8,
+      uniforms = [ { name = "speed", type = "float", value = 1.5 },
+                   { name = "resolution", type = "vec2", value = [300.0, 200.0] } ] }
+  elements::
+    { type = "splat", x = 100, y = 100, sigma_x = 45, sigma_y = 45,
+      color = #6a3de8, opacity = 1.0 }
+    { type = "splat", x = 200, y = 100, sigma_x = 45, sigma_y = 45,
+      fill = "url(#plasma_1)", color = #6a3de8, opacity = 1.0 }
+)

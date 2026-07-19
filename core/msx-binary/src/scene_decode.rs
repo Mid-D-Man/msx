@@ -325,5 +325,11 @@ fn decode_splat(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<
     let rotation = read_f32(data, cursor)?;
     let color    = read_color(data, cursor)?;
     let opacity  = read_f32(data, cursor)?;
-    Ok(Element::Splat(GaussianSplat { x, y, sigma_x, sigma_y, rotation, color, opacity, id }))
+    let has_fill = read_u8(data, cursor)? != 0;
+    let fill = if has_fill {
+        Some(read_paint(data, cursor, pool)?)
+    } else {
+        None
+    };
+    Ok(Element::Splat(GaussianSplat { x, y, sigma_x, sigma_y, rotation, color, fill, opacity, id }))
               }

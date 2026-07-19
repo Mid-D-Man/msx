@@ -295,6 +295,19 @@ fn encode_splat(e: &GaussianSplat, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_f32(out, e.rotation);
     write_color(out, e.color);
     write_f32(out, e.opacity);
+    // `fill` is appended after every pre-existing field rather than
+    // interleaved among them — deliberate: a reader that only knows the
+    // pre-`fill` wire format would at least stop at a predictable point
+    // instead of misreading a `fill` byte as something else mid-struct.
+    // Not that any such reader exists to protect (no external consumers
+    // of the binary format yet — this is genuinely a breaking wire-format
+    // change, not a versioned/compatible extension), but "new field goes
+    // at the end" costs nothing and is one less thing to think about.
+    let has_fill = e.fill.is_some();
+    write_u8(out, has_fill as u8);
+    if let Some(fill) = &e.fill {
+        write_paint(out, fill, pool);
+    }
 }
 
 fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
@@ -321,7 +334,7 @@ pub fn compile_stats(scene: &Scene) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Canvas, Color, Paint};
+    use msx_ast::{Canvas, Color, LinearGradient, Paint, Stop};
 
     fn basic_scene() -> Scene {
         let mut style = Style::empty();
@@ -435,6 +448,46 @@ mod tests {
             assert_eq!(l.effects.len(), 1);
         } else {
             panic!("expected Layer");
+        }
+    }
+
+    /// Splat's `fill` field was added after `color`, appended at the end
+    /// of its wire format (`[u8 has_fill][paint if present]`) rather than
+    /// interleaved among the pre-existing fields — see `encode_splat`'s
+    /// comment for why. This exercises both states: a real `Paint::Ref`
+    /// (the actual point of the feature — a splat pointing at a gradient
+    /// or shader def instead of a flat color) and plain `None` (every
+    /// splat that existed before this field did, and every one that still
+    /// just uses `color` today).
+    #[test]
+    fn splat_fill_roundtrips_both_present_and_absent() {
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.defs.push(Def::LinearGradient(LinearGradient::new(
+            "glow".to_string(), 0.0, 0.0, 40.0, 0.0,
+            vec![Stop::new(0.0, Color::rgb(255, 255, 255)), Stop::new(1.0, Color::rgb(0, 0, 0))],
+        )));
+
+        let mut with_fill = GaussianSplat::circle(20.0, 20.0, 8.0, Color::rgb(0, 255, 0), 0.8);
+        with_fill.fill = Some(Paint::Ref("glow".to_string()));
+        scene.elements.push(Element::Splat(with_fill));
+
+        let without_fill = GaussianSplat::circle(50.0, 50.0, 8.0, Color::rgb(0, 0, 255), 1.0);
+        scene.elements.push(Element::Splat(without_fill));
+
+        let binary  = compile(&scene, true).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        assert_eq!(decoded.elements.len(), 2);
+        match &decoded.elements[0] {
+            Element::Splat(s) => {
+                assert_eq!(s.fill, Some(Paint::Ref("glow".to_string())), "the gradient reference must survive the roundtrip");
+                assert_eq!(s.color, Color::rgb(0, 255, 0), "color is still encoded even when fill is set — a renderer with fill support absent should still have a sane color to fall back to");
+            }
+            other => panic!("expected a Splat, got {other:?}"),
+        }
+        match &decoded.elements[1] {
+            Element::Splat(s) => assert_eq!(s.fill, None, "a splat with no fill set must decode back to None, not e.g. Some(Paint::None)"),
+            other => panic!("expected a Splat, got {other:?}"),
         }
     }
     }

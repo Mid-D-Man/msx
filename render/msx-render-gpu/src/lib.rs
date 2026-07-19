@@ -49,11 +49,13 @@
 
 mod context;
 mod layer;
+mod masked_shader_composite;
 mod pipeline;
 mod sdf;
 mod sdf_shader;
 mod shader;
 mod splat;
+mod splat_shader;
 mod target;
 mod vector;
 
@@ -69,7 +71,9 @@ use std::path::Path;
 
 use msx_ast::{Matrix2D, Scene};
 use msx_render_core::{RenderTarget, Renderer};
-use sdf_shader::{SdfShaderComposite, SdfShaderContext};
+use masked_shader_composite::MaskedShaderComposite;
+use sdf_shader::SdfShaderContext;
+use splat_shader::SplatShaderContext;
 use shader::ShaderFillPipeline;
 
 pub struct GpuRenderer {
@@ -78,7 +82,7 @@ pub struct GpuRenderer {
     sdf_pipeline: SdfPipeline,
     splat_pipeline: SplatPipeline,
     shader_pipeline: ShaderFillPipeline,
-    sdf_shader_composite: SdfShaderComposite,
+    masked_shader_composite: MaskedShaderComposite,
     layer_compositor: LayerCompositor,
 }
 
@@ -90,9 +94,9 @@ impl GpuRenderer {
         let sdf_pipeline = SdfPipeline::new(&context.device, format);
         let splat_pipeline = SplatPipeline::new(&context.device, format);
         let shader_pipeline = ShaderFillPipeline::new(&context.device, format);
-        let sdf_shader_composite = SdfShaderComposite::new(&context.device, format);
+        let masked_shader_composite = MaskedShaderComposite::new(&context.device, format);
         let layer_compositor = LayerCompositor::new(&context.device, format);
-        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, sdf_shader_composite, layer_compositor })
+        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, masked_shader_composite, layer_compositor })
     }
 
     /// Renders exactly like the `Renderer` trait's `render`, but with
@@ -153,12 +157,23 @@ impl GpuRenderer {
             scene,
             Some(&SdfShaderContext {
                 shader_pipeline: &self.shader_pipeline,
-                composite: &self.sdf_shader_composite,
+                composite: &self.masked_shader_composite,
                 shader_base_dir,
                 time,
             }),
         );
-        self.splat_pipeline.draw_all(&self.context.device, &mut encoder, &offscreen.view, scene);
+        self.splat_pipeline.draw_all(
+            &self.context.device,
+            &mut encoder,
+            &offscreen.view,
+            scene,
+            Some(&SplatShaderContext {
+                shader_pipeline: &self.shader_pipeline,
+                composite: &self.masked_shader_composite,
+                shader_base_dir,
+                time,
+            }),
+        );
         self.context.queue.submit(std::iter::once(encoder.finish()));
 
         // Pass 2: every top-level Layer, composited on top — see
@@ -332,4 +347,4 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-                                  }
+            }

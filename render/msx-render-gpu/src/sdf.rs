@@ -494,7 +494,13 @@ pub(crate) fn node_bounding_quad(node: &SdfNode, transform: Matrix2D, canvas: (f
     Some((vertices, indices))
 }
 
-fn paint_color(paint: &Paint, defs: &Defs) -> Color {
+/// Resolves any `Paint` to a flat `Color` — shared with `splat.rs` for the
+/// same reason `average_stop_color`/`resolve_shader_def` (from
+/// `vector.rs`) are themselves `pub(crate)`: a splat's `fill`, when it has
+/// one and it isn't a `Def::Shader` (which `splat.rs` routes through the
+/// mask+color+composite path instead — see `splat_shader::draw_splat_shader_fill`),
+/// resolves through this exact same gradient-average path.
+pub(crate) fn paint_color(paint: &Paint, defs: &Defs) -> Color {
     match paint {
         Paint::Color(c) => *c,
         Paint::CurrentColor => Color::BLACK,
@@ -728,4 +734,4 @@ mod tests {
         assert_eq!(params.fill_color, [1.0, 1.0, 1.0, 1.0], "mask fill must be opaque white — the node's real color (red, here) must never leak into the mask");
         assert_eq!(params.has_stroke, 0.0, "the mask must never include a stroke band");
     }
-                        }
+                                    }

@@ -15,7 +15,7 @@ mod shapes;
 mod splat;
 
 use msx_ast::transform::Transform;
-use msx_ast::{Element, Scene, Style};
+use msx_ast::{Def, Element, Scene, Style};
 
 pub(crate) struct Ctx {
     pub(crate) out: String,
@@ -40,7 +40,7 @@ pub fn render(scene: &Scene) -> String {
     let mut ctx = Ctx { out: String::new(), extra_defs: String::new(), counter: 0 };
 
     for el in &scene.elements {
-        render_element(&mut ctx, el);
+        render_element(&mut ctx, el, &scene.defs);
     }
 
     let mut svg = String::new();
@@ -80,7 +80,7 @@ pub fn render(scene: &Scene) -> String {
     svg
 }
 
-pub(crate) fn render_element(ctx: &mut Ctx, element: &Element) {
+pub(crate) fn render_element(ctx: &mut Ctx, element: &Element, defs: &[Def]) {
     match element {
         Element::Rect(e)     => shapes::render_rect(ctx, e),
         Element::Circle(e)   => shapes::render_circle(ctx, e),
@@ -90,11 +90,11 @@ pub(crate) fn render_element(ctx: &mut Ctx, element: &Element) {
         Element::Polygon(e)  => shapes::render_polyline(ctx, e),
         Element::Path(e)     => shapes::render_path(ctx, e),
         Element::Text(e)     => shapes::render_text(ctx, e),
-        Element::Group(e)    => shapes::render_group(ctx, e),
+        Element::Group(e)    => shapes::render_group(ctx, e, defs),
         Element::Use(e)      => shapes::render_use(ctx, e),
         Element::Sdf(e)      => sdf::render_sdf(ctx, e),
-        Element::Splat(e)    => splat::render_splat(ctx, e),
-        Element::Layer(e)    => layer::render_layer(ctx, e),
+        Element::Splat(e)    => splat::render_splat(ctx, e, defs),
+        Element::Layer(e)    => layer::render_layer(ctx, e, defs),
     }
 }
 
@@ -240,6 +240,49 @@ mod tests {
         let svg = render(&scene);
         assert!(svg.contains("radialGradient"));
         assert!(svg.contains("<ellipse"));
+    }
+
+    /// `fill`, when set, must change the synthetic gradient's stop color —
+    /// not be silently ignored in favor of the plain `color` field. Uses
+    /// an opaque-black → opaque-white gradient so its average
+    /// (`#808080`-ish grey) is unambiguously distinct from the splat's own
+    /// `color` (pure red) if `fill` were mistakenly skipped.
+    #[test]
+    fn splat_fill_overrides_color_in_the_svg_fallback_gradient() {
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::BLACK));
+        scene.defs.push(Def::LinearGradient(LinearGradient::new(
+            "g".to_string(), 0.0, 0.0, 10.0, 0.0,
+            vec![Stop::new(0.0, Color::rgb(0, 0, 0)), Stop::new(1.0, Color::rgb(255, 255, 255))],
+        )));
+        let mut splat = GaussianSplat::circle(25.0, 25.0, 8.0, Color::rgb(255, 0, 0), 0.6);
+        splat.fill = Some(Paint::Ref("url(#g)".to_string()));
+        scene.elements.push(Element::Splat(splat));
+
+        let svg = render(&scene);
+        assert!(svg.contains("#7f7f7f"), "expected the gradient's averaged grey, got: {svg}");
+        assert!(!svg.contains("#ff0000"), "the plain `color` field (red) must not appear when `fill` is set");
+    }
+
+    /// Same fill-resolution behavior must hold for a splat nested inside a
+    /// `Group` — `defs` is threaded through `render_group`'s recursion
+    /// specifically so this doesn't silently stop working the moment a
+    /// splat isn't at the top level.
+    #[test]
+    fn splat_fill_resolves_correctly_even_nested_inside_a_group() {
+        use msx_ast::Group;
+
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::BLACK));
+        scene.defs.push(Def::LinearGradient(LinearGradient::new(
+            "g".to_string(), 0.0, 0.0, 10.0, 0.0,
+            vec![Stop::new(0.0, Color::rgb(0, 0, 0)), Stop::new(1.0, Color::rgb(255, 255, 255))],
+        )));
+        let mut splat = GaussianSplat::circle(25.0, 25.0, 8.0, Color::rgb(255, 0, 0), 0.6);
+        splat.fill = Some(Paint::Ref("url(#g)".to_string()));
+        let group = Group::new(vec![Element::Splat(splat)]);
+        scene.elements.push(Element::Group(group));
+
+        let svg = render(&scene);
+        assert!(svg.contains("#7f7f7f"), "expected the gradient's averaged grey even nested in a group, got: {svg}");
     }
 
     #[test]

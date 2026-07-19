@@ -82,31 +82,47 @@ fn antialiased(color: PremulColor, d: f32) -> PremulColor {
     PremulColor { r: color.r * coverage, g: color.g * coverage, b: color.b * coverage, a: color.a * coverage }
 }
 
-fn paint_to_color(paint: &Paint, defs: &Defs) -> PremulColor {
+/// Resolves any `Paint` to a flat, straight (non-premultiplied) `Color` —
+/// `paint_to_color` below just premultiplies this. Split out so
+/// `splat_raster.rs` can use the straight version directly: a splat's
+/// alpha comes entirely from its own Gaussian falloff
+/// (`msx_splat::evaluate_opacity`), computed and applied separately per
+/// pixel — feeding it a `PremulColor` whose alpha channel already baked in
+/// the paint's own alpha would double-apply alpha instead of composing
+/// correctly with the per-pixel falloff.
+pub(crate) fn paint_to_flat_color(paint: &Paint, defs: &Defs) -> Color {
     match paint {
-        Paint::Color(c) => PremulColor::from_color(*c),
-        Paint::CurrentColor => PremulColor::from_color(Color::BLACK),
-        Paint::None => PremulColor::TRANSPARENT,
+        Paint::Color(c) => *c,
+        Paint::CurrentColor => Color::BLACK,
+        Paint::None => Color::rgba(0, 0, 0, 0),
         Paint::Ref(reference) => {
             // Same resolution `rasterizer.rs::resolve_paint` uses for
             // every other shape type: a real tiny-skia gradient shader
-            // isn't wired up yet, so a gradient ref paints its stops'
-            // average color, and a shader ref paints its declared
-            // `fallback_color` — either way, something sane rather than
-            // silently invisible. An SDF's fill/stroke can reference a
-            // def exactly the same way any other shape's can; this used
-            // to unconditionally return TRANSPARENT for any `Paint::Ref`
-            // here regardless of what it pointed at, independent of
-            // whether `rasterizer.rs`'s handling for other shapes agreed.
+            // isn't wired up yet, so a gradient ref resolves to its
+            // stops' average color, and a shader ref resolves to its
+            // declared `fallback_color` — either way, something sane
+            // rather than silently invisible. An SDF's fill/stroke (and
+            // now a splat's `fill`) can reference a def exactly the same
+            // way any other shape's can; this used to unconditionally
+            // return transparent for any `Paint::Ref` here regardless of
+            // what it pointed at, independent of whether
+            // `rasterizer.rs`'s handling for other shapes agreed.
             match reference.strip_prefix("url(#").and_then(|s| s.strip_suffix(')')) {
                 Some(id) => match defs.get(id) {
-                    Some(def) => PremulColor::from_color(average_stop_color(def)),
-                    None => PremulColor::TRANSPARENT,
+                    Some(def) => average_stop_color(def),
+                    None => Color::rgba(0, 0, 0, 0),
                 },
-                None => PremulColor::TRANSPARENT,
+                None => Color::rgba(0, 0, 0, 0),
             }
         }
     }
+}
+
+/// Resolves any `Paint` to a flat premultiplied color — shared with
+/// `splat_raster.rs` for the exact same reason `average_stop_color` (which
+/// this calls, via `paint_to_flat_color`) is itself `pub(crate)`.
+pub(crate) fn paint_to_color(paint: &Paint, defs: &Defs) -> PremulColor {
+    PremulColor::from_color(paint_to_flat_color(paint, defs))
 }
 
 fn evaluate_tree(tree: &SdfTree, p: (f32, f32)) -> f32 {

@@ -1,0 +1,33 @@
+// examples/splat_gradient_fill.msx
+// Tests GaussianSplat::fill with a gradient reference — the AST/parser/
+// binary/CPU/SVG/GPU work from this session's splat pass.
+//
+// Important honesty check baked into this example: a gradient `fill` on
+// a splat does NOT get a real per-pixel gradient anywhere, on any
+// renderer — CPU, SVG, and GPU all resolve it down to ONE flat
+// representative color (the gradient's stop average) and use that as the
+// splat's peak color, same as a shader's `fallback_color` substitutes for
+// real WGSL on non-GPU renderers. This is different from a vector shape's
+// gradient fill, which DOES render as a real gradient everywhere (SVG
+// natively, CPU/GPU via their own gradient-shader support). Splats never
+// got that support — only flat colors — so a gradient reference here is
+// genuinely just a convenient way to say "use this def's average color"
+// rather than "render this gradient."
+//
+// The two splats below are side by side specifically so the difference
+// between "plain `color`" and "`fill` pointing at a gradient" is visible
+// at a glance: same gradient, but the left splat ignores it (no `fill`
+// set) and the right one uses it.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #14141c }
+  defs::
+    { type = "linear_gradient", id = "warm_glow", x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,
+      stops = [ { offset = 0.0, color = #ff7a00, opacity = 1.0 },
+                { offset = 1.0, color = #7a1fa2, opacity = 1.0 } ] }
+  elements::
+    { type = "splat", x = 100, y = 100, sigma_x = 40, sigma_y = 40,
+      color = #2ecc71, opacity = 0.9 }
+    { type = "splat", x = 200, y = 100, sigma_x = 40, sigma_y = 40,
+      fill = "url(#warm_glow)", color = #2ecc71, opacity = 0.9 }
+)

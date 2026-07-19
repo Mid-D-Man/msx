@@ -1,5 +1,5 @@
 // render/msx-render-svg/src/layer.rs
-use msx_ast::{fmt_f64, Effect, Layer};
+use msx_ast::{fmt_f64, Def, Effect, Layer};
 
 use crate::{render_element, write_attr, write_id, write_transform, Ctx};
 
@@ -9,7 +9,7 @@ use crate::{render_element, write_attr, write_id, write_transform, Ctx};
 /// generated `<filter>` chaining one SVG filter primitive per effect.
 /// `clip` has no cheap SVG 1.1 fallback without a matching
 /// `clipPath`/bbox computation, so it's left unenforced here.
-pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer) {
+pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer, defs: &[Def]) {
     ctx.push("<g");
 
     write_id(ctx, layer.id.as_deref());
@@ -30,7 +30,7 @@ pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer) {
 
     ctx.push(">");
     for child in &layer.children {
-        render_element(ctx, child);
+        render_element(ctx, child, defs);
     }
     ctx.push("</g>");
 }

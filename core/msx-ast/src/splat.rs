@@ -10,7 +10,7 @@
 //! GPU: instanced quad per splat, gaussian in fragment shader (msx-render-gpu).
 //! Stack hundreds of splats for painterly results.
 
-use crate::color::Color;
+use crate::color::{Color, Paint};
 
 /// A single 2D Gaussian splat scene element.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,8 +24,18 @@ pub struct GaussianSplat {
     pub sigma_y:  f64,
     /// Rotation of the ellipse in radians.
     pub rotation: f64,
-    /// Peak color at center.
+    /// Peak color at center. Still the field every renderer falls back to
+    /// — see `fill` below for how the two interact.
     pub color:    Color,
+    /// Optional `url(#id)` reference to a gradient or shader def,
+    /// resolved the same way `SdfNode::fill`/vector shapes' `style.fill`
+    /// are. `None` (the default) means "use `color` directly", exactly
+    /// the splat's original, only behavior before this field existed —
+    /// every pre-existing `.msx` file with a `splat` element keeps
+    /// rendering identically. `Some(paint)` takes priority over `color`
+    /// when both are set; `color` isn't consulted at all in that case,
+    /// not even as an interim/blend value.
+    pub fill:     Option<Paint>,
     /// Peak opacity at center (0.0..=1.0).
     pub opacity:  f64,
     pub id:       Option<String>,
@@ -33,7 +43,7 @@ pub struct GaussianSplat {
 
 impl GaussianSplat {
     pub fn new(x: f64, y: f64, sigma_x: f64, sigma_y: f64, color: Color, opacity: f64) -> Self {
-        GaussianSplat { x, y, sigma_x, sigma_y, rotation: 0.0, color, opacity, id: None }
+        GaussianSplat { x, y, sigma_x, sigma_y, rotation: 0.0, color, fill: None, opacity, id: None }
     }
 
     /// Convenience: circular (isotropic) splat.

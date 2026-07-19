@@ -86,7 +86,7 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
         Element::Group(g) => render_group(pixmap, g, transform, defs, index),
         Element::Use(u) => render_use(pixmap, u, transform, defs, index),
         Element::Sdf(node) => rasterize_sdf(pixmap, node, transform, defs),
-        Element::Splat(s) => rasterize_splat(pixmap, s, transform),
+        Element::Splat(s) => rasterize_splat(pixmap, s, transform, defs),
         Element::Layer(l) => render_layer(pixmap, l, transform, defs, index),
     }
 }

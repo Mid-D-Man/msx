@@ -1,6 +1,6 @@
 // render/msx-render-svg/src/shapes.rs
 use msx_ast::path::commands_to_d;
-use msx_ast::{fmt_f64, Circle, Ellipse, Group, Line, Path, Polyline, Rect, Text, Use};
+use msx_ast::{fmt_f64, Circle, Def, Ellipse, Group, Line, Path, Polyline, Rect, Text, Use};
 
 use crate::{escape_attr, escape_text, render_element, write_attr, write_id, write_style, write_transform, Ctx};
 
@@ -102,7 +102,7 @@ pub(crate) fn render_text(ctx: &mut Ctx, t: &Text) {
     ctx.push("</text>");
 }
 
-pub(crate) fn render_group(ctx: &mut Ctx, g: &Group) {
+pub(crate) fn render_group(ctx: &mut Ctx, g: &Group, defs: &[Def]) {
     ctx.push("<g");
     write_id(ctx, g.id.as_deref());
     write_transform(ctx, g.transform.as_ref());
@@ -111,7 +111,7 @@ pub(crate) fn render_group(ctx: &mut Ctx, g: &Group) {
     }
     ctx.push(">");
     for child in &g.children {
-        render_element(ctx, child);
+        render_element(ctx, child, defs);
     }
     ctx.push("</g>");
 }

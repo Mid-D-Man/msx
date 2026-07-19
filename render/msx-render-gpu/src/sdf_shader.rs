@@ -26,9 +26,10 @@
 //!    agnostic, not tied to vector.rs specifically) renders the shader's
 //!    real output over the node's bounding-box quad into a second scratch
 //!    texture.
-//! 3. `SdfShaderComposite` multiplies the two together — shader color,
-//!    clipped to true SDF coverage instead of the quad's rectangular
-//!    extent — into the real destination view.
+//! 3. `MaskedShaderComposite` (shared with `splat_shader.rs` — see that
+//!    module) multiplies the two together — shader color, clipped to true
+//!    SDF coverage instead of the quad's rectangular extent — into the
+//!    real destination view.
 //!
 //! Both scratch textures are full canvas size, not cropped to the node's
 //! actual bounding box — simpler (identical clip-space math to every
@@ -61,6 +62,7 @@
 
 use msx_ast::{Matrix2D, SdfNode, ShaderDef};
 
+use crate::masked_shader_composite::{clear_transparent, MaskedShaderComposite};
 use crate::sdf::{node_bounding_quad, SdfPipeline};
 use crate::shader::{PendingShaderShape, ShaderFillPipeline};
 use crate::target::OffscreenTarget;
@@ -75,144 +77,9 @@ use crate::target::OffscreenTarget;
 /// already established for vector.rs's own shader routing.
 pub(crate) struct SdfShaderContext<'a> {
     pub shader_pipeline: &'a ShaderFillPipeline,
-    pub composite: &'a SdfShaderComposite,
+    pub composite: &'a MaskedShaderComposite,
     pub shader_base_dir: &'a std::path::Path,
     pub time: f32,
-}
-
-pub(crate) struct SdfShaderComposite {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-}
-
-impl SdfShaderComposite {
-    pub(crate) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("msx sdf-shader composite shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sdf_shader_composite.wgsl").into()),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("msx sdf-shader composite bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("msx sdf-shader composite pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("msx sdf-shader composite pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("msx sdf-shader composite sampler"),
-            ..Default::default()
-        });
-
-        SdfShaderComposite { pipeline, bind_group_layout, sampler }
-    }
-
-    fn composite(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, dst_view: &wgpu::TextureView, color_view: &wgpu::TextureView, mask_view: &wgpu::TextureView) {
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("msx sdf-shader composite bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(color_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(mask_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("msx sdf-shader composite pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: dst_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..6, 0..1);
-    }
-}
-
-/// Clears `view` to transparent with an otherwise-empty render pass.
-/// Needed before `ShaderFillPipeline::draw`, which always composites with
-/// `LoadOp::Load` — correct for its normal job (drawing directly onto the
-/// shared scene buffer) but wrong for the fresh per-node scratch texture
-/// used here, which needs to start from nothing. Not worth adding a
-/// separate clear-then-draw mode to shader.rs itself for this one caller.
-fn clear_transparent(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("msx sdf-shader scratch clear"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-    });
 }
 
 /// Draws one SDF node whose fill resolved to a real `Def::Shader` — see
