@@ -393,10 +393,20 @@ mod tests {
         splat.fill = Some(Paint::Ref("url(#g)".to_string()));
 
         let instance = to_instance(&splat, Matrix2D::identity(), Some(&defs));
-        // (0+255)/2 = 127 — the gradient average, not red (255,0,0), which
-        // is what `splat.color` (unused here) would have produced.
-        assert!((instance.color[0] - 127.0 / 255.0).abs() < 1e-3, "red channel should be the gradient average");
-        assert!(instance.color[1] < 0.01, "green channel should be ~0 — plain `color` must not be used when `fill` is set");
+        // Average of opaque black (0,0,0) and opaque white (255,255,255)
+        // is mid-gray — (127,127,127) on EVERY channel, not just red.
+        // `splat.color` (unused here) is red (255,0,0), so what actually
+        // distinguishes "gradient average was used" from "color leaked
+        // through instead" is r == g == b, not any single channel's
+        // absolute value. An earlier version of this test asserted the
+        // green channel specifically should be ~0, which was simply
+        // wrong arithmetic for a black/white gradient (gray's green
+        // channel is 127, not 0) — caught by the real CI run this test
+        // was written for, not by re-reading the test itself, which is
+        // exactly why it's worth noting here rather than quietly fixing.
+        for (channel, value) in ["red", "green", "blue"].iter().zip(instance.color) {
+            assert!((value - 127.0 / 255.0).abs() < 1e-3, "{channel} channel should be the gradient average (~127/255), got {value}");
+        }
     }
 
     /// `resolve_shader_def` (used by `draw_all_elements`'s own routing
