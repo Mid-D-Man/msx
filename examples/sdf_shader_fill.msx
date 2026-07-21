@@ -1,0 +1,58 @@
+// examples/sdf_shader_fill.msx
+// Tests SdfNode's real shader-fill path (sdf_shader.rs's mask+color+
+// composite technique) — the actual point of this session's earlier GPU
+// work: a shader masked to the node's TRUE antialiased silhouette, not
+// its rectangular bounding box.
+//
+// Reuses shaders/checkerboard.wgsl on purpose, same reasoning as
+// splat_shader_fill.msx: it's the sharpest possible diagnostic for
+// masking correctness. A smooth_union "blob" (not a plain circle, not
+// anything remotely rectangular) filled with a hard-edged checkerboard
+// makes any masking bug immediately obvious — squares bleeding into the
+// blob's concave notch or past its rounded silhouette would be
+// impossible to miss, where a soft shader like plasma might hide the
+// same bug.
+//
+// The stroke on the shader-filled blob tests SdfPipeline::draw_stroke_only
+// specifically — shader routing only ever handles the FILL (see
+// sdf_shader.rs's own "known gaps"), so the stroke has to still show up,
+// drawn separately, flat-colored, on top of the real WGSL fill
+// underneath it.
+//
+// Rendering status, same caveat as every shader-def example in this repo:
+// only `msx rasterize-gpu`/`animate-gpu` (msx-render-gpu, built with
+// --features gpu) execute this WGSL and apply the real antialiased mask.
+// `msx rasterize` (CPU) and `msx render` (SVG) both resolve the fill to
+// checkerboard's own `fallback_color` and paint it flat within the SDF
+// shape's own (CPU/SVG-rendered) silhouette — which, unlike the GPU
+// bounding-box-then-mask technique, was already correct for arbitrary SDF
+// shapes on those two renderers before this session even started; only
+// GPU needed the new masking work.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #14141c }
+  defs::
+    { type = "shader", id = "checker_1", source_ref = "shaders/checkerboard.wgsl",
+      entry_point = "fs_main", fallback_color = #3a3a4a,
+      uniforms = [ { name = "cells", type = "float", value = 14.0 },
+                   { name = "resolution", type = "vec2", value = [300.0, 200.0] },
+                   { name = "color_a", type = "vec3", value = [0.9, 0.9, 0.95] },
+                   { name = "color_b", type = "vec3", value = [0.16, 0.16, 0.22] } ] }
+  elements::
+    // Plain flat-color blob on the left — same tree shape as the
+    // shader-filled one on the right, for a direct before/after
+    // comparison of the exact same silhouette.
+    { type = "sdf", fill = #4a9eff,
+      transform = { type = "translate", x = 85, y = 100 },
+      tree = { type = "smooth_union", k = 0.35,
+        children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                     { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+
+    // Shader-filled blob, WITH a stroke — exercises both the mask+color+
+    // composite fill path and draw_stroke_only in the same node.
+    { type = "sdf", fill = "url(#checker_1)", stroke = #ffffff, stroke_width = 3,
+      transform = { type = "translate", x = 205, y = 100 },
+      tree = { type = "smooth_union", k = 0.35,
+        children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                     { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+)
