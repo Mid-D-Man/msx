@@ -2,14 +2,12 @@
 // Referenced by examples/shader_orb.msx's "orb_1" shader def
 // (source_ref = "shaders/orb_raymarch.wgsl", relative to that .msx file).
 //
-// Everything shader.rs has been tested against so far (plasma.wgsl,
+// Everything shader.rs was originally tested against (plasma.wgsl,
 // checkerboard.wgsl) is flat per-pixel math: no loops, no branching on
 // distance, one texture-space evaluation per fragment. This one isn't —
 // a real sphere-tracing raymarcher, up to MAX_STEPS distance-field
 // evaluations per pixel plus 6 more for the central-difference normal at
-// the hit point. If msx-render-gpu's pipeline ever mishandles loop-heavy/
-// branchy WGSL, this is the shader that will show it, where
-// plasma/checkerboard wouldn't.
+// the hit point.
 //
 // It also exercises a uniform-layout case the other two examples don't:
 // TWO consecutive vec3<f32> fields (base_color, rim_color) after a vec2
@@ -24,13 +22,23 @@
 //   speed       44-48
 //   time        48-52
 //   struct size rounds up to the max member alignment (16) -> 64 bytes.
-// pack_uniforms' own unit tests cover vec3-then-scalar but not
-// vec3-immediately-after-vec3, so this is genuinely new ground for that
-// function, not just a new example.
 //
 // Uniform names/types match shader_orb.msx's declared "uniforms" in
 // order: resolution (vec2f), base_color (vec3f), rim_color (vec3f),
 // speed (f32) — then the renderer-appended trailing time (f32).
+//
+// LOOP-CLOSURE FIX (this pass): originally the radius pulse (coefficient
+// 1), camera orbit (coefficient 0.3), and surface bands (coefficient 2)
+// all moved at unrelated rates relative to `time * speed` — the camera
+// alone needed ~21 seconds for one full lap. No short `animate-gpu
+// --duration` could close all three at once. Fixed the same way
+// plasma.wgsl was: round `speed` to the nearest whole number of
+// LOOP_SECONDS-length cycles via `loop_time()`, then express every
+// frequency as a small integer multiple of that (camera orbit now
+// completes exactly 1 full lap per loop, bands complete 2) instead of an
+// arbitrary fraction. A camera doing one full clean rotation per loop
+// also just reads as more intentional than a partial creep did — closer
+// to a product-shot turntable than an accident of the old timing.
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -46,11 +54,29 @@ const MAX_STEPS: i32 = 80;
 const MAX_DIST: f32 = 20.0;
 const SURF_EPS: f32 = 0.001;
 
+// Loop length, in seconds, this shader is designed to close cleanly
+// over — must match whatever --duration animate-gpu actually samples
+// this shader with. pages.yml currently hardcodes 4 for every
+// shader-using example; change this only in lockstep with that.
+const LOOP_SECONDS: f32 = 4.0;
+const TAU: f32 = 6.283185307;
+
+// Nearest whole number of loop cycles, times the base angular frequency
+// for one full loop — see LOOP_SECONDS' doc comment above. Called from
+// both `map` and `fs_main` rather than threaded through as a parameter,
+// matching this file's existing convention of reading `u` directly
+// wherever needed instead of passing uniforms down through every
+// function signature.
+fn loop_time() -> f32 {
+    let cycles = round(u.speed);
+    return u.time * cycles * (TAU / LOOP_SECONDS);
+}
+
 // Signed distance to the scene: one sphere at the origin, radius
 // breathing slowly so the orb reads as animated even before any surface
 // shading or camera motion is applied.
 fn map(p: vec3<f32>) -> f32 {
-    let radius = 1.0 + 0.08 * sin(u.time * u.speed);
+    let radius = 1.0 + 0.08 * sin(loop_time());
     return length(p) - radius;
 }
 
@@ -74,27 +100,30 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let short_edge = min(u.resolution.x, u.resolution.y);
     let uv = (frag_coord.xy - 0.5 * u.resolution) / short_edge;
 
-    // Camera orbits the origin at a fixed radius/height, driven entirely
-    // by time — rotating the ray basis rather than moving a look-at
-    // target, so the orb stays centered in frame at every angle.
-    let angle = u.time * u.speed * 0.3;
+    let t = loop_time();
+
+    // Camera orbits the origin at a fixed radius/height, one full lap per
+    // loop (see file header) — rotating the ray basis rather than moving
+    // a look-at target, so the orb stays centered in frame at every
+    // angle.
+    let angle = t;
     let cam_pos = vec3<f32>(sin(angle) * 3.0, 0.6, cos(angle) * 3.0);
     let forward = normalize(-cam_pos);
     let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), forward));
     let up = cross(forward, right);
     let ray_dir = normalize(forward * 1.8 + right * uv.x + up * uv.y);
 
-    var t = 0.0;
+    var dist = 0.0;
     var hit = false;
     for (var i = 0; i < MAX_STEPS; i = i + 1) {
-        let p = cam_pos + ray_dir * t;
+        let p = cam_pos + ray_dir * dist;
         let d = map(p);
         if (d < SURF_EPS) {
             hit = true;
             break;
         }
-        t = t + d;
-        if (t > MAX_DIST) {
+        dist = dist + d;
+        if (dist > MAX_DIST) {
             break;
         }
     }
@@ -107,17 +136,17 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4<f32>(bg, 1.0);
     }
 
-    let p = cam_pos + ray_dir * t;
+    let p = cam_pos + ray_dir * dist;
     let n = calc_normal(p);
 
     let light_dir = normalize(vec3<f32>(0.5, 0.8, -0.4));
     let diffuse = max(dot(n, light_dir), 0.0);
     let fresnel = pow(1.0 - max(dot(n, -ray_dir), 0.0), 3.0);
 
-    // Slow moving latitude bands, purely procedural (derived from the
-    // surface normal + time, no extra uniform needed) so the sphere reads
-    // as more than a flat-shaded ball.
-    let bands = 0.5 + 0.5 * sin(n.y * 6.0 + u.time * u.speed * 2.0);
+    // Slow moving latitude bands, two cycles per loop — purely
+    // procedural (derived from the surface normal + t, no extra uniform
+    // needed) so the sphere reads as more than a flat-shaded ball.
+    let bands = 0.5 + 0.5 * sin(n.y * 6.0 + t * 2.0);
     let surface = mix(u.base_color * 0.7, u.base_color * 1.3, bands);
 
     let lit = surface * (0.15 + 0.85 * diffuse);
