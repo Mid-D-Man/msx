@@ -13,7 +13,26 @@ on:
         default: 'false'
   push:
     paths:
-      - '.mdix/**'
+      # NARROWED 2026-07-21: this used to be '.mdix/**', which also matches
+      # '.mdix/replacements/**' — meaning every replacements-bundle upload
+      # (handled by run-replacements.yml) ALSO spuriously fired this
+      # project-structure regeneration job. That's the real root cause of
+      # src/lib.rs getting silently clobbered: a stale/queued run of THIS
+      # workflow, triggered by an unrelated replacements push, executing
+      # against whatever project_structure.mdix looked like at that time.
+      - '.mdix/project_structure/**'
+
+concurrency:
+  # Only one structure-generation run in flight per ref at a time. Without
+  # this, rapid successive pushes (normal for a mobile/GitHub-web-UI-only
+  # workflow) can queue multiple runs that finish out of order — a later
+  # commit's run can complete BEFORE an earlier commit's slower run (e.g.
+  # a cache-miss that has to build the mdix CLI from source), so the
+  # earlier, stale run's commit lands last and silently overwrites newer
+  # work. Cancelling superseded runs makes only the latest push's run ever
+  # actually commit.
+  group: generate-structure-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   generate:
