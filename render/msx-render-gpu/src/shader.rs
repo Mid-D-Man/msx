@@ -51,12 +51,12 @@
 //!   to `fallback_color` — stroking a shader-filled outline needs the
 //!   same treatment applied to `stroke_path`'s output, not attempted
 //!   here yet.
-//! - **Top-level elements only.** Shapes inside a `Layer` don't route
-//!   through here — `layer.rs` still calls the plain `tessellate_elements`
-//!   (no shader-shape collection), so a shader fill inside a `Layer`
-//!   keeps painting flat, same as every other renderer today. Consistent
-//!   with `layer.rs`'s own already-documented gaps (blend modes,
-//!   effects), not a new kind of limitation.
+//! - **Shapes inside a `Layer` now route through here too.** `layer.rs`
+//!   calls `vector::tessellate_elements_with_shaders` (with the real
+//!   scene `defs`, not an empty one) instead of the plain
+//!   `tessellate_elements` it used to — a shader fill on a shape inside a
+//!   `Layer` executes for real now, same as a top-level shape. See
+//!   `layer.rs`'s module doc for the details.
 //! - **Opacity isn't applied.** The shape's `style.opacity` is not
 //!   multiplied into the shader's output alpha — the shader's returned
 //!   `vec4` is used as-is. Doing this properly needs either a uniform
@@ -399,4 +399,4 @@ mod tests {
         let time = f32::from_le_bytes(bytes[12..16].try_into().unwrap());
         assert_eq!(time, 9.0);
     }
-    }
+                                                            }
