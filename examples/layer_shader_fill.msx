@@ -1,0 +1,77 @@
+// examples/layer_shader_fill.msx
+// Tests this session's actual fix: shader fills on a vector shape, an
+// SDF node, AND a GaussianSplat all resolving for real when the shape
+// lives INSIDE a Layer, not just at the top level. Before this fix,
+// render_layer built its own empty Defs and called the plain,
+// shader-blind tessellate_elements — a shader ref (or a gradient ref)
+// on anything inside a Layer silently painted flat. See layer.rs's
+// module doc for the details.
+//
+// One shared shader def (checker_1, shaders/checkerboard.wgsl) is
+// reused for all three rows on purpose — same reasoning as
+// sdf_shader_fill.msx/splat_shader_fill.msx: hard edges make a masking
+// or routing bug impossible to miss, and reusing one def across three
+// very differently-shaped fills (a rect's straight edges, a smooth_union
+// blob's curved silhouette, a Gaussian falloff) is a broader diagnostic
+// than any one of them alone.
+//
+// Each row is a plain flat-color shape on the left and the same shape
+// shader-filled on the right — if the Layer fix regressed, the right
+// side of every row would go back to a flat block of checker_1's own
+// fallback_color instead of the real checkerboard pattern.
+//
+// The whole thing sits inside one Layer at opacity 0.85 (not 1.0) on
+// purpose: this is also an implicit regression check on the Layer's own
+// isolated-buffer compositing (already working before this session) —
+// if that broke while wiring the new shader context through, the whole
+// canvas would look wrong (either full-strength, or not blended against
+// the background at all), not just the shader routing specifically.
+//
+// Rendering status, same caveat as every shader-def example in this
+// repo: only `msx rasterize-gpu`/`animate-gpu` (msx-render-gpu, built
+// with --features gpu) execute this WGSL. `msx rasterize` (CPU) and
+// `msx render` (SVG) both resolve every fill to checker_1's own
+// fallback_color and paint it flat — unaffected by this session's fix,
+// which is GPU-only (mask+color+composite is a GPU-renderer technique;
+// CPU/SVG already handled Layer children's shapes correctly, gradients
+// included, before this session).
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 630, background = #14141c }
+  defs::
+    { type = "shader", id = "checker_1", source_ref = "shaders/checkerboard.wgsl",
+      entry_point = "fs_main", fallback_color = #3a3a4a,
+      uniforms = [ { name = "cells", type = "float", value = 14.0 },
+                   { name = "resolution", type = "vec2", value = [300.0, 200.0] },
+                   { name = "color_a", type = "vec3", value = [0.9, 0.9, 0.95] },
+                   { name = "color_b", type = "vec3", value = [0.16, 0.16, 0.22] } ] }
+  elements::
+    { type = "layer", blend_mode = "normal", opacity = 0.85,
+      elements = [
+        // Row 1 (y=100): ordinary vector rects.
+        { type = "rect", x = 50, y = 65, width = 70, height = 70,
+          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+        { type = "rect", x = 170, y = 65, width = 70, height = 70,
+          style = { fill = "url(#checker_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+
+        // Row 2 (y=310): SDF smooth_union blobs — same tree shape as
+        // sdf_shader_fill.msx, just relocated into this file's grid and
+        // wrapped in a Layer this time.
+        { type = "sdf", fill = #4a9eff,
+          transform = { type = "translate", x = 85, y = 310 },
+          tree = { type = "smooth_union", k = 0.35,
+            children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+        { type = "sdf", fill = "url(#checker_1)", stroke = #ffffff, stroke_width = 3,
+          transform = { type = "translate", x = 205, y = 310 },
+          tree = { type = "smooth_union", k = 0.35,
+            children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
+                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+
+        // Row 3 (y=520): Gaussian splats.
+        { type = "splat", x = 85, y = 520, sigma_x = 45, sigma_y = 45,
+          color = #4a9eff, opacity = 1.0 }
+        { type = "splat", x = 205, y = 520, sigma_x = 45, sigma_y = 45,
+          fill = "url(#checker_1)", color = #4a9eff, opacity = 1.0 }
+      ] }
+)
