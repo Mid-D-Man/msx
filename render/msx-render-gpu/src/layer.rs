@@ -25,13 +25,31 @@
 //! document order — proper interleaving needs depth tracking that doesn't
 //! exist yet. **Nested layers** (a `Layer` inside another `Layer`) aren't
 //! rendered at all — `collect_layers` stops descending once it finds one.
+//!
+//! ## Shader and gradient fills inside a Layer
+//!
+//! `render_layer` is now given the real scene `defs` and the same
+//! `ShaderFillPipeline`/`MaskedShaderComposite` the top-level render path
+//! uses, so a vector/SDF/splat shape inside a `Layer` resolves
+//! `Def::Shader`/gradient refs exactly like a top-level shape does —
+//! vector shapes route through `vector::tessellate_elements_with_shaders`
+//! (see that function's doc comment), SDF/splat shapes route through
+//! their own `draw_all_elements`'s existing `Option<&...ShaderContext>`
+//! parameter, which was already fully generic and only ever received
+//! `None` from here. Opacity-on-shader-output and stroke-shader-fills
+//! remain out of scope everywhere in this crate, Layer or not — see
+//! `shader.rs`'s module doc.
 
 use wgpu::util::DeviceExt;
 
-use msx_ast::{Element, Layer, Matrix2D};
+use msx_ast::{Def, Element, Layer, Matrix2D};
 
+use crate::masked_shader_composite::MaskedShaderComposite;
 use crate::sdf::SdfPipeline;
+use crate::sdf_shader::SdfShaderContext;
+use crate::shader::ShaderFillPipeline;
 use crate::splat::SplatPipeline;
+use crate::splat_shader::SplatShaderContext;
 use crate::target::OffscreenTarget;
 use crate::vector;
 use crate::VectorPipeline;
@@ -153,8 +171,16 @@ impl LayerCompositor {
     }
 
     /// Renders `layer`'s children into a fresh offscreen buffer (vector +
-    /// SDF + splat passes, same as the top-level render), then composites
-    /// that buffer onto `view` at the layer's opacity.
+    /// shader fills + SDF + splat passes, same order and same real `defs`
+    /// as the top-level render), then composites that buffer onto `view`
+    /// at the layer's opacity.
+    ///
+    /// `scene_defs` is the *whole scene's* `defs` (i.e. `&scene.defs`,
+    /// not something scoped to just this layer) — a `Layer`'s children
+    /// can reference the same gradients/shader-defs as any top-level
+    /// shape, there's no separate per-layer defs concept in the format.
+    /// `shader_base_dir`/`time` are threaded straight through from
+    /// `lib.rs`'s own call, unchanged, to every shader-def resolved here.
     #[allow(clippy::too_many_arguments)]
     pub fn render_layer(
         &self,
@@ -167,6 +193,11 @@ impl LayerCompositor {
         vector_pipeline: &VectorPipeline,
         sdf_pipeline: &SdfPipeline,
         splat_pipeline: &SplatPipeline,
+        shader_pipeline: &ShaderFillPipeline,
+        masked_shader_composite: &MaskedShaderComposite,
+        scene_defs: &[Def],
+        shader_base_dir: &std::path::Path,
+        time: f32,
     ) {
         let local = layer.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
         let combined = parent_transform.concat(local);
@@ -183,7 +214,15 @@ impl LayerCompositor {
         let buffer_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING;
         let buffer = OffscreenTarget::new(device, canvas.0, canvas.1, buffer_usage);
         let canvas_f = (canvas.0 as f32, canvas.1 as f32);
-        let geometry = vector::tessellate_elements(&layer.children, combined, canvas_f);
+
+        // Real defs, not an empty one — this is the fix. Closes both the
+        // shader-fill gap and the pre-existing (undocumented until now)
+        // "gradient Paint::Ref resolves to nothing inside a Layer" gap,
+        // since both draw from the exact same underlying defs a Layer's
+        // children were never given access to before.
+        let defs = vector::Defs::build(scene_defs);
+
+        let (geometry, shader_shapes) = vector::tessellate_elements_with_shaders(&layer.children, combined, canvas_f, &defs);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("msx layer encoder"),
@@ -195,8 +234,24 @@ impl LayerCompositor {
             &geometry,
             wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
         );
-        sdf_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f, &vector::Defs::build(&[]), None);
-        splat_pipeline.draw_all_elements(device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f, &vector::Defs::build(&[]), None);
+        // Same "always paint something sane" fallback as the top-level
+        // path in lib.rs: a shader-ref shape whose source_ref doesn't
+        // resolve falls back to its flat fallback_color rather than
+        // vanishing or aborting the rest of this layer's render.
+        for shape in &shader_shapes {
+            if let Err(e) = shader_pipeline.draw(device, &mut encoder, &buffer.view, shader_base_dir, shape, time) {
+                eprintln!("msx-render-gpu: {e} — falling back to fallback_color (inside layer)");
+                vector_pipeline.draw_fallback_fill(device, &mut encoder, &buffer.view, &shape.vertices, &shape.indices, shape.shader.fallback_color);
+            }
+        }
+        sdf_pipeline.draw_all_elements(
+            device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f, &defs,
+            Some(&SdfShaderContext { shader_pipeline, composite: masked_shader_composite, shader_base_dir, time }),
+        );
+        splat_pipeline.draw_all_elements(
+            device, &mut encoder, &buffer.view, &layer.children, combined, canvas_f, &defs,
+            Some(&SplatShaderContext { shader_pipeline, composite: masked_shader_composite, shader_base_dir, time }),
+        );
         queue.submit(std::iter::once(encoder.finish()));
 
         self.composite(device, queue, view, &buffer.view, layer.opacity as f32);
