@@ -43,10 +43,10 @@
 //!   stroke, if it has one, is drawn separately by
 //!   `SdfPipeline::draw_stroke_only` with the fill forced transparent —
 //!   see `draw_all_elements`'s routing logic in `sdf.rs`.
-//! - **Top-level elements only.** `layer.rs` doesn't pass an
-//!   `SdfShaderContext` at all yet, so shader fills on an SDF node inside
-//!   a `Layer` keep painting flat — consistent with vector.rs's identical
-//!   gap for ordinary shapes inside a `Layer`, not a new limitation.
+//! - **Shapes inside a `Layer` are covered too, now.** `layer.rs` passes
+//!   a real `SdfShaderContext` (the same shader pipeline/composite as the
+//!   top level) rather than `None`, so an SDF node's shader fill executes
+//!   for real inside a `Layer` as well — see `layer.rs`'s module doc.
 //! - **Opacity isn't applied**, same as vector.rs's shader routing (see
 //!   shader.rs's own "known gaps" for why — a uniform-layout change or a
 //!   wrapping composite pass, deferred rather than bolted on here too).
@@ -70,11 +70,14 @@ use crate::target::OffscreenTarget;
 /// Bundles everything `SdfPipeline::draw_all_elements` needs to route a
 /// shader-def-filled node through real WGSL execution instead of the flat
 /// fallback every renderer used unconditionally before this feature
-/// existed. Passing `None` at a call site (`layer.rs` today) is what
-/// keeps that call site on the old flat-fallback behavior — there's no
-/// separate flag to remember, the presence of this context *is* the
-/// on/off switch, same pattern `shader_shapes: Option<&mut Vec<..>>`
-/// already established for vector.rs's own shader routing.
+/// existed. Passing `None` at a call site is what keeps that call site
+/// on the old flat-fallback behavior — there's no separate flag to
+/// remember, the presence of this context *is* the on/off switch, same
+/// pattern `shader_shapes: Option<&mut Vec<..>>` already established for
+/// vector.rs's own shader routing. Both real call sites (`lib.rs`'s
+/// top-level pass and `layer.rs`'s per-layer pass) pass
+/// `Some(&SdfShaderContext {..})` today; `None` only shows up in this
+/// crate's own unit tests now.
 pub(crate) struct SdfShaderContext<'a> {
     pub shader_pipeline: &'a ShaderFillPipeline,
     pub composite: &'a MaskedShaderComposite,
