@@ -4,23 +4,26 @@
 //! position pre-transformed into WebGPU clip space on the CPU side.
 //!
 //! `tessellate_elements` is the actual workhorse now — `tessellate_scene`
-//! is a thin wrapper over it. `layer.rs` calls `tessellate_elements`
-//! directly (scoped to just one layer's children) to render that layer
-//! into its own isolated buffer.
+//! is a thin wrapper over it. It stays public and unchanged (flat
+//! geometry in, flat geometry out) so nothing outside this crate that
+//! might already depend on that shape breaks.
 //!
 //! `tessellate_scene_with_shaders` is a separate, `pub(crate)`-only
-//! sibling of `tessellate_scene` used exclusively by `lib.rs`'s top-level
-//! render path: it additionally pulls out any shape whose *fill*
-//! resolves to a `Def::Shader` into its own collection (see
-//! `shader.rs::PendingShaderShape`) instead of baking a flat color for
-//! it. Kept deliberately separate from the crate's public
-//! `tessellate_scene`/`tessellate_elements` (both re-exported from
-//! `lib.rs`) rather than changing their signatures — those stay flat
-//! geometry in, flat geometry out, so nothing outside this crate that
-//! might already depend on that shape breaks, and `layer.rs` keeps
-//! calling the plain, unchanged `tessellate_elements` (shader fills
-//! inside a `Layer` intentionally still paint flat — see `shader.rs`'s
-//! module doc for why that's scoped out for now, not an oversight).
+//! sibling of `tessellate_scene` used by `lib.rs`'s top-level render
+//! path: it additionally pulls out any shape whose *fill* resolves to a
+//! `Def::Shader` into its own collection (see `shader.rs::PendingShaderShape`)
+//! instead of baking a flat color for it.
+//!
+//! `tessellate_elements_with_shaders` is the same idea for `layer.rs`:
+//! given one layer's children plus the *real* scene `Defs` (not an empty
+//! one — a `Layer`'s children can reference the same top-level `defs` as
+//! everything else, gradients included), it returns the plain geometry
+//! and the shader-routed shapes separately, exactly like
+//! `tessellate_scene_with_shaders` does for the whole scene. `layer.rs`
+//! used to call the plain `tessellate_elements` with an empty `Defs`,
+//! which is why shader fills (and gradient/`Paint::Ref` fills in general)
+//! silently painted flat for anything inside a `Layer` — both are fixed
+//! by this same change, not two separate ones.
 
 use std::collections::HashMap;
 
@@ -104,14 +107,33 @@ pub(crate) fn tessellate_scene_with_shaders(scene: &Scene) -> (VectorGeometry, V
     (geometry, shader_shapes)
 }
 
-/// Entry point for `layer.rs`: tessellate just one layer's children,
-/// with their own local `Defs`/`ElementIndex` (cross-boundary `use`/
-/// gradient-ref resolution into the outer scene isn't supported — see
-/// `layer.rs`'s module doc).
+/// Public, unchanged entry point: tessellate a set of elements with an
+/// empty `Defs` (no gradient/shader-ref resolution) and no shader-shape
+/// collection. Kept exactly as it was for any external caller that
+/// already depends on this shape; `layer.rs` uses
+/// `tessellate_elements_with_shaders` below instead.
 pub fn tessellate_elements(elements: &[Element], base_transform: Matrix2D, canvas: (f32, f32)) -> VectorGeometry {
     let defs = Defs::build(&[]);
     let index = ElementIndex::build(elements);
     tessellate_elements_with(elements, base_transform, canvas, &defs, &index, None)
+}
+
+/// `layer.rs`'s shader-aware entry point: tessellate one layer's children
+/// against the *real* scene `defs` the caller passes in (so gradient and
+/// shader-def refs on shapes inside a `Layer` resolve exactly like they
+/// do for top-level shapes), and collect any shape whose fill resolves
+/// to a `Def::Shader` separately, exactly like
+/// `tessellate_scene_with_shaders` does for a whole `Scene`.
+pub(crate) fn tessellate_elements_with_shaders(
+    elements: &[Element],
+    base_transform: Matrix2D,
+    canvas: (f32, f32),
+    defs: &Defs,
+) -> (VectorGeometry, Vec<PendingShaderShape>) {
+    let index = ElementIndex::build(elements);
+    let mut shader_shapes = Vec::new();
+    let geometry = tessellate_elements_with(elements, base_transform, canvas, defs, &index, Some(&mut shader_shapes));
+    (geometry, shader_shapes)
 }
 
 fn tessellate_elements_with(
@@ -220,13 +242,14 @@ fn fill_and_stroke(
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
         // A fill that resolves to a real Def::Shader gets pulled out into
         // its own draw, executed for real by shader.rs — but only when a
-        // collector was actually provided (the top-level scene path via
-        // tessellate_scene_with_shaders). Every other caller
-        // (tessellate_scene, tessellate_elements, and therefore
-        // layer.rs) still has no collector, so shader fills there keep
-        // falling through to the unchanged flat-fallback_color behavior
-        // via paint_to_rgba/average_stop_color below — see this module's
-        // doc comment and shader.rs's "known gaps" for why.
+        // collector was actually provided. Both scene-level render paths
+        // (tessellate_scene_with_shaders) and layer.rs's own path
+        // (tessellate_elements_with_shaders) provide one; only the plain
+        // public tessellate_scene/tessellate_elements — kept unchanged
+        // for any external caller depending on their existing shape —
+        // pass `None`, so shader fills through *those* two specifically
+        // still fall through to the flat-fallback_color behavior via
+        // paint_to_rgba/average_stop_color below.
         //
         // A direct move (not `.as_deref_mut()`) is correct and sufficient
         // here specifically because `shader_shapes` is used exactly once,
@@ -768,12 +791,12 @@ mod shader_routing_tests {
     }
 
     /// The plain, non-shader-aware `tessellate_scene`/`tessellate_elements`
-    /// entry points (what `layer.rs` and any external caller actually
-    /// use) must keep their exact pre-existing behavior: a shader ref
-    /// still resolves via `average_stop_color`'s `fallback_color` path
-    /// and lands in the flat batch, since there's no collector to divert
-    /// it to. This is the "shader fills inside a Layer still paint flat"
-    /// gap, demonstrated directly rather than just asserted in a comment.
+    /// entry points (kept unchanged for any external caller already
+    /// depending on their exact pre-existing shape) must keep flat-filling
+    /// a shader ref via `average_stop_color`'s `fallback_color` path,
+    /// since there's no collector to divert it to. `layer.rs` itself no
+    /// longer uses this path — see `tessellate_elements_with_shaders_diverts_a_shader_ref_into_the_collector`
+    /// below for its actual (shader-aware) behavior now.
     #[test]
     fn plain_tessellate_scene_still_flat_fills_shader_refs_no_collector_available() {
         let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
@@ -784,4 +807,23 @@ mod shader_routing_tests {
 
         assert!(!geometry.vertices.is_empty(), "with no collector, a shader ref must still flat-fill via fallback_color");
     }
+
+    /// `layer.rs` calls `tessellate_elements_with_shaders` now (not the
+    /// plain `tessellate_elements`), passing the *real* scene defs — this
+    /// is the fix for "shader fills inside a Layer paint flat". Proven
+    /// directly here at the tessellation level (no GPU adapter needed):
+    /// a shader-ref shape passed through this function, with a `Defs`
+    /// that actually contains the referenced `Def::Shader`, must land in
+    /// `shader_shapes`, not the flat geometry batch.
+    #[test]
+    fn tessellate_elements_with_shaders_diverts_a_shader_ref_into_the_collector() {
+        let defs_vec = vec![Def::Shader(ShaderDef::new("plasma_1", "shaders/plasma.wgsl", Color::rgb(0x6b, 0x46, 0xff)))];
+        let defs = Defs::build(&defs_vec);
+        let elements = vec![rect(shader_style())];
+
+        let (geometry, shader_shapes) = tessellate_elements_with_shaders(&elements, Matrix2D::identity(), (20.0, 20.0), &defs);
+
+        assert!(geometry.vertices.is_empty(), "a shader-ref shape must NOT land in the flat batch once a collector is available");
+        assert_eq!(shader_shapes.len(), 1, "the shader-ref shape must be diverted into shader_shapes instead");
     }
+                }
