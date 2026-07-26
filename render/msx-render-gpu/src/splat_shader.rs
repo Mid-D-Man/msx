@@ -30,9 +30,10 @@
 //! - **Splats have no stroke concept at all**, so there's no
 //!   `draw_stroke_only`-equivalent needed here — unlike SDF nodes, a
 //!   shader-filled splat has nothing left over to draw separately.
-//! - **Top-level splats only.** `layer.rs` doesn't pass a
-//!   `SplatShaderContext` yet — same gap as SDF nodes and ordinary shapes
-//!   inside a `Layer`.
+//! - **Splats inside a `Layer` are covered too, now.** `layer.rs` passes
+//!   a real `SplatShaderContext` rather than `None`, same as it now does
+//!   for SDF nodes and ordinary vector shapes — see `layer.rs`'s module
+//!   doc.
 //! - **Opacity isn't applied** — the mask-forcing step in `draw_mask`
 //!   overwrites `color` (including its alpha) entirely, so a shader-filled
 //!   splat's `opacity` field is currently inert. Same class of gap as
@@ -139,4 +140,4 @@ pub(crate) fn draw_splat_shader_fill(
             splat_pipeline.draw_instances(device, encoder, view, &[fallback_instance], canvas, wgpu::LoadOp::Load);
         }
     }
-}
+                                          }
