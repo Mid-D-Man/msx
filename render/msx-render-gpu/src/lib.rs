@@ -41,11 +41,14 @@
 //! `layer.rs`'s module doc for why. `Text` is a deliberate no-op
 //! everywhere in this project.
 //!
-//! `shader.rs` executes real WGSL for `Def::Shader` fills on top-level
-//! (non-`Layer`) shapes — see its module doc for the full contract and
-//! the gaps still scoped out (stroke fills, shapes inside a `Layer`,
-//! opacity, and graceful handling of syntactically-invalid-but-readable
-//! WGSL).
+//! `shader.rs` executes real WGSL for `Def::Shader` fills — on both
+//! top-level shapes and shapes inside a `Layer` now (`layer.rs` is given
+//! the real scene `defs` and the same shader pipeline/composite the
+//! top-level path uses; see `layer.rs`'s module doc). See `shader.rs`'s
+//! module doc for the full contract and the gaps still scoped out
+//! (stroke fills, opacity, and graceful handling of
+//! syntactically-invalid-but-readable WGSL — none of these are
+//! Layer-specific, they're gaps everywhere in this crate).
 
 mod context;
 mod layer;
@@ -191,6 +194,11 @@ impl GpuRenderer {
                 &self.vector_pipeline,
                 &self.sdf_pipeline,
                 &self.splat_pipeline,
+                &self.shader_pipeline,
+                &self.masked_shader_composite,
+                &scene.defs,
+                shader_base_dir,
+                time,
             );
         }
 
@@ -208,7 +216,36 @@ impl Renderer for GpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{BlendMode, Canvas, Circle, Color, Element, GaussianSplat, Layer, Paint, Rect, SdfNode, SdfTree, Style};
+    use msx_ast::{BlendMode, Canvas, Circle, Color, Def, Element, GaussianSplat, Layer, Paint, Rect, SdfNode, SdfTree, ShaderDef, Style};
+
+    /// Writes a minimal, deterministic fragment-only WGSL shader (always
+    /// returns solid green, ignores `u.time` entirely) to a fresh file in
+    /// the OS temp dir, following the exact contract `shader.rs`'s module
+    /// doc describes (`Uniforms { time: f32 }` at `@group(0) @binding(0)`,
+    /// `fs_main(@builtin(position) ...) -> @location(0) vec4<f32>`, no
+    /// vertex stage of its own). Solid green is deliberately never used as
+    /// a `fallback_color` in any of these tests, so a passing pixel
+    /// assertion can only mean the real shader ran — a silent fallback
+    /// would read as the def's own (different) fallback color instead.
+    /// `tag` plus a nanosecond timestamp keep concurrently-running tests
+    /// from colliding on the same filename. Returns `(shader_base_dir,
+    /// filename)` — pass the former as `render_with_shader_dir`'s
+    /// `shader_base_dir` and the latter as the `ShaderDef`'s `source_ref`.
+    fn write_solid_green_test_shader(tag: &str) -> (std::path::PathBuf, String) {
+        let wgsl = "\
+struct Uniforms { time: f32 }
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@fragment
+fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+";
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let filename = format!("msx_test_{tag}_{nanos}.wgsl");
+        let dir = std::env::temp_dir();
+        std::fs::write(dir.join(&filename), wgsl).expect("failed to write temp test shader");
+        (dir, filename)
+    }
 
     #[test]
     fn renders_a_filled_rect_if_a_gpu_adapter_is_available() {
@@ -347,4 +384,97 @@ mod tests {
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
         assert_eq!(px[3], 255);
     }
-            }
+
+    /// The core fix this session: `render_layer` used to call the plain
+    /// `tessellate_elements` with an empty `Defs`, so a shader-ref fill on
+    /// a shape inside a `Layer` could never resolve its `Def::Shader` and
+    /// silently painted `fallback_color` instead. Solid green is used
+    /// nowhere else in this test (the def's own `fallback_color` is red)
+    /// specifically so a pass can only mean the real shader executed —
+    /// if this regressed back to the old flat-fallback behavior, this
+    /// test would read red at the center, not green, and fail loudly
+    /// rather than passing by coincidence.
+    #[test]
+    fn layer_shader_fill_executes_for_a_vector_shape_inside_a_layer_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let (shader_dir, filename) = write_solid_green_test_shader("layer_vector");
+
+        let style = Style {
+            fill: Some(Paint::Ref("url(#solid_green)".to_string())),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
+        let rect = Element::Rect(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style });
+        let layer = Layer::new(vec![rect]);
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::Shader(ShaderDef::new("solid_green", filename, Color::rgb(255, 0, 0))));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render_with_shader_dir(&scene, &mut target, &shader_dir, 0.0);
+
+        assert_eq!(target.get_pixel(10, 10), [0, 255, 0, 255], "expected the real shader's solid green, not the def's red fallback_color");
+    }
+
+    /// Same fix, SDF family: `draw_all_elements`'s `Option<&SdfShaderContext>`
+    /// parameter was already fully generic — `render_layer` just always
+    /// passed `None`. Same red-fallback-vs-green-real-shader signal as
+    /// the vector test above.
+    #[test]
+    fn layer_shader_fill_executes_for_an_sdf_node_inside_a_layer_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let (shader_dir, filename) = write_solid_green_test_shader("layer_sdf");
+
+        let sdf_node = SdfNode::new(SdfTree::Circle { cx: 10.0, cy: 10.0, r: 8.0 }, Paint::Ref("url(#solid_green)".to_string()));
+        let layer = Layer::new(vec![Element::Sdf(sdf_node)]);
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::Shader(ShaderDef::new("solid_green", filename, Color::rgb(255, 0, 0))));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render_with_shader_dir(&scene, &mut target, &shader_dir, 0.0);
+
+        assert_eq!(target.get_pixel(10, 10), [0, 255, 0, 255], "expected the real shader's solid green, not the def's red fallback_color");
+    }
+
+    /// Same fix, splat family: `SplatShaderContext` was already fully
+    /// generic in `splat.rs`'s `draw_all_elements` — `render_layer` just
+    /// always passed `None`. `sigma` kept small (5.0) relative to a
+    /// 20x20 canvas so the whole canvas reads solidly whatever color the
+    /// mask+shader+composite technique actually produced, no falloff
+    /// ambiguity at the center pixel checked below.
+    #[test]
+    fn layer_shader_fill_executes_for_a_splat_inside_a_layer_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let (shader_dir, filename) = write_solid_green_test_shader("layer_splat");
+
+        let mut splat = GaussianSplat::new(10.0, 10.0, 5.0, 5.0, Color::rgb(30, 200, 120), 1.0);
+        splat.fill = Some(Paint::Ref("url(#solid_green)".to_string()));
+        let layer = Layer::new(vec![Element::Splat(splat)]);
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.defs.push(Def::Shader(ShaderDef::new("solid_green", filename, Color::rgb(255, 0, 0))));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render_with_shader_dir(&scene, &mut target, &shader_dir, 0.0);
+
+        assert_eq!(target.get_pixel(10, 10), [0, 255, 0, 255], "expected the real shader's solid green, not the def's red fallback_color");
+    }
+}
