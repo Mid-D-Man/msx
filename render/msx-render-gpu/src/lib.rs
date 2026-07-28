@@ -455,6 +455,34 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     /// 20x20 canvas so the whole canvas reads solidly whatever color the
     /// mask+shader+composite technique actually produced, no falloff
     /// ambiguity at the center pixel checked below.
+    ///
+    /// This test also caught a second, independent bug while it was
+    /// being written: `LayerCompositor::composite` was blending the
+    /// (implicitly premultiplied-alpha — see `layer.rs`'s module doc)
+    /// layer buffer with non-premultiplied `ALPHA_BLENDING`, silently
+    /// darkening any partial-alpha pixel via a double alpha
+    /// multiplication. Every earlier GPU-adapter test in this file
+    /// happened to sample a pixel with source alpha exactly 1.0 (dead
+    /// center of an opaque fill, or well inside an SDF/vector shape's
+    /// antialiased-free interior), where premultiplied and
+    /// non-premultiplied reads are numerically identical — invisible
+    /// there. A splat is different: pixel (10, 10)'s fragment is
+    /// evaluated at its *pixel center*, continuous position (10.5, 10.5)
+    /// under wgpu's (and D3D/Vulkan/Metal's) standard rasterization
+    /// convention — 0.5px off this splat's mathematical center at world
+    /// (10.0, 10.0) — so its true coverage is `exp(-0.5² / (2·5²)) ≈
+    /// 0.9901`, never exactly 1.0 no matter how the compositing is done.
+    /// Now fixed (see `layer.rs`'s `LayerCompositor::new` and
+    /// `composite.wgsl`), that ~0.99 survives as ~0.99 instead of being
+    /// squared to ~0.977 (255 vs. the 249 this test used to fail with).
+    /// Still not exactly 255 — a continuous Gaussian sampled off its
+    /// exact peak fundamentally can't be — so red/blue/alpha are checked
+    /// exactly (unaffected by any of this: they're either always 0 or,
+    /// for alpha, algebraically exact — see the composite math in
+    /// `layer.rs`) while green gets a tolerance loose enough to fail
+    /// loudly if the old double-multiplication regresses (249 is well
+    /// outside it) but tight enough to mean "the real shader ran, at
+    /// very close to full coverage," not just "something green happened."
     #[test]
     fn layer_shader_fill_executes_for_a_splat_inside_a_layer_if_a_gpu_adapter_is_available() {
         let Ok(renderer) = GpuRenderer::new() else {
@@ -475,6 +503,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let mut target = RenderTarget::new(20, 20);
         renderer.render_with_shader_dir(&scene, &mut target, &shader_dir, 0.0);
 
-        assert_eq!(target.get_pixel(10, 10), [0, 255, 0, 255], "expected the real shader's solid green, not the def's red fallback_color");
+        let px = target.get_pixel(10, 10);
+        assert_eq!([px[0], px[2], px[3]], [0, 0, 255], "expected zero red/blue and full alpha, got {:?}", px);
+        assert!(px[1] > 250, "expected very close to the real shader's solid green (not the def's red fallback_color, and not the pre-fix double-alpha-darkened ~249), got {:?}", px);
     }
-}
+    }
