@@ -39,6 +39,19 @@
 //! `None` from here. Opacity-on-shader-output and stroke-shader-fills
 //! remain out of scope everywhere in this crate, Layer or not — see
 //! `shader.rs`'s module doc.
+//!
+//! ## The layer buffer is premultiplied alpha
+//!
+//! `render_layer`'s offscreen `buffer` starts fully transparent and every
+//! child draw into it blends translucently — which unavoidably leaves it
+//! holding `rgb = true_color * true_alpha`, the same result "premultiplied
+//! alpha" storage would produce on purpose, regardless of which blend
+//! state any individual child draw used. `LayerCompositor::composite`
+//! (below) and `composite.wgsl` treat it accordingly
+//! (`PREMULTIPLIED_ALPHA_BLENDING`, and scaling `rgb` by `opacity` too,
+//! not just `a`) — see `composite`'s own doc comment and `composite.wgsl`
+//! for the full reasoning and the real (now-fixed) darkening bug this
+//! used to cause for any partial-alpha pixel.
 
 use wgpu::util::DeviceExt;
 
@@ -150,7 +163,32 @@ impl LayerCompositor {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // PREMULTIPLIED, not plain `ALPHA_BLENDING` — the
+                    // layer buffer this pipeline reads from is itself the
+                    // product of blending translucent draws onto a
+                    // transparent-cleared texture, which always leaves it
+                    // holding `rgb = true_color * true_alpha` regardless
+                    // of what any individual child draw's own blend state
+                    // was. `ALPHA_BLENDING` (non-premultiplied) would
+                    // multiply that already-premultiplied rgb by alpha a
+                    // SECOND time here — a real bug that shipped
+                    // undetected because every test before
+                    // `layer_shader_fill_executes_for_a_splat_inside_a_layer`
+                    // happened to sample a pixel with source alpha exactly
+                    // 1.0, where premultiplied and non-premultiplied
+                    // reads are numerically identical and the bug is
+                    // invisible. A Gaussian splat's naturally-partial
+                    // coverage (alpha < 1.0 almost everywhere, even at
+                    // its rendered "center" — see that test's own doc
+                    // comment) was the first thing to actually exercise
+                    // this path with alpha < 1.0 in the buffer, and
+                    // caught it as a visibly wrong (too dark) pixel.
+                    // `composite.wgsl`'s `fs_main` is the other half of
+                    // this fix — it scales `sample.rgb` by `opacity` too,
+                    // not just `sample.a`, so the premultiplied invariant
+                    // survives the layer's own opacity attenuation before
+                    // reaching this blend stage.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -257,6 +295,14 @@ impl LayerCompositor {
         self.composite(device, queue, view, &buffer.view, layer.opacity as f32);
     }
 
+    /// Blends `src_view` (a fully-rendered layer buffer — see this
+    /// module's "The layer buffer is premultiplied alpha" doc section)
+    /// onto `dst_view` at `opacity`. Requires `src_view`'s contents to
+    /// already be premultiplied alpha; this function does not itself
+    /// premultiply anything, it only preserves the invariant through the
+    /// opacity scale (`composite.wgsl`) and blends accordingly
+    /// (`PREMULTIPLIED_ALPHA_BLENDING`, set at pipeline-creation time in
+    /// `new` above).
     fn composite(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, src_view: &wgpu::TextureView, opacity: f32) {
         let params = CompositeParams { opacity, _pad: [0.0; 7] };
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
