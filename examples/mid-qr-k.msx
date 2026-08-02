@@ -7,7 +7,7 @@
 )
 
 @DATA(
-  scene: { width = 400.000, height = 400.000, background = "none" }
+  scene = { width = 400.000, height = 400.000, background = "none" }
 
   elements::
     { type = "rect", x = 0.000, y = 0.000, width = 400.000, height = 400.000, style = { fill = #ffffff } }

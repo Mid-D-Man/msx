@@ -194,6 +194,55 @@ fn layer_opacity_field_is_multiplied_directly() {
 }
 
 #[test]
+fn layer_z_index_field_is_overridden_not_composed() {
+    // Contrast with opacity above: a static z_index of 5.0 plus a
+    // "z_index" track evaluating to 2.0 must land on exactly 2.0, not
+    // 5.0*2.0 or 5.0+2.0 — z_index is a sort key, not a delta.
+    let mut layer = Layer::new(vec![]).with_z_index(5.0);
+    layer.id = Some("fx".into());
+
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Layer(layer));
+    scene.duration = 1.0;
+    scene.animations.push(track(
+        "fx",
+        AnimatedProperty::ZIndex,
+        vec![Keyframe::linear(0.0, 2.0), Keyframe::linear(1.0, 2.0)],
+    ));
+
+    let resolved = resolve_at_time(&scene, 0.0);
+    match &resolved.elements[0] {
+        Element::Layer(l) => assert!((l.z_index - 2.0).abs() < 1e-6, "expected override to 2.0, got {}", l.z_index),
+        _ => panic!("expected Layer"),
+    }
+}
+
+#[test]
+fn layer_z_index_is_untouched_without_a_track() {
+    // The other half of the override-not-compose contract: no "z_index"
+    // track at all must leave the static value exactly as authored, not
+    // fall back to some identity/neutral number (there isn't one for a
+    // sort key — see AnimatedDelta::z_index's doc).
+    let mut layer = Layer::new(vec![]).with_z_index(3.5);
+    layer.id = Some("fx".into());
+
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Layer(layer));
+    scene.duration = 1.0;
+    scene.animations.push(track(
+        "fx",
+        AnimatedProperty::Opacity,
+        vec![Keyframe::linear(0.0, 1.0), Keyframe::linear(1.0, 1.0)],
+    ));
+
+    let resolved = resolve_at_time(&scene, 0.0);
+    match &resolved.elements[0] {
+        Element::Layer(l) => assert!((l.z_index - 3.5).abs() < 1e-6, "expected untouched 3.5, got {}", l.z_index),
+        _ => panic!("expected Layer"),
+    }
+}
+
+#[test]
 fn splat_fields_are_updated_directly_since_it_has_no_transform() {
     let mut splat = GaussianSplat::circle(50.0, 50.0, 20.0, Color::WHITE, 1.0);
     splat.id = Some("blob".into());

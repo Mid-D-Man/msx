@@ -1,8 +1,8 @@
 // core/msx-anim/src/delta.rs
-//! `AnimatedDelta` — the six animatable channels (TranslateX/Y, ScaleX/Y,
-//! Rotate, Opacity) evaluated at a single point in time and reduced to one
-//! value per channel, ready to fold onto an element's existing static
-//! state.
+//! `AnimatedDelta` — the seven animatable channels (TranslateX/Y, ScaleX/Y,
+//! Rotate, Opacity, ZIndex) evaluated at a single point in time and
+//! reduced to one value per channel, ready to fold onto an element's
+//! existing static state.
 
 use msx_ast::{AnimatedProperty, AnimationTrack, Matrix2D, Transform};
 
@@ -17,12 +17,23 @@ pub struct AnimatedDelta {
     /// Degrees — matches `AnimatedProperty::Rotate`'s doc convention.
     pub rotate:      f64,
     pub opacity:     f64,
+    /// `None` when no track targets this channel — leave the element's
+    /// existing static `z_index` alone. `Some(v)` overrides it to `v`
+    /// outright. Deliberately *not* folded into the plain-`f64`-with-
+    /// identity-value model the other six channels share: z-index is a
+    /// sort key, not something additive/multiplicative composition makes
+    /// sense for, and "untouched" and "keyframed to 0.0" need to stay
+    /// distinguishable — a plain `f64` defaulting to 0.0 can't tell those
+    /// apart, `Option<f64>` can.
+    pub z_index:     Option<f64>,
 }
 
 impl Default for AnimatedDelta {
     /// Every channel starts at its `AnimatedProperty::identity_value()` —
     /// a target with only some of its properties animated must leave the
     /// untouched ones inert (0 translate/rotate, 1 scale/opacity).
+    /// `z_index` starts at `None` (see its own doc) rather than going
+    /// through `identity_value()` at all.
     fn default() -> Self {
         AnimatedDelta {
             translate_x: AnimatedProperty::TranslateX.identity_value(),
@@ -31,6 +42,7 @@ impl Default for AnimatedDelta {
             scale_y:     AnimatedProperty::ScaleY.identity_value(),
             rotate:      AnimatedProperty::Rotate.identity_value(),
             opacity:     AnimatedProperty::Opacity.identity_value(),
+            z_index:     None,
         }
     }
 }
@@ -57,6 +69,7 @@ impl AnimatedDelta {
             AnimatedProperty::ScaleY     => self.scale_y = value,
             AnimatedProperty::Rotate     => self.rotate = value,
             AnimatedProperty::Opacity    => self.opacity = value,
+            AnimatedProperty::ZIndex     => self.z_index = Some(value),
         }
     }
 
@@ -69,6 +82,7 @@ impl AnimatedDelta {
             && (self.scale_y - 1.0).abs() < EPSILON
             && self.rotate.abs() < EPSILON
             && (self.opacity - 1.0).abs() < EPSILON
+            && self.z_index.is_none()
     }
 
     /// TRS matrix for this delta alone, standard scale→rotate→translate

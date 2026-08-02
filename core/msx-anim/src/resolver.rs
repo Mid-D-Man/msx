@@ -121,6 +121,12 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
         Element::Layer(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             e.opacity *= delta.opacity;
+            // Override, not compose — see `AnimatedDelta::z_index`'s own
+            // doc for why this one channel doesn't go through the same
+            // multiplicative model `opacity` just did two lines up.
+            if let Some(z) = delta.z_index {
+                e.z_index = z;
+            }
         }
     }
 }

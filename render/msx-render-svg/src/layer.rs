@@ -29,7 +29,7 @@ pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer, defs: &[Def]) {
     }
 
     ctx.push(">");
-    for child in &layer.children {
+    for child in msx_ast::layer_reordered(&layer.children) {
         render_element(ctx, child, defs);
     }
     ctx.push("</g>");

@@ -87,6 +87,13 @@ pub enum AnimatedProperty {
     /// Degrees, around local-space origin (0,0).
     Rotate,
     Opacity,
+    /// `Layer`-only today (see `Layer::z_index`'s own doc). Composes as a
+    /// plain override, not additive/multiplicative like every other
+    /// channel here — see `msx-anim`'s `AnimatedDelta` for why that
+    /// makes `identity_value()` below a nominal placeholder for this one
+    /// variant rather than a real neutral value ever folded through the
+    /// usual per-channel arithmetic.
+    ZIndex,
 }
 
 impl AnimatedProperty {
@@ -98,6 +105,7 @@ impl AnimatedProperty {
             AnimatedProperty::ScaleY     => 3,
             AnimatedProperty::Rotate     => 4,
             AnimatedProperty::Opacity    => 5,
+            AnimatedProperty::ZIndex     => 6,
         }
     }
 
@@ -109,6 +117,7 @@ impl AnimatedProperty {
             3 => Some(AnimatedProperty::ScaleY),
             4 => Some(AnimatedProperty::Rotate),
             5 => Some(AnimatedProperty::Opacity),
+            6 => Some(AnimatedProperty::ZIndex),
             _ => None,
         }
     }
@@ -121,6 +130,7 @@ impl AnimatedProperty {
             "scale_y"     => Some(AnimatedProperty::ScaleY),
             "rotate"      => Some(AnimatedProperty::Rotate),
             "opacity"     => Some(AnimatedProperty::Opacity),
+            "z_index"     => Some(AnimatedProperty::ZIndex),
             _             => None,
         }
     }
@@ -133,11 +143,21 @@ impl AnimatedProperty {
             AnimatedProperty::ScaleY     => "scale_y",
             AnimatedProperty::Rotate     => "rotate",
             AnimatedProperty::Opacity    => "opacity",
+            AnimatedProperty::ZIndex     => "z_index",
         }
     }
 
     /// The value an unanimated channel implicitly has — 1.0 for scale/opacity
     /// (neutral state), 0.0 for everything else.
+    ///
+    /// `ZIndex` returns 0.0 here purely to keep this a total function —
+    /// it's never actually consulted for `ZIndex` in practice.
+    /// `AnimatedDelta` (msx-anim) special-cases `ZIndex` as an
+    /// `Option<f64>` override rather than routing it through this
+    /// identity-then-compose model every additive/multiplicative channel
+    /// uses, because "no keyframe touched this" and "keyframed to
+    /// exactly 0.0" are different, both-meaningful states for a sort key
+    /// in a way they aren't for a translate/rotate/scale/opacity delta.
     pub fn identity_value(self) -> f64 {
         match self {
             AnimatedProperty::ScaleX | AnimatedProperty::ScaleY | AnimatedProperty::Opacity => 1.0,
@@ -311,6 +331,7 @@ mod tests {
             AnimatedProperty::TranslateX, AnimatedProperty::TranslateY,
             AnimatedProperty::ScaleX,     AnimatedProperty::ScaleY,
             AnimatedProperty::Rotate,     AnimatedProperty::Opacity,
+            AnimatedProperty::ZIndex,
         ];
         for p in all {
             assert_eq!(AnimatedProperty::from_byte(p.to_byte()), Some(p));
@@ -326,6 +347,15 @@ mod tests {
         assert_eq!(AnimatedProperty::TranslateX.identity_value(), 0.0);
         assert_eq!(AnimatedProperty::TranslateY.identity_value(), 0.0);
         assert_eq!(AnimatedProperty::Rotate.identity_value(),    0.0);
+        // Nominal only — see identity_value's own doc. ZIndex never
+        // actually routes through this value at runtime.
+        assert_eq!(AnimatedProperty::ZIndex.identity_value(),    0.0);
+    }
+
+    #[test]
+    fn z_index_parse_and_dixscript_str_roundtrip() {
+        assert_eq!(AnimatedProperty::parse("z_index"), Some(AnimatedProperty::ZIndex));
+        assert_eq!(AnimatedProperty::ZIndex.to_dixscript_str(), "z_index");
     }
 
     #[test]

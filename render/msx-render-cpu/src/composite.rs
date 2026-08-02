@@ -24,7 +24,7 @@ pub fn render_layer(pixmap: &mut Pixmap, layer: &Layer, parent: Matrix2D, defs: 
 
     let Some(mut buffer) = Pixmap::new(pixmap.width(), pixmap.height()) else { return };
 
-    for child in &layer.children {
+    for child in msx_ast::layer_reordered(&layer.children) {
         render_element(&mut buffer, child, combined, defs, index);
     }
 

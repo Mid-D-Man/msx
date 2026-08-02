@@ -7,7 +7,7 @@ use crate::element::parse_elements;
 use crate::transform::parse_transform;
 
 /// `{ type = "layer", blend_mode<enum> = BlendMode.Multiply (or "multiply"),
-///    opacity=0.75, clip=true, effects=[...], elements=[...] }`
+///    opacity=0.75, z_index=1.0, clip=true, effects=[...], elements=[...] }`
 pub fn parse_layer(data: &DixData, prefix: &str) -> Result<Layer, String> {
     let id = opt::<String>(data, prefix, "id")?;
     let transform = parse_transform(data, prefix)?;
@@ -18,6 +18,7 @@ pub fn parse_layer(data: &DixData, prefix: &str) -> Result<Layer, String> {
     layer.transform = transform;
     layer.blend_mode = parse_blend_mode(data, prefix)?.unwrap_or_default();
     layer.opacity = opt::<f64>(data, prefix, "opacity")?.unwrap_or(1.0);
+    layer.z_index = opt::<f64>(data, prefix, "z_index")?.unwrap_or(0.0);
     layer.clip = opt::<bool>(data, prefix, "clip")?.unwrap_or(false);
     layer.effects = parse_effects(data, prefix, "effects")?;
 

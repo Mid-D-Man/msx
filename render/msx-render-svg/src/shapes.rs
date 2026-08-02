@@ -110,7 +110,7 @@ pub(crate) fn render_group(ctx: &mut Ctx, g: &Group, defs: &[Def]) {
         write_style(ctx, style);
     }
     ctx.push(">");
-    for child in &g.children {
+    for child in msx_ast::layer_reordered(&g.children) {
         render_element(ctx, child, defs);
     }
     ctx.push("</g>");

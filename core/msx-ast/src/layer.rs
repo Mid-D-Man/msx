@@ -97,6 +97,17 @@ pub struct Layer {
     pub effects:    Vec<Effect>,
     pub id:         Option<String>,
     pub transform:  Option<Transform>,
+    /// Paint order among sibling top-level Layers — higher draws later
+    /// (i.e. on top), ties broken by document order (a stable sort, same
+    /// tie-break convention as CSS `z-index`). Purely relative: only
+    /// compared against other Layers, not against ordinary (non-Layer)
+    /// elements — those still always draw before every Layer regardless
+    /// of z_index, see this crate's renderer-side module docs for why
+    /// that's a separate, larger gap this field doesn't attempt to close.
+    /// Animatable via `AnimatedProperty::ZIndex` — see `core/msx-anim`'s
+    /// `AnimatedDelta` for why it composes as a plain override rather
+    /// than the additive/multiplicative model every other channel uses.
+    pub z_index:    f64,
 }
 
 impl Layer {
@@ -109,10 +120,125 @@ impl Layer {
             effects:    Vec::new(),
             id:         None,
             transform:  None,
+            z_index:    0.0,
         }
     }
 
-    pub fn with_blend(mut self, mode: BlendMode) -> Self { self.blend_mode = mode; self }
-    pub fn with_opacity(mut self, op: f64)        -> Self { self.opacity = op; self }
-    pub fn with_effect(mut self, fx: Effect)      -> Self { self.effects.push(fx); self }
+    pub fn with_blend(mut self, mode: BlendMode)   -> Self { self.blend_mode = mode; self }
+    pub fn with_opacity(mut self, op: f64)          -> Self { self.opacity = op; self }
+    pub fn with_effect(mut self, fx: Effect)        -> Self { self.effects.push(fx); self }
+    pub fn with_z_index(mut self, z: f64)           -> Self { self.z_index = z; self }
   }
+
+/// Returns `elements` in the order a renderer should actually draw them:
+/// every non-`Layer` element stays in its original slot, but the *set*
+/// of `Layer`-occupied slots gets refilled with those same Layers
+/// stable-sorted by `z_index` (ties keep their original relative order —
+/// same tie-break convention CSS `z-index` uses).
+///
+/// Deliberately scoped to exactly this one slice, not the whole element
+/// tree: a `Layer` only reorders relative to its *immediate* siblings in
+/// `elements`, the same list a caller would otherwise have iterated
+/// directly. `msx-render-cpu` and `msx-render-svg` both recurse through
+/// `Group` children with plain per-element dispatch (unlike
+/// `msx-render-gpu`, which flattens every `Layer` anywhere in the tree —
+/// including ones nested inside `Group`s — into one global pass; see
+/// that crate's `layer::collect_layers`), so calling this once per
+/// sibling list — `Scene::elements` itself, and again inside every
+/// `Group::children` — gives each renderer the right per-level ordering
+/// without needing to know about tree depth at all. For the common case
+/// this whole feature was built for (two-plus top-level Layers, no
+/// Groups involved), sibling-scoped and global agree exactly; they can
+/// only differ once Layers at *different* nesting depths compare
+/// `z_index` against each other, which sibling-scoping deliberately
+/// treats as out of scope rather than guessing at a global order Groups
+/// were never designed to participate in.
+///
+/// A single Layer (or none) short-circuits without allocating a sorted
+/// copy, since there's nothing to reorder relative to.
+pub fn layer_reordered(elements: &[Element]) -> Vec<&Element> {
+    let mut out: Vec<&Element> = elements.iter().collect();
+
+    let layer_slots: Vec<usize> = elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, Element::Layer(_)).then_some(i))
+        .collect();
+    if layer_slots.len() <= 1 {
+        return out;
+    }
+
+    let mut layers_by_z: Vec<&Element> = layer_slots.iter().map(|&i| &elements[i]).collect();
+    layers_by_z.sort_by(|a, b| {
+        let za = if let Element::Layer(l) = a { l.z_index } else { 0.0 };
+        let zb = if let Element::Layer(l) = b { l.z_index } else { 0.0 };
+        za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for (slot, sorted_layer) in layer_slots.into_iter().zip(layers_by_z) {
+        out[slot] = sorted_layer;
+    }
+    out
+}
+
+#[cfg(test)]
+mod layer_reorder_tests {
+    use super::*;
+    use crate::element::Element;
+
+    fn layer_with(id: &str, z: f64) -> Element {
+        let mut l = Layer::new(vec![]).with_z_index(z);
+        l.id = Some(id.to_string());
+        Element::Layer(l)
+    }
+
+    fn id_of(e: &Element) -> &str {
+        match e {
+            Element::Layer(l) => l.id.as_deref().unwrap(),
+            _ => panic!("expected Layer"),
+        }
+    }
+
+    #[test]
+    fn zero_or_one_layer_is_returned_unchanged() {
+        let elements = vec![layer_with("only", 5.0)];
+        let out = layer_reordered(&elements);
+        assert_eq!(out.len(), 1);
+        assert_eq!(id_of(out[0]), "only");
+    }
+
+    #[test]
+    fn two_layers_reorder_by_z_index_regardless_of_document_order() {
+        // "front" is defined first (would paint under "back" in plain
+        // document order) but has the higher z_index, so it must end up
+        // in the later slot instead.
+        let elements = vec![layer_with("front", 5.0), layer_with("back", 1.0)];
+        let out = layer_reordered(&elements);
+        assert_eq!(id_of(out[0]), "back");
+        assert_eq!(id_of(out[1]), "front");
+    }
+
+    #[test]
+    fn equal_z_index_keeps_original_document_order() {
+        let elements = vec![layer_with("a", 3.0), layer_with("b", 3.0), layer_with("c", 3.0)];
+        let out = layer_reordered(&elements);
+        assert_eq!([id_of(out[0]), id_of(out[1]), id_of(out[2])], ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn non_layer_elements_keep_their_exact_slots() {
+        use crate::{Rect, Style};
+        let rect_a = Element::Rect(Rect::new(0.0, 0.0, 1.0, 1.0, Style::default()));
+        let rect_b = Element::Rect(Rect::new(0.0, 0.0, 2.0, 2.0, Style::default()));
+        let elements = vec![rect_a, layer_with("front", 9.0), rect_b, layer_with("back", 0.0)];
+
+        let out = layer_reordered(&elements);
+        assert!(matches!(out[0], Element::Rect(r) if r.width == 1.0), "slot 0 (non-layer) must be untouched");
+        assert!(matches!(out[2], Element::Rect(r) if r.width == 2.0), "slot 2 (non-layer) must be untouched");
+        // The two layer slots (1 and 3) swap to reflect z_index: "back"
+        // (z=0.0) now sits where "front" (z=9.0, document-first) was,
+        // and vice versa.
+        assert_eq!(id_of(out[1]), "back");
+        assert_eq!(id_of(out[3]), "front");
+    }
+}

@@ -94,7 +94,7 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
 fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
     let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
     let combined = parent.concat(local);
-    for child in &g.children {
+    for child in msx_ast::layer_reordered(&g.children) {
         render_element(pixmap, child, combined, defs, index);
     }
     // `g.style` (inheritable style applied to all children) isn't pushed

@@ -180,9 +180,20 @@ impl GpuRenderer {
         self.context.queue.submit(std::iter::once(encoder.finish()));
 
         // Pass 2: every top-level Layer, composited on top — see
-        // layer.rs's module doc for the document-order caveat.
+        // layer.rs's module doc for the document-order caveat that still
+        // applies between Layers and non-Layer content (this sort only
+        // reorders Layers *relative to each other*, nothing else moves
+        // relative to this whole pass).
         let mut layers = Vec::new();
         layer::collect_layers(&scene.elements, Matrix2D::identity(), &mut layers);
+        // Stable sort — ties (including the common case of no one
+        // setting z_index, every Layer at its 0.0 default) keep
+        // `collect_layers`'s original document order exactly, same
+        // tie-break convention CSS `z-index` uses. `partial_cmp`'s
+        // `unwrap_or(Equal)` only matters for a NaN z_index (from a
+        // malformed animation track's evaluated value); anything sane
+        // never hits that arm.
+        layers.sort_by(|a, b| a.0.z_index.partial_cmp(&b.0.z_index).unwrap_or(std::cmp::Ordering::Equal));
         for (layer, transform) in &layers {
             self.layer_compositor.render_layer(
                 &self.context.device,

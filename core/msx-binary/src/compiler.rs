@@ -320,6 +320,11 @@ fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     for fx in &e.effects { write_effect(out, fx); }
     write_u32(out, e.children.len() as u32);
     for child in &e.children { encode_element(child, out, pool); }
+    // z_index: added after every pre-existing field, same "new field
+    // goes at the end" convention `fill` follows above for Sdf/Splat —
+    // a breaking wire-format change either way (no external readers of
+    // this format exist yet), but costs nothing to keep consistent.
+    write_f32(out, e.z_index);
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
@@ -433,6 +438,7 @@ mod tests {
         let layer = Layer::new(vec![])
             .with_blend(BlendMode::Multiply)
             .with_opacity(0.75)
+            .with_z_index(2.5)
             .with_effect(Effect::Blur { radius: 8.0 });
         scene.elements.push(Element::Layer(layer));
 
@@ -445,6 +451,7 @@ mod tests {
         if let Element::Layer(l) = &decoded.elements[2] {
             assert_eq!(l.blend_mode, BlendMode::Multiply);
             assert!((l.opacity - 0.75).abs() < 1e-3);
+            assert!((l.z_index - 2.5).abs() < 1e-3);
             assert_eq!(l.effects.len(), 1);
         } else {
             panic!("expected Layer");

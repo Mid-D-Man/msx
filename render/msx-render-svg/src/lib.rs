@@ -39,7 +39,10 @@ impl Ctx {
 pub fn render(scene: &Scene) -> String {
     let mut ctx = Ctx { out: String::new(), extra_defs: String::new(), counter: 0 };
 
-    for el in &scene.elements {
+    // `layer_reordered`, not `&scene.elements` directly — see its own
+    // doc for exactly what this does and doesn't reorder (sibling-
+    // scoped by `z_index`, non-Layer elements untouched).
+    for el in msx_ast::layer_reordered(&scene.elements) {
         render_element(&mut ctx, el, &scene.defs);
     }
 
@@ -230,6 +233,30 @@ mod tests {
         assert!(svg.contains(r#"opacity="0.5""#));
         assert!(svg.contains("<filter"));
         assert!(svg.contains("feGaussianBlur"));
+    }
+
+    #[test]
+    fn z_index_reorders_emitted_g_elements_not_just_data() {
+        // "front" is authored first (would emit its <g> first, and so
+        // paint underneath, under plain SVG document order) but carries
+        // the higher z_index — it must come out AFTER "back" in the
+        // actual emitted markup, since in SVG paint order IS document
+        // order: this is the one renderer where "reordered before
+        // rendering" and "reordered in the output" are the same check.
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        let mut front = Layer::new(vec![]);
+        front.id = Some("front".into());
+        front.z_index = 5.0;
+        let mut back = Layer::new(vec![]);
+        back.id = Some("back".into());
+        back.z_index = 1.0;
+        scene.elements.push(Element::Layer(front));
+        scene.elements.push(Element::Layer(back));
+
+        let svg = render(&scene);
+        let back_pos = svg.find(r#"id="back""#).expect("back layer missing from output");
+        let front_pos = svg.find(r#"id="front""#).expect("front layer missing from output");
+        assert!(back_pos < front_pos, "z_index=1.0 (\"back\") must be emitted before z_index=5.0 (\"front\"), got svg: {svg}");
     }
 
     #[test]

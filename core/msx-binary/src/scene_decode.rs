@@ -301,7 +301,10 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             for _ in 0..child_count {
                 children.push(decode_element(data, cursor, pool)?);
             }
-            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, effects, id, transform }))
+            // z_index: see encode_layer's own comment — added after
+            // every pre-existing field, same convention as `fill`.
+            let z_index = read_f32(data, cursor)?;
+            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, effects, id, transform, z_index }))
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
