@@ -35,6 +35,20 @@
 // which is GPU-only (mask+color+composite is a GPU-renderer technique;
 // CPU/SVG already handled Layer children's shapes correctly, gradients
 // included, before this session).
+//
+// FIXED: the `elements = [...]` array below originally had no commas
+// between its six child object literals. DixScript's own grammar doc
+// (dixscript/.../data_section_parser.rs) is explicit that commas are
+// optional only for the top-level `defs::`/`elements::` block sugar —
+// a plain bracketed `[...]` array literal (this one, and `uniforms =
+// [...]` a few lines up, which *did* have its commas right) requires
+// them, hard error otherwise ("Expected ',' or ']' in array literal").
+// That parse failure took both `msx compile` and `msx render` down for
+// this file specifically, which is why it never appeared on the Pages
+// report at all (not error-badged — `examples.json` only lists stems
+// that produced an SVG; a parse failure produces neither compile nor
+// render output, so the file was just silently absent from every build
+// since it was added).
 @CONFIG( version -> "1.0.0" )
 @DATA(
   scene = { width = 300, height = 630, background = #14141c }
@@ -50,9 +64,9 @@
       elements = [
         // Row 1 (y=100): ordinary vector rects.
         { type = "rect", x = 50, y = 65, width = 70, height = 70,
-          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } },
         { type = "rect", x = 170, y = 65, width = 70, height = 70,
-          style = { fill = "url(#checker_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+          style = { fill = "url(#checker_1)", stroke = "none", stroke_width = 0, opacity = 1.0 } },
 
         // Row 2 (y=310): SDF smooth_union blobs — same tree shape as
         // sdf_shader_fill.msx, just relocated into this file's grid and
@@ -61,16 +75,16 @@
           transform = { type = "translate", x = 85, y = 310 },
           tree = { type = "smooth_union", k = 0.35,
             children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
-                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } },
         { type = "sdf", fill = "url(#checker_1)", stroke = #ffffff, stroke_width = 3,
           transform = { type = "translate", x = 205, y = 310 },
           tree = { type = "smooth_union", k = 0.35,
             children = [ { type = "circle", cx = -22, cy = 0, r = 38 },
-                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } }
+                         { type = "circle", cx =  22, cy = -10, r = 30 } ] } },
 
         // Row 3 (y=520): Gaussian splats.
         { type = "splat", x = 85, y = 520, sigma_x = 45, sigma_y = 45,
-          color = #4a9eff, opacity = 1.0 }
+          color = #4a9eff, opacity = 1.0 },
         { type = "splat", x = 205, y = 520, sigma_x = 45, sigma_y = 45,
           fill = "url(#checker_1)", color = #4a9eff, opacity = 1.0 }
       ] }

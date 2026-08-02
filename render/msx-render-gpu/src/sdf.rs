@@ -228,16 +228,7 @@ impl SdfPipeline {
     }
 
     /// Entry point for `layer.rs`: draw just the `Sdf` shapes within one
-    /// layer's children, scoped to its own buffer. `layer.rs` doesn't have
-    /// the parent scene's `defs` available at its own call site today
-    /// (same pre-existing limitation `vector::tessellate_elements` has for
-    /// gradient/shader refs on ordinary shapes inside a layer — not
-    /// something newly introduced by threading `defs` through here), so it
-    /// passes an empty `Defs::build(&[])`; a `Paint::Ref` on an SDF inside
-    /// a layer resolves to nothing until that's addressed too. It also
-    /// always passes `shader_ctx = None` — shader fills on SDF nodes
-    /// inside a `Layer` aren't wired up yet, consistent with vector.rs's
-    /// identical gap for ordinary shapes in a `Layer`.
+    /// layer's children, scoped to its own buffer.
     ///
     /// `pub(crate)`, not `pub` — only ever called from within this crate
     /// (`draw_all` above, and `layer.rs`), and it takes `Defs`, which is
@@ -253,11 +244,13 @@ impl SdfPipeline {
             // Mirrors vector.rs's own `routed_to_shader` decision — a real
             // Def::Shader fill, AND a shader context actually provided by
             // this call site (see the doc comment above for what routes
-            // `None` here). `resolve_shader_def` is only called at all
-            // when a context exists, so a plain color/gradient/none fill
-            // (the overwhelmingly common case) never pays for a lookup it
-            // doesn't need.
-            let routed = shader_ctx.and_then(|ctx| resolve_shader_def(&node.fill, defs).map(|shader_def| (ctx, shader_def)));
+            // `None` here). `Option::zip`, not a manual `and_then(..map)`
+            // (clippy's `manual_option_zip`) — every real call site today
+            // (`draw_all`, `render_layer`) always passes `Some`, so eager
+            // evaluation of `resolve_shader_def` costs nothing extra in
+            // practice; the `None` arm only exists for defensiveness /
+            // future callers, not as a live optimization target.
+            let routed = shader_ctx.zip(resolve_shader_def(&node.fill, defs));
             match routed {
                 Some((ctx, shader_def)) => {
                     draw_sdf_shader_fill(device, encoder, view, self, node, shader_def, *transform, canvas, ctx);
@@ -303,6 +296,7 @@ impl SdfPipeline {
     /// touching the GPU at all, so calling this unconditionally after
     /// every shader-routed fill (regardless of whether a stroke actually
     /// exists) costs nothing in the common no-stroke case.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_stroke_only(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), defs: &Defs) {
         let (stroke_color, stroke_width, has_stroke) = match (&node.stroke, node.stroke_width) {
             (Some(paint), Some(w)) => (color_to_rgba(paint_color(paint, defs)), w as f32, 1.0f32),
@@ -369,6 +363,7 @@ impl SdfPipeline {
     /// redo work to reach the same `ShaderDef` it already has in hand.
     /// Fill only, same as `draw_mask` — a node's stroke is the caller's
     /// separate concern either way, shader-routed or not.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_fallback_fill(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, node: &SdfNode, transform: Matrix2D, canvas: (f32, f32), color: Color) {
         let Some((ops, verts, indices, inv)) = prepare_node_geometry(node, transform, canvas) else { return };
 
@@ -459,13 +454,20 @@ fn collect_sdf_nodes<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut
     }
 }
 
+/// Return type of `prepare_node_geometry`: (flattened SDF ops, the node's
+/// screen-space bounding-box quad as 4 vertices + a 2-triangle index list,
+/// and the node's inverted combined transform). Named purely to satisfy
+/// clippy's `type_complexity` — every field keeps its original meaning
+/// from the inline tuple this replaced, see that function's own doc.
+type SdfNodeGeometry = (Vec<SdfOp>, [SdfVertex; 4], [u16; 6], Matrix2D);
+
 /// Shared geometry setup for every SDF node draw variant (`draw_one`,
 /// `draw_mask`, `draw_fallback_fill`, `node_bounding_quad`): resolves the
 /// node's combined transform and inverts it, flattens its tree into ops,
 /// and computes its screen-space bounding-box quad. Returns `None` on the
 /// same two early-outs all four callers had individually before this was
 /// factored out of them: an empty tree, or a non-invertible transform.
-fn prepare_node_geometry(node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) -> Option<(Vec<SdfOp>, [SdfVertex; 4], [u16; 6], Matrix2D)> {
+fn prepare_node_geometry(node: &SdfNode, transform: Matrix2D, canvas: (f32, f32)) -> Option<SdfNodeGeometry> {
     let local = node.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
     let combined = transform.concat(local);
     let inv = invert_matrix(combined)?;

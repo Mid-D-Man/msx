@@ -219,8 +219,18 @@ impl LayerCompositor {
     /// shape, there's no separate per-layer defs concept in the format.
     /// `shader_base_dir`/`time` are threaded straight through from
     /// `lib.rs`'s own call, unchanged, to every shader-def resolved here.
+    ///
+    /// `pub(crate)`, not `pub`: this takes `&ShaderFillPipeline` and
+    /// `&MaskedShaderComposite`, both deliberately `pub(crate)` (internal
+    /// pipeline plumbing, not part of this crate's public API — see their
+    /// own doc comments) — a `pub fn` taking `pub(crate)` types is a
+    /// private-interfaces error under `-D warnings`. `render_layer` has
+    /// exactly one caller, `lib.rs`, in this same crate, so narrowing to
+    /// match the types it already depends on (rather than widening those
+    /// types' own deliberately-narrow visibility) is the correct fix, not
+    /// a workaround.
     #[allow(clippy::too_many_arguments)]
-    pub fn render_layer(
+    pub(crate) fn render_layer(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,

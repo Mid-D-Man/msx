@@ -170,14 +170,16 @@ impl SplatPipeline {
 
         let mut flat_instances = Vec::new();
         for (splat, transform) in &splats {
-            // Mirrors sdf.rs's own routing decision exactly: resolve_shader_def
-            // only runs when a shader context was actually provided AND the
-            // splat has a `fill` at all — a splat with no `fill` (every splat
-            // that existed before this session, and any that still just use
-            // `color` today) never pays for a defs lookup.
-            let routed = shader_ctx.and_then(|ctx| {
-                splat.fill.as_ref().and_then(|paint| resolve_shader_def(paint, defs)).map(|shader_def| (ctx, shader_def))
-            });
+            // Mirrors sdf.rs's own routing decision exactly: `Option::zip`
+            // instead of a manual `and_then(..map)` (clippy's
+            // `manual_option_zip`) — every real call site today
+            // (`draw_all`, `render_layer`) always passes `Some`, so this
+            // costs nothing extra in practice; `splat.fill.as_ref()` being
+            // `None` (every splat that existed before this session, and
+            // any that still just use `color` today) is still the actual
+            // short-circuit that matters, and `.and_then` there is
+            // unchanged.
+            let routed = shader_ctx.zip(splat.fill.as_ref().and_then(|paint| resolve_shader_def(paint, defs)));
             match routed {
                 Some((ctx, shader_def)) => {
                     draw_splat_shader_fill(device, encoder, view, self, splat, shader_def, *transform, canvas, ctx);

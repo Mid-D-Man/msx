@@ -97,6 +97,7 @@ fn splat_bounding_quad(splat: &GaussianSplat, transform: Matrix2D, canvas: (f32,
 /// bespoke fallback path) if the shader's `source_ref` doesn't resolve —
 /// same "always paint something sane" contract every other shader-fill
 /// path in this crate already has.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_splat_shader_fill(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,

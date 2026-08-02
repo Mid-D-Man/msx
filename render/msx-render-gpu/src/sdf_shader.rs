@@ -91,6 +91,7 @@ pub(crate) struct SdfShaderContext<'a> {
 /// the shader's `source_ref` doesn't resolve, same "always paint
 /// something sane" contract every other shader-fill path in this crate
 /// already has.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_sdf_shader_fill(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,

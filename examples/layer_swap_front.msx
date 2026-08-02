@@ -1,0 +1,67 @@
+// examples/layer_swap_front.msx
+// Demonstrates alternating which of two overlapping Layers reads as
+// "in front" over time.
+//
+// IMPORTANT caveat, up front: this is NOT a document-order / z-index
+// swap. `AnimatedProperty` (core/msx-ast/src/animation.rs) only has six
+// channels — translate_x/y, scale_x/y, rotate, opacity, the same set
+// Lottie/AE/Rive expose — and `resolve_at_time` (core/msx-anim/src/
+// resolver.rs) only ever mutates a *matched* element's existing fields
+// in place; it never touches `scene.elements`'s array order or the tree
+// structure. Two Layers' relative paint order is fixed by document order
+// for a scene's entire lifetime, same as any other pair of elements —
+// `layer_front`, defined second below, always paints after (i.e. on top
+// of) `layer_back` wherever they overlap, at every frame.
+//
+// What's actually animated: `layer_front`'s own `opacity` — a real,
+// independently animatable `Layer` channel (see resolver.rs's
+// `Element::Layer(e) => e.opacity *= delta.opacity`, exactly the same
+// mechanism `layer_shader_fill.msx`'s static `opacity = 0.85` goes
+// through, just driven by a keyframe track here instead of a constant).
+// At opacity 1.0 it fully covers `layer_back` in their overlap region —
+// reads as "in front". At opacity 0.0 it's invisible there, so
+// `layer_back` (held at a constant opacity 1.0 throughout) shows through
+// instead — reads as "in front" the other way. `loop_mode = "ping_pong"`
+// turns one forward keyframe sweep into a continuous back-and-forth swap
+// without needing a second, mirrored set of keyframes — same trick
+// orbit_pulse.msx already uses for its own looping motion.
+//
+// Each "layer" is a deliberate two-element composition (a primary shape
+// plus a small accent of a different element type), not a single shape —
+// the point is a whole composed layer swapping front/back together, not
+// just one shape's opacity. The two accents (a circle on layer_back, a
+// rect on layer_front) sit in different corners specifically so which
+// layer owns which accent stays legible even mid-fade.
+//
+// No shader defs anywhere in this file, unlike layer_shader_fill.msx —
+// this exercises plain msx-anim + Layer compositing only. Unlike every
+// shader-def example in this repo, that means `msx animate` (CPU, GIF)
+// shows the real, full effect here too, not just `animate-gpu` — a
+// useful contrast if layer_shader_fill.msx's GPU-only caveat is ever
+// confusing: this file is the same Layer-animation machinery with that
+// one variable removed.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 320, height = 320, background = #14141c }
+  duration = 1.6
+  loop_mode = "ping_pong"
+  elements::
+    { type = "layer", id = "layer_back", opacity = 1.0,
+      elements = [
+        { type = "rect", x = 60, y = 60, width = 200, height = 200,
+          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } },
+        { type = "circle", cx = 80, cy = 80, r = 18,
+          style = { fill = #e2e8f0, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "layer", id = "layer_front", opacity = 1.0,
+      elements = [
+        { type = "circle", cx = 210, cy = 210, r = 110,
+          style = { fill = #f5a623, stroke = "none", stroke_width = 0, opacity = 1.0 } },
+        { type = "rect", x = 250, y = 40, width = 30, height = 30,
+          style = { fill = #e2e8f0, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+  animations::
+    { target_id = "layer_front", property = "opacity",
+      keyframes = [ { time = 0.0, value = 1.0 },
+                    { time = 1.6, value = 0.0, easing = "ease_in_out" } ] }
+)
