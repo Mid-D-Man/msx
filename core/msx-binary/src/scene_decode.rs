@@ -245,7 +245,18 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             let cmd_bytes = &data[*cursor..*cursor + cmd_len];
             *cursor += cmd_len;
             let commands = decode_commands(cmd_bytes)?;
-            let d_raw    = msx_ast::path::commands_to_d(&commands);
+            // Verbatim `d_raw`, not a `commands_to_d` regeneration — see
+            // encode_path's own comment for why reconstructing it instead
+            // of storing it silently broke the "roundtrip fidelity" this
+            // field's doc comment always promised.
+            let d_len = read_u32(data, cursor)? as usize;
+            if *cursor + d_len > data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "path d_raw truncated"));
+            }
+            let d_raw = std::str::from_utf8(&data[*cursor..*cursor + d_len])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("path d_raw invalid utf8: {e}")))?
+                .to_string();
+            *cursor += d_len;
             let style    = read_style(data, cursor, pool)?;
             Ok(Element::Path(Path { commands, d_raw, id, transform, style }))
         }
@@ -335,4 +346,4 @@ fn decode_splat(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<
         None
     };
     Ok(Element::Splat(GaussianSplat { x, y, sigma_x, sigma_y, rotation, color, fill, opacity, id }))
-              }
+}
