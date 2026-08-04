@@ -236,6 +236,27 @@ fn encode_path(e: &Path, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     encode_commands(&e.commands, &mut cmd_buf);
     write_u32(out, cmd_buf.len() as u32);
     out.extend_from_slice(&cmd_buf);
+    // `d_raw` itself, verbatim — NOT the string pool (`write_string_pool`
+    // uses a u16 length prefix per entry, so a big enough compound path —
+    // a dense QR code, a complex icon, anything with hundreds of
+    // subpaths — could exceed 65535 bytes and either panic or silently
+    // corrupt; `cmd_buf` above already sidesteps this with its own u32
+    // prefix, so `d_raw` gets the identical treatment here). This is the
+    // fix for `Path::d_raw`'s own doc comment ("Cached original `d`
+    // string for roundtrip fidelity") not actually holding before now:
+    // this field was never written at all, and decode regenerated an
+    // approximation via `commands_to_d` instead — which reformats every
+    // token (`H126.829` becomes `H 126.829`, and `fmt_f64` strips
+    // trailing zeros: `48.780` becomes `48.78`) that's geometrically
+    // identical but byte-for-byte different from whatever the original
+    // author actually wrote. Harmless for rendering (both strings parse
+    // to the same commands), but a real, silent failure for anything
+    // that round-trips through this binary format and then compares the
+    // `d` string itself — which is exactly what "fidelity" in that doc
+    // comment was promising and not delivering.
+    let d_bytes = e.d_raw.as_bytes();
+    write_u32(out, d_bytes.len() as u32);
+    out.extend_from_slice(d_bytes);
     write_style(out, &e.style, pool);
 }
 
@@ -456,6 +477,46 @@ mod tests {
         } else {
             panic!("expected Layer");
         }
+    }
+
+    /// Regression test for a real bug found in `examples/mid-qr-k.msx`:
+    /// `Path::d_raw`'s own doc comment ("Cached original `d` string for
+    /// roundtrip fidelity") was never actually true — `encode_path` never
+    /// wrote it, and decode regenerated an approximation via
+    /// `commands_to_d` instead. That regeneration is geometrically
+    /// identical but byte-for-byte *different*: `to_svg_token` inserts a
+    /// space after every command letter (`H126.829` → `H 126.829`, no
+    /// exception for the compact, no-inner-space style real-world
+    /// generators like mid-qr-code-lib actually emit), and `fmt_f64`
+    /// strips trailing zeros (`48.780` → `48.78`). Uses the literal
+    /// first-two-modules substring from that file's giant data-modules
+    /// path, not a synthetic example, so this test fails exactly the way
+    /// the real file did before the fix in `encode_path`/`TAG_PATH`
+    /// decode (writing/reading `d_raw` directly, u32-length-prefixed —
+    /// same pattern as `cmd_buf` right above it — rather than through
+    /// the string pool, which uses a u16 length prefix per entry and
+    /// would risk truncating a big enough compound path).
+    #[test]
+    fn path_d_raw_survives_roundtrip_byte_for_byte() {
+        let original_d = "M117.073 39.024H126.829V48.780H117.073Z M195.122 39.024H204.878V48.780H195.122Z";
+        let commands = msx_ast::path::parse_d(original_d).unwrap();
+
+        let path = Path {
+            commands,
+            d_raw: original_d.to_string(),
+            id: None,
+            transform: None,
+            style: Style { fill: Some(Paint::Color(Color::rgb(0, 0, 0))), ..Default::default() },
+        };
+
+        let mut scene = Scene::new(Canvas::new(400.0, 400.0, Color::WHITE));
+        scene.elements.push(Element::Path(path));
+
+        let binary  = compile(&scene, false).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        let Element::Path(decoded_path) = &decoded.elements[0] else { panic!("expected Path") };
+        assert_eq!(decoded_path.d_raw, original_d, "d_raw must survive byte-for-byte, not just geometrically");
     }
 
     /// Splat's `fill` field was added after `color`, appended at the end
