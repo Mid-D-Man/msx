@@ -519,6 +519,74 @@ mod tests {
         assert_eq!(decoded_path.d_raw, original_d, "d_raw must survive byte-for-byte, not just geometrically");
     }
 
+    /// `examples/mid-qr-k.msx` still fails `msx roundtrip` in CI even with
+    /// the `d_raw` fix above live on `origin/main`. That's expected, not a
+    /// sign the fix is incomplete: `msx-render-svg::render_path` never
+    /// reads `d_raw` at all (see render/msx-render-svg/src/shapes.rs —
+    /// it always rebuilds `d` from `commands` via `commands_to_d`), so
+    /// `msx roundtrip`'s SVG-text comparison can't be affected by `d_raw`
+    /// fidelity either way, for any file. A local sandbox repro (real
+    /// msx-ast + real msx-binary + an identity-passthrough mbfa stub,
+    /// since mbfa itself needs rustc 1.79+ and this sandbox is capped at
+    /// 1.75) fed the actual 2,280-command giant path from mid-qr-k.msx
+    /// through `compile()`/`decode()` and found `commands_to_d(before) ==
+    /// commands_to_d(after)` held exactly — so parser, path_codec, string
+    /// pool, and the f64→f32→f64 coordinate downcast are all clean for
+    /// this file's real content. `compress = true` was the one variable
+    /// that repro couldn't cover without real mbfa. This test covers it,
+    /// here, where CI's real toolchain can build the real crate — a
+    /// synthetic grid shaped like mid-qr-k's 456 near-identical rect
+    /// subpaths (same MoveTo/HLineTo/VLineTo/HLineTo/ClosePath-per-rect
+    /// pattern, same ~2,280-command scale), run through real MBFA
+    /// compression this time. A failure here points squarely at mbfa's
+    /// compress/decompress for this repetition shape; a pass means the
+    /// synthetic grid isn't reproducing whatever real mbfa trips on and
+    /// the next step is feeding it mid-qr-k's actual bytes instead.
+    #[test]
+    fn many_repeated_small_subpaths_survive_compressed_roundtrip() {
+        use msx_ast::path::PathCommand;
+        use msx_ast::Point;
+
+        let mut commands = Vec::new();
+        for i in 0..456 {
+            let col = (i % 24) as f64;
+            let row = (i / 24) as f64;
+            let x  = ((10.0 + col * 9.756) * 1000.0).round() / 1000.0;
+            let y  = ((10.0 + row * 9.756) * 1000.0).round() / 1000.0;
+            let x2 = ((x + 9.756) * 1000.0).round() / 1000.0;
+            let y2 = ((y + 9.756) * 1000.0).round() / 1000.0;
+            commands.push(PathCommand::MoveTo(Point::new(x, y)));
+            commands.push(PathCommand::HLineTo(x2));
+            commands.push(PathCommand::VLineTo(y2));
+            commands.push(PathCommand::HLineTo(x));
+            commands.push(PathCommand::ClosePath);
+        }
+
+        let d_raw = msx_ast::path::commands_to_d(&commands);
+        let path = Path {
+            commands: commands.clone(),
+            d_raw,
+            id: None,
+            transform: None,
+            style: Style { fill: Some(Paint::Color(Color::rgb(0, 0, 0))), ..Default::default() },
+        };
+
+        let mut scene = Scene::new(Canvas::new(400.0, 400.0, Color::WHITE));
+        scene.elements.push(Element::Path(path));
+
+        // compress = true: real MBFA, unlike path_d_raw_survives_roundtrip_byte_for_byte above.
+        let binary  = compile(&scene, true).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        let Element::Path(decoded_path) = &decoded.elements[0] else { panic!("expected Path") };
+
+        let before = msx_ast::path::commands_to_d(&commands);
+        let after  = msx_ast::path::commands_to_d(&decoded_path.commands);
+        assert_eq!(before, after,
+            "commands_to_d output must survive a REAL-MBFA-compressed roundtrip — \
+             this is what `msx roundtrip` actually compares, not d_raw or raw command equality");
+    }
+
     /// Splat's `fill` field was added after `color`, appended at the end
     /// of its wire format (`[u8 has_fill][paint if present]`) rather than
     /// interleaved among the pre-existing fields — see `encode_splat`'s

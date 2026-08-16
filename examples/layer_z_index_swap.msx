@@ -1,0 +1,83 @@
+// examples/layer_z_index_swap.msx
+// Companion / contrast to layer_swap_front.msx: THIS file is the real
+// document-order-independent swap that file explicitly says it is NOT.
+//
+// layer_swap_front.msx's own header spells out exactly why it couldn't do
+// this before this session: `AnimatedProperty` only had six channels
+// (translate_x/y, scale_x/y, rotate, opacity) and two Layers' relative
+// paint order was fixed by document order for a scene's entire lifetime.
+// `AnimatedProperty::ZIndex` (core/msx-ast/src/animation.rs) removes that
+// limitation — `Layer.z_index` is now a real, independently animatable
+// channel, and unlike every other channel it's a plain OVERRIDE, not a
+// composed multiply/add (see resolver.rs: `Element::Layer(e) => if let
+// Some(z) = delta.z_index { e.z_index = z }` — a sort key has to stay
+// distinguishable from "untouched," so it can't compose the way opacity
+// or translate do).
+//
+// Both Layers below sit at a CONSTANT opacity = 1.0 for the entire
+// animation — no fading anywhere in this file. `box_a` and `box_b` are
+// both fully opaque, always. What changes is purely which one paints on
+// top: `box_a`'s z_index sweeps 0.0 -> 1.0, `box_b`'s sweeps the exact
+// complementary 1.0 -> 0.0, over the same `duration` with the same
+// (symmetric) easing curve. Since the two tracks are complementary and
+// the easing curve is point-symmetric about its own midpoint, the two
+// values are EXACTLY equal at t = duration / 2 — at every other instant,
+// whichever box's z_index is currently higher wins and paints on top,
+// completely and abruptly, since z_index is a discrete sort key with no
+// blending involved. That's the "hard-cut paint-order swap": unlike
+// layer_swap_front.msx's continuous cross-fade, there is no intermediate
+// state here where both boxes are partially visible in their overlap —
+// it's always one fully covering the other, until the instant they trade
+// places. (At that literal single instant the two z_index values tie;
+// `layer_reordered`'s own tie-break falls back to plain document order —
+// see layer.rs's `equal_z_index_keeps_original_document_order` test — so
+// for exactly one infinitesimal frame `box_b`, declared second below,
+// would win a tie. Not perceptible at any real frame rate; noted for
+// completeness, not because it's visible.)
+//
+// Geometry, colors, and canvas size are DELIBERATELY identical to
+// layer_swap_front.msx's `layer_back`/`layer_front` (same rect, same
+// circle, same accent shapes, same positions) — a real z_index swap next
+// to a fake opacity one, everything else held constant, is the clearest
+// possible side-by-side demonstration of what the new channel actually
+// buys over the old workaround. Each box keeps layer_swap_front.msx's
+// own two-element-per-layer composition (a primary shape plus a small
+// accent of a different element type) for the same reason that file
+// gives: the point is a whole composed Layer swapping paint order
+// together, not just one shape's stacking position, and `layer_reordered`
+// moving a Layer moves everything inside it as one unit.
+//
+// Like layer_swap_front.msx and unlike layer_shader_fill.msx, there are
+// no shader defs here — plain msx-anim + Layer compositing only — so
+// `msx animate` (CPU, GIF) shows the real, full effect, not just
+// `animate-gpu`. `loop_mode = "ping_pong"` turns one forward keyframe
+// sweep into a continuous back-and-forth swap, same trick every other
+// looping example in this repo already uses.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 320, height = 320, background = #14141c }
+  duration = 1.6
+  loop_mode = "ping_pong"
+  elements::
+    { type = "layer", id = "box_a", opacity = 1.0,
+      elements = [
+        { type = "rect", x = 60, y = 60, width = 200, height = 200,
+          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } },
+        { type = "circle", cx = 80, cy = 80, r = 18,
+          style = { fill = #e2e8f0, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "layer", id = "box_b", opacity = 1.0,
+      elements = [
+        { type = "circle", cx = 210, cy = 210, r = 110,
+          style = { fill = #f5a623, stroke = "none", stroke_width = 0, opacity = 1.0 } },
+        { type = "rect", x = 250, y = 40, width = 30, height = 30,
+          style = { fill = #e2e8f0, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+  animations::
+    { target_id = "box_a", property = "z_index",
+      keyframes = [ { time = 0.0, value = 0.0 },
+                    { time = 1.6, value = 1.0, easing = "linear" } ] }
+    { target_id = "box_b", property = "z_index",
+      keyframes = [ { time = 0.0, value = 1.0 },
+                    { time = 1.6, value = 0.0, easing = "linear" } ] }
+)
