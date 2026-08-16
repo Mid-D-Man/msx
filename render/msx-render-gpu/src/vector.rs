@@ -31,11 +31,14 @@ use lyon::math::point;
 use lyon::path::path::Builder as LyonPathBuilder;
 use lyon::path::Path as LyonPath;
 use lyon::tessellation::{
-    BuffersBuilder, FillOptions, FillTessellator, FillVertex, StrokeOptions, StrokeTessellator,
-    StrokeVertex, VertexBuffers,
+    BuffersBuilder, FillOptions, FillRule as LyonFillRule, FillTessellator, FillVertex,
+    StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
 };
 
-use msx_ast::{path::PathCommand, Color, Def, Element, Line, Matrix2D, Paint, Polyline, Rect, Scene, Style, Use};
+use msx_ast::{
+    path::PathCommand, Color, Def, Element, FillRule, Line, Matrix2D, Paint, Polyline, Rect,
+    Scene, Style, Use,
+};
 
 use crate::shader::PendingShaderShape;
 
@@ -226,6 +229,17 @@ fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
     }
 }
 
+/// msx-ast's `FillRule` and lyon's own `FillRule` are structurally
+/// identical (`NonZero`/`EvenOdd`) but distinct types — msx-ast's is the
+/// wire/DixScript-facing one (`FillRule::parse`, `to_svg`, `to_byte`),
+/// lyon's is what `FillOptions::with_fill_rule` actually takes.
+fn to_lyon_fill_rule(fr: FillRule) -> LyonFillRule {
+    match fr {
+        FillRule::NonZero => LyonFillRule::NonZero,
+        FillRule::EvenOdd => LyonFillRule::EvenOdd,
+    }
+}
+
 // ── Fill + stroke ────────────────────────────────────────────────────────────
 
 fn fill_and_stroke(
@@ -238,6 +252,18 @@ fn fill_and_stroke(
     shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) {
     let opacity = style.opacity.unwrap_or(1.0);
+    // `FillOptions::default()` is lyon's own default, which is `EvenOdd` —
+    // NOT the SVG-spec default (`NonZero`) that msx-ast's own `FillRule`
+    // already defaults to unset as, and that msx-render-cpu already
+    // honors correctly via tiny-skia's fill-rule mapping. Left unwired
+    // here, GPU was the only one of the three renderers silently using
+    // the wrong default — harmless for every path in the current example
+    // corpus (verified: all of them are simple, non-self-intersecting,
+    // non-overlapping-same-direction contours, where EvenOdd and NonZero
+    // agree), but silently wrong the first time a self-intersecting
+    // shape or a deliberately-unioned overlapping-same-direction pair of
+    // contours shows up.
+    let fill_rule = to_lyon_fill_rule(style.fill_rule.unwrap_or(FillRule::NonZero));
 
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
         // A fill that resolves to a real Def::Shader gets pulled out into
@@ -259,7 +285,7 @@ fn fill_and_stroke(
         // collector repeatedly across multiple sibling elements.
         let routed_to_shader = if let Some(shapes) = shader_shapes {
             if let Some(shader_def) = resolve_shader_def(fill, defs) {
-                let (vertices, indices) = fill_path_positions(path, transform, canvas);
+                let (vertices, indices) = fill_path_positions(path, fill_rule, transform, canvas);
                 shapes.push(PendingShaderShape { shader: shader_def.clone(), vertices, indices });
                 true
             } else {
@@ -271,7 +297,7 @@ fn fill_and_stroke(
 
         if !routed_to_shader {
             if let Some(rgba) = paint_to_rgba(fill, opacity, defs) {
-                fill_path(path, rgba, transform, canvas, buffers);
+                fill_path(path, fill_rule, rgba, transform, canvas, buffers);
             }
         }
     }
@@ -322,11 +348,18 @@ fn stroke_only_line(l: &Line, transform: Matrix2D, canvas: (f32, f32), buffers: 
     stroke_path(&path, rgba, width, transform, canvas, buffers);
 }
 
-fn fill_path(path: &LyonPath, rgba: [f32; 4], transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
+fn fill_path(
+    path: &LyonPath,
+    fill_rule: LyonFillRule,
+    rgba: [f32; 4],
+    transform: Matrix2D,
+    canvas: (f32, f32),
+    buffers: &mut VertexBuffers<Vertex, u32>,
+) {
     let mut tess = FillTessellator::new();
     let _ = tess.tessellate_path(
         path,
-        &FillOptions::default(),
+        &FillOptions::default().with_fill_rule(fill_rule),
         &mut BuffersBuilder::new(buffers, |v: FillVertex| {
             vertex_from_point(v.position().x, v.position().y, rgba, transform, canvas)
         }),
@@ -336,12 +369,17 @@ fn fill_path(path: &LyonPath, rgba: [f32; 4], transform: Matrix2D, canvas: (f32,
 /// Position-only sibling of `fill_path`, for shapes whose fill routes to
 /// `shader.rs` instead of being baked flat — there's no per-vertex color
 /// to compute here, the user's fragment shader supplies it entirely.
-fn fill_path_positions(path: &LyonPath, transform: Matrix2D, canvas: (f32, f32)) -> (Vec<[f32; 2]>, Vec<u32>) {
+fn fill_path_positions(
+    path: &LyonPath,
+    fill_rule: LyonFillRule,
+    transform: Matrix2D,
+    canvas: (f32, f32),
+) -> (Vec<[f32; 2]>, Vec<u32>) {
     let mut buffers: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
     let mut tess = FillTessellator::new();
     let _ = tess.tessellate_path(
         path,
-        &FillOptions::default(),
+        &FillOptions::default().with_fill_rule(fill_rule),
         &mut BuffersBuilder::new(&mut buffers, |v: FillVertex| {
             let (tx, ty) = apply_matrix(transform, (v.position().x, v.position().y));
             to_clip_space(tx, ty, canvas.0, canvas.1)
