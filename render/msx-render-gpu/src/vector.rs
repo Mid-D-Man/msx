@@ -8,22 +8,30 @@
 //! geometry in, flat geometry out) so nothing outside this crate that
 //! might already depend on that shape breaks.
 //!
-//! `tessellate_scene_with_shaders` is a separate, `pub(crate)`-only
-//! sibling of `tessellate_scene` used by `lib.rs`'s top-level render
-//! path: it additionally pulls out any shape whose *fill* resolves to a
-//! `Def::Shader` into its own collection (see `shader.rs::PendingShaderShape`)
-//! instead of baking a flat color for it.
+//! `tessellate_scene_with_shaders` is a `pub(crate)`-only, whole-scene
+//! convenience sibling of `tessellate_scene`: it additionally pulls out
+//! any shape whose *fill* resolves to a `Def::Shader` into its own
+//! collection (see `shader.rs::PendingShaderShape`) instead of baking a
+//! flat color for it. It's kept for tests and any future whole-scene
+//! convenience call, but it is NOT what the real top-level render path
+//! calls anymore — see the next paragraph.
 //!
-//! `tessellate_elements_with_shaders` is the same idea for `layer.rs`:
-//! given one layer's children plus the *real* scene `Defs` (not an empty
-//! one — a `Layer`'s children can reference the same top-level `defs` as
-//! everything else, gradients included), it returns the plain geometry
-//! and the shader-routed shapes separately, exactly like
-//! `tessellate_scene_with_shaders` does for the whole scene. `layer.rs`
-//! used to call the plain `tessellate_elements` with an empty `Defs`,
-//! which is why shader fills (and gradient/`Paint::Ref` fills in general)
-//! silently painted flat for anything inside a `Layer` — both are fixed
-//! by this same change, not two separate ones.
+//! `tessellate_elements_with_shaders` is the same idea, but takes an
+//! arbitrary `&[Element]` slice plus an already-built `Defs` instead of
+//! a whole `Scene` — this is the one actually on the hot path now, for
+//! BOTH the top level and every `Layer`. `layer::render_ordered`
+//! (`layer.rs`) walks a sibling list in real paint order and calls this
+//! once per contiguous non-`Layer` run, rather than once for the whole
+//! scene up front; `lib.rs`'s top-level render and `layer.rs`'s
+//! `render_layer` both go through `render_ordered` now, so both end up
+//! calling this same function, just on different element slices. It
+//! always takes the *real* scene `Defs` (not an empty one — a `Layer`'s
+//! children can reference the same top-level `defs` as everything else,
+//! gradients included) — `layer.rs` used to call the plain
+//! `tessellate_elements` with an empty `Defs`, which is why shader fills
+//! (and gradient/`Paint::Ref` fills in general) silently painted flat
+//! for anything inside a `Layer`; both were fixed by the same earlier
+//! change, not two separate ones.
 
 use std::collections::HashMap;
 
@@ -268,14 +276,16 @@ fn fill_and_stroke(
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
         // A fill that resolves to a real Def::Shader gets pulled out into
         // its own draw, executed for real by shader.rs — but only when a
-        // collector was actually provided. Both scene-level render paths
-        // (tessellate_scene_with_shaders) and layer.rs's own path
-        // (tessellate_elements_with_shaders) provide one; only the plain
-        // public tessellate_scene/tessellate_elements — kept unchanged
-        // for any external caller depending on their existing shape —
-        // pass `None`, so shader fills through *those* two specifically
-        // still fall through to the flat-fallback_color behavior via
-        // paint_to_rgba/average_stop_color below.
+        // collector was actually provided. Every real render path (the
+        // top level, via `layer::render_ordered`, and every `Layer`, via
+        // `render_layer` — both ultimately call
+        // `tessellate_elements_with_shaders` per run/per layer) provides
+        // one; only the plain public `tessellate_scene`/
+        // `tessellate_elements` — kept unchanged for any external caller
+        // depending on their existing shape — pass `None`, so shader
+        // fills through *those* two specifically still fall through to
+        // the flat-fallback_color behavior via paint_to_rgba/
+        // average_stop_color below.
         //
         // A direct move (not `.as_deref_mut()`) is correct and sufficient
         // here specifically because `shader_shapes` is used exactly once,

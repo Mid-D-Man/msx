@@ -35,11 +35,16 @@
 //!
 //! `Vector`, `Sdf`, `Splat`, and `Layer` (opacity + isolated buffering;
 //! Normal blend only — see `layer.rs`) are all wired up now. Rendering
-//! order: all non-layer content first (vector → shader fills → SDF →
-//! splat, painted into one shared buffer), then every top-level `Layer`
-//! composites on top, regardless of its position in document order — see
-//! `layer.rs`'s module doc for why. `Text` is a deliberate no-op
-//! everywhere in this project.
+//! order for `Layer`s is sibling-scoped (a `Layer` only trades
+//! paint-order places with another `Layer` in the SAME sibling list, a
+//! non-`Layer` sibling's own position is always respected) via
+//! `layer::render_ordered` — see `layer.rs`'s module doc for the full
+//! reasoning and the two deliberate remaining scope boundaries
+//! (Group-nested Layers, nested Layers). Ordering WITHIN one contiguous
+//! non-`Layer` run is still type-batched (vector → shader fills → SDF →
+//! splat), not true per-element document order — a separate,
+//! pre-existing gap, also detailed in `layer.rs`'s module doc. `Text` is
+//! a deliberate no-op everywhere in this project.
 //!
 //! `shader.rs` executes real WGSL for `Def::Shader` fills — on both
 //! top-level shapes and shapes inside a `Layer` now (`layer.rs` is given
@@ -75,8 +80,6 @@ use std::path::Path;
 use msx_ast::{Matrix2D, Scene};
 use msx_render_core::{RenderTarget, Renderer};
 use masked_shader_composite::MaskedShaderComposite;
-use sdf_shader::SdfShaderContext;
-use splat_shader::SplatShaderContext;
 use shader::ShaderFillPipeline;
 
 pub struct GpuRenderer {
@@ -126,9 +129,6 @@ impl GpuRenderer {
         // TEXTURE_BINDING here.
         let offscreen = OffscreenTarget::new(&self.context.device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
 
-        // Pass 1: every non-layer element — vector, shader fills, SDF,
-        // splat — into the shared buffer/view.
-        let (geometry, shader_shapes) = vector::tessellate_scene_with_shaders(scene);
         let bg = scene.canvas.background;
         let clear_color = wgpu::Color {
             r: bg.r as f64 / 255.0,
@@ -137,81 +137,41 @@ impl GpuRenderer {
             a: bg.a as f64 / 255.0,
         };
 
-        let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("msx render encoder"),
-        });
-        self.vector_pipeline.draw(&self.context.device, &mut encoder, &offscreen.view, &geometry, clear_color);
-        for shape in &shader_shapes {
-            // A shape whose source_ref doesn't resolve (missing file,
-            // moved since compile time, etc.) falls back to its
-            // fallback_color rather than silently vanishing or aborting
-            // the whole render — same "always paint something sane"
-            // principle ShaderDef's own doc comment describes for every
-            // other renderer.
-            if let Err(e) = self.shader_pipeline.draw(&self.context.device, &mut encoder, &offscreen.view, shader_base_dir, shape, time) {
-                eprintln!("msx-render-gpu: {e} — falling back to fallback_color");
-                self.vector_pipeline.draw_fallback_fill(&self.context.device, &mut encoder, &offscreen.view, &shape.vertices, &shape.indices, shape.shader.fallback_color);
-            }
-        }
-        self.sdf_pipeline.draw_all(
-            &self.context.device,
-            &mut encoder,
-            &offscreen.view,
-            scene,
-            Some(&SdfShaderContext {
-                shader_pipeline: &self.shader_pipeline,
-                composite: &self.masked_shader_composite,
-                shader_base_dir,
-                time,
-            }),
-        );
-        self.splat_pipeline.draw_all(
-            &self.context.device,
-            &mut encoder,
-            &offscreen.view,
-            scene,
-            Some(&SplatShaderContext {
-                shader_pipeline: &self.shader_pipeline,
-                composite: &self.masked_shader_composite,
-                shader_base_dir,
-                time,
-            }),
-        );
-        self.context.queue.submit(std::iter::once(encoder.finish()));
+        let defs = vector::Defs::build(&scene.defs);
+        let canvas_f = (width as f32, height as f32);
 
-        // Pass 2: every top-level Layer, composited on top — see
-        // layer.rs's module doc for the document-order caveat that still
-        // applies between Layers and non-Layer content (this sort only
-        // reorders Layers *relative to each other*, nothing else moves
-        // relative to this whole pass).
-        let mut layers = Vec::new();
-        layer::collect_layers(&scene.elements, Matrix2D::identity(), &mut layers);
-        // Stable sort — ties (including the common case of no one
-        // setting z_index, every Layer at its 0.0 default) keep
-        // `collect_layers`'s original document order exactly, same
-        // tie-break convention CSS `z-index` uses. `partial_cmp`'s
-        // `unwrap_or(Equal)` only matters for a NaN z_index (from a
-        // malformed animation track's evaluated value); anything sane
-        // never hits that arm.
-        layers.sort_by(|a, b| a.0.z_index.partial_cmp(&b.0.z_index).unwrap_or(std::cmp::Ordering::Equal));
-        for (layer, transform) in &layers {
-            self.layer_compositor.render_layer(
-                &self.context.device,
-                &self.context.queue,
-                &offscreen.view,
-                layer,
-                *transform,
-                (width, height),
-                &self.vector_pipeline,
-                &self.sdf_pipeline,
-                &self.splat_pipeline,
-                &self.shader_pipeline,
-                &self.masked_shader_composite,
-                &scene.defs,
-                shader_base_dir,
-                time,
-            );
-        }
+        // Every element — vector, shader fills, SDF, splat, and now
+        // Layer — walked in real document order via
+        // `layer::render_ordered`, instead of the old "every non-layer
+        // element first, then every Layer anywhere, sorted globally,
+        // always last" split. See `layer.rs`'s module doc and
+        // `render_ordered`'s own doc comment for the full reasoning, the
+        // remaining deliberate scope boundaries (a Layer nested inside a
+        // `Group` still keeps the old always-last, globally-sorted
+        // behavior; a Layer nested inside another Layer is still
+        // unsupported), and the separate, pre-existing, NOT-fixed-here
+        // gap in ordering between vector/SDF/splat content within one
+        // contiguous non-Layer run.
+        layer::render_ordered(
+            &self.context.device,
+            &self.context.queue,
+            &offscreen.view,
+            &scene.elements,
+            Matrix2D::identity(),
+            canvas_f,
+            clear_color,
+            true, // this call's own direct Layer children ARE the top-level scene layers, not nested ones — always honor them. render_layer's own recursive call below passes `false` instead, which is what actually stops nesting at one level.
+            &self.layer_compositor,
+            &self.vector_pipeline,
+            &self.sdf_pipeline,
+            &self.splat_pipeline,
+            &self.shader_pipeline,
+            &self.masked_shader_composite,
+            &defs,
+            &scene.defs,
+            shader_base_dir,
+            time,
+        );
 
         *target = offscreen.read_back(&self.context.device, &self.context.queue);
     }
