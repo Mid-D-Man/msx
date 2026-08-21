@@ -2,8 +2,8 @@
 
 use msx_ast::{
     AnimatedProperty, AnimationTrack, BlendMode, Canvas, Circle, Color, Element, GaussianSplat,
-    Group, Keyframe, Layer, LoopMode, Matrix2D, Paint, Rect, Scene, SdfNode, SdfTree, Style,
-    Transform,
+    Group, Image, Keyframe, Layer, LoopMode, MediaSource, Matrix2D, Paint, Rect, Scene, SdfNode,
+    SdfTree, Style, Transform,
 };
 
 use crate::resolve_at_time;
@@ -140,6 +140,42 @@ fn opacity_track_multiplies_existing_style_opacity() {
     match &resolved.elements[0] {
         Element::Circle(c) => assert!((c.style.opacity.unwrap() - 0.25).abs() < 1e-6),
         _ => panic!("expected Circle"),
+    }
+}
+
+#[test]
+fn image_opacity_and_transform_animate_like_other_elements() {
+    // Element::Image gets the exact same apply_delta treatment Rect/
+    // Circle/etc already get (transform composes, opacity multiplies
+    // onto style.opacity) — this just confirms that's actually wired up,
+    // the same way opacity_track_multiplies_existing_style_opacity above
+    // confirms it for Circle.
+    let mut img = Image::new(MediaSource::FileRef("photo.png".to_string()), 0.0, 0.0, 50.0, 50.0);
+    img.id = Some("pic".into());
+    img.style.opacity = Some(0.5);
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Image(img));
+    scene.duration = 1.0;
+    scene.animations.push(track(
+        "pic",
+        AnimatedProperty::Opacity,
+        vec![Keyframe::linear(0.0, 0.5), Keyframe::linear(1.0, 0.5)],
+    ));
+    scene.animations.push(track(
+        "pic",
+        AnimatedProperty::TranslateX,
+        vec![Keyframe::linear(0.0, 12.0), Keyframe::linear(1.0, 12.0)],
+    ));
+
+    let resolved = resolve_at_time(&scene, 0.0);
+    match &resolved.elements[0] {
+        Element::Image(img) => {
+            assert!((img.style.opacity.unwrap() - 0.25).abs() < 1e-6, "0.5 static * 0.5 track = 0.25");
+            let t = img.transform.as_ref().expect("translate track should have populated a transform");
+            let m = t.to_matrix();
+            assert!((m.e - 12.0).abs() < 1e-6, "translate_x should land in the matrix's own translation component");
+        }
+        _ => panic!("expected Image"),
     }
 }
 

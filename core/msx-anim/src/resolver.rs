@@ -128,6 +128,10 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
                 e.z_index = z;
             }
         }
+        Element::Image(e) => {
+            e.transform = Some(delta.compose_transform(e.transform.as_ref()));
+            apply_opacity(&mut e.style, delta.opacity);
+        }
     }
 }
 

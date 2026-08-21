@@ -21,6 +21,8 @@ pub const TAG_SDF:             u8 = 0x0D; // v0.2
 pub const TAG_SPLAT:           u8 = 0x0E; // v0.2
 pub const TAG_LAYER:           u8 = 0x0F; // v0.2
 pub const TAG_SHADER:          u8 = 0x10; // def only — v0.3
+pub const TAG_IMAGE:           u8 = 0x11; // v0.4
+pub const TAG_AUDIO:           u8 = 0x12; // def only — v0.4
 pub const TAG_END:             u8 = 0xFF;
 
 // ── Path command tags ───────────────────────────────────────────────────────

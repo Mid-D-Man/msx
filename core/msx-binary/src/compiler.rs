@@ -13,8 +13,8 @@
 use std::io;
 
 use msx_ast::{
-    Circle, Def, Element, Ellipse, GaussianSplat, Group, Layer, Line, Path, Polyline, Rect,
-    Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
+    Circle, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer, Line, MediaSource, Path,
+    Polyline, Rect, Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
 };
 
 use crate::encoder::*;
@@ -160,6 +160,12 @@ fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
                 }
             }
         }
+        Def::Audio(a) => {
+            write_u8(out, TAG_AUDIO);
+            let id_idx = intern_string(pool, &a.id);
+            write_u16(out, id_idx);
+            encode_media_source(&a.source, out, pool);
+        }
     }
 }
 
@@ -180,7 +186,52 @@ fn encode_element(elem: &Element, out: &mut Vec<u8>, pool: &mut Vec<String>) {
         Element::Sdf(e)      => encode_sdf(e, out, pool),
         Element::Splat(e)    => encode_splat(e, out, pool),
         Element::Layer(e)    => encode_layer(e, out, pool),
+        Element::Image(e)    => encode_image(e, out, pool),
     }
+}
+
+// ── MediaSource encoding ────────────────────────────────────────────────────
+
+fn encode_media_source(source: &MediaSource, out: &mut Vec<u8>, pool: &mut Vec<String>) {
+    match source {
+        MediaSource::Embedded(bytes) => {
+            write_u8(out, 0);
+            // u32 length prefix, deliberately NOT the shared string pool
+            // (`write_string_pool` uses a u16 length prefix per entry —
+            // the exact same class of silent-truncation bug this project
+            // already found and fixed once for `Path::d_raw`, and an
+            // embedded image blob is exactly the kind of payload
+            // realistically big enough to hit it: a modest few-hundred-
+            // pixel PNG routinely exceeds 65535 bytes on its own, before
+            // base64 even inflates it further at the DixScript-source
+            // boundary — see `media.rs`'s own module doc for the full
+            // reasoning).
+            write_u32(out, bytes.len() as u32);
+            out.extend_from_slice(bytes);
+        }
+        MediaSource::FileRef(path) => {
+            write_u8(out, 1);
+            // A file path is short — the string pool's u16 cap isn't a
+            // realistic concern here the way it is for embedded blob
+            // bytes, so reusing it (and getting pool deduplication for
+            // anything referencing the same path more than once) is the
+            // right call, not a shortcut.
+            let idx = intern_string(pool, path);
+            write_u16(out, idx);
+        }
+    }
+}
+
+fn encode_image(e: &Image, out: &mut Vec<u8>, pool: &mut Vec<String>) {
+    write_u8(out, TAG_IMAGE);
+    write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
+    encode_media_source(&e.source, out, pool);
+    write_f32(out, e.x);
+    write_f32(out, e.y);
+    write_f32(out, e.width);
+    write_f32(out, e.height);
+    write_u8(out, e.anchor.to_byte());
+    write_style(out, &e.style, pool);
 }
 
 fn encode_rect(e: &Rect, out: &mut Vec<u8>, pool: &mut Vec<String>) {
@@ -624,6 +675,95 @@ mod tests {
         match &decoded.elements[1] {
             Element::Splat(s) => assert_eq!(s.fill, None, "a splat with no fill set must decode back to None, not e.g. Some(Paint::None)"),
             other => panic!("expected a Splat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_element_with_embedded_source_roundtrips() {
+        use msx_ast::{Anchor, Image, MediaSource};
+
+        // A real (tiny, 1x1) PNG signature-plus-body, not just the magic
+        // bytes alone — exercises the u32-length-prefixed embedded-blob
+        // path, not just the discriminant byte.
+        let png_bytes: Vec<u8> = {
+            let mut b = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            b.extend_from_slice(&[0u8; 100]); // stand-in IHDR/IDAT/IEND body
+            b
+        };
+
+        let mut scene = Scene::new(Canvas::new(300.0, 300.0, Color::WHITE));
+        scene.elements.push(Element::Image(
+            Image::new(MediaSource::Embedded(png_bytes.clone()), 50.0, 60.0, 120.0, 80.0)
+                .with_anchor(Anchor::Center),
+        ));
+
+        let binary  = compile(&scene, true).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        match &decoded.elements[0] {
+            Element::Image(img) => {
+                assert_eq!(img.source, MediaSource::Embedded(png_bytes), "embedded blob bytes must survive byte-for-byte");
+                assert_eq!((img.x, img.y, img.width, img.height), (50.0, 60.0, 120.0, 80.0));
+                assert_eq!(img.anchor, Anchor::Center);
+            }
+            other => panic!("expected an Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_element_with_file_ref_source_roundtrips() {
+        use msx_ast::{Image, MediaSource};
+
+        let mut scene = Scene::new(Canvas::new(300.0, 300.0, Color::WHITE));
+        scene.elements.push(Element::Image(Image::new(
+            MediaSource::FileRef("assets/logo.png".to_string()),
+            10.0, 10.0, 64.0, 64.0,
+        )));
+        // A second image referencing the SAME path — checks that
+        // FileRef paths go through the shared string pool's own
+        // deduplication (encode_media_source's own comment), not just
+        // that a single reference round-trips.
+        scene.elements.push(Element::Image(Image::new(
+            MediaSource::FileRef("assets/logo.png".to_string()),
+            100.0, 10.0, 64.0, 64.0,
+        )));
+
+        let binary  = compile(&scene, true).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        for el in &decoded.elements {
+            match el {
+                Element::Image(img) => assert_eq!(img.source, MediaSource::FileRef("assets/logo.png".to_string())),
+                other => panic!("expected an Image, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn audio_def_roundtrips() {
+        use msx_ast::{AudioDef, MediaSource};
+
+        let wav_bytes: Vec<u8> = {
+            let mut b = b"RIFF".to_vec();
+            b.extend_from_slice(&[0, 0, 0, 0]);
+            b.extend_from_slice(b"WAVE");
+            b.extend_from_slice(&[0u8; 40]);
+            b
+        };
+
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.defs.push(Def::Audio(AudioDef::new("chime", MediaSource::Embedded(wav_bytes.clone()))));
+
+        let binary  = compile(&scene, true).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        assert_eq!(decoded.defs.len(), 1);
+        match &decoded.defs[0] {
+            Def::Audio(a) => {
+                assert_eq!(a.id, "chime");
+                assert_eq!(a.source, MediaSource::Embedded(wav_bytes));
+            }
+            other => panic!("expected Def::Audio, got {other:?}"),
         }
     }
     }

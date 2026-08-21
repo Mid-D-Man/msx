@@ -1,6 +1,7 @@
 // core/msx-ast/src/element.rs
 
 use crate::layer::Layer;
+use crate::media::{Anchor, MediaSource};
 use crate::path::PathCommand;
 use crate::primitives::Point;
 use crate::sdf::SdfNode;
@@ -29,6 +30,8 @@ pub enum Element {
     Splat(GaussianSplat),
     /// Compositing layer with explicit blend mode and effects.
     Layer(Layer),
+    /// Embedded or file-referenced raster image.
+    Image(Image),
 }
 
 impl Element {
@@ -47,6 +50,7 @@ impl Element {
             Element::Sdf(e)      => e.id.as_deref(),
             Element::Splat(e)    => e.id.as_deref(),
             Element::Layer(e)    => e.id.as_deref(),
+            Element::Image(e)    => e.id.as_deref(),
         }
     }
 
@@ -65,6 +69,7 @@ impl Element {
             Element::Sdf(e)      => e.transform.as_ref(),
             Element::Splat(_)    => None,
             Element::Layer(e)    => e.transform.as_ref(),
+            Element::Image(e)    => e.transform.as_ref(),
         }
     }
 
@@ -83,6 +88,7 @@ impl Element {
             Element::Sdf(_)      => "sdf",
             Element::Splat(_)    => "splat",
             Element::Layer(_)    => "layer",
+            Element::Image(_)    => "image",
         }
     }
 
@@ -223,4 +229,38 @@ pub struct Use {
     pub y:         f64,
     pub id:        Option<String>,
     pub transform: Option<Transform>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Image {
+    pub source:    MediaSource,
+    /// The anchor point's own canvas position — NOT necessarily the
+    /// rendered top-left corner; see `Anchor::top_left_for`, which every
+    /// renderer calls to turn `(x, y, width, height, anchor)` into an
+    /// actual top-left rendering position.
+    pub x:         f64,
+    pub y:         f64,
+    pub width:     f64,
+    pub height:    f64,
+    pub anchor:    Anchor,
+    pub id:        Option<String>,
+    pub transform: Option<Transform>,
+    pub style:     Style,
+}
+
+impl Image {
+    pub fn new(source: MediaSource, x: f64, y: f64, width: f64, height: f64) -> Self {
+        Image {
+            source, x, y, width, height,
+            anchor: Anchor::default(),
+            id: None,
+            transform: None,
+            style: Style::default(),
+        }
+    }
+
+    pub fn with_anchor(mut self, anchor: Anchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
 }

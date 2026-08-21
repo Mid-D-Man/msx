@@ -1,6 +1,7 @@
 // core/msx-ast/src/gradient.rs
 
 use crate::color::Color;
+use crate::media::AudioDef;
 use crate::primitives::fmt_f64;
 
 /// A single gradient color stop.
@@ -201,6 +202,7 @@ pub enum Def {
     RadialGradient(RadialGradient),
     ConicGradient(ConicGradient),
     Shader(ShaderDef),
+    Audio(AudioDef),
 }
 
 impl Def {
@@ -210,6 +212,7 @@ impl Def {
             Def::RadialGradient(g) => &g.id,
             Def::ConicGradient(g)  => &g.id,
             Def::Shader(s)         => &s.id,
+            Def::Audio(a)          => &a.id,
         }
     }
 
@@ -231,6 +234,7 @@ impl Def {
                  (native raster paths use fallback_color {} instead) -->",
                 s.id, s.fallback_color.to_svg_hex()
             ),
+            Def::Audio(a) => format!("<!-- audio '{}': not renderable, no playback anywhere in this project yet -->", a.id),
         }
     }
 }

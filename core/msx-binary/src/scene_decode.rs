@@ -4,9 +4,9 @@
 use std::io;
 
 use msx_ast::{
-    Canvas, Circle, ConicGradient, Def, Element, Ellipse, GaussianSplat, Group, Layer, Line,
-    LinearGradient, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
-    ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
+    Canvas, Circle, ConicGradient, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer,
+    Line, LinearGradient, MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode,
+    Scene, ShaderDef, ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
 };
 
 use crate::decoder::*;
@@ -152,6 +152,12 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let mut shader = ShaderDef::new(id, source_ref, fallback_color).with_entry_point(entry_point);
             shader.uniforms = uniforms;
             Ok(Def::Shader(shader))
+        }
+        TAG_AUDIO => {
+            let id_idx = read_u16(data, cursor)?;
+            let id     = pool.get(id_idx as usize).cloned().unwrap_or_default();
+            let source = decode_media_source(data, cursor, pool)?;
+            Ok(Def::Audio(msx_ast::AudioDef::new(id, source)))
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -317,9 +323,48 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             let z_index = read_f32(data, cursor)?;
             Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, effects, id, transform, z_index }))
         }
+        TAG_IMAGE => {
+            let source = decode_media_source(data, cursor, pool)?;
+            let x      = read_f32(data, cursor)?;
+            let y      = read_f32(data, cursor)?;
+            let width  = read_f32(data, cursor)?;
+            let height = read_f32(data, cursor)?;
+            let anchor = msx_ast::Anchor::from_byte(read_u8(data, cursor)?);
+            let style  = read_style(data, cursor, pool)?;
+            Ok(Element::Image(Image { source, x, y, width, height, anchor, id, transform, style }))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown element tag 0x{:02x}", other),
+        )),
+    }
+}
+
+// ── MediaSource decoding ────────────────────────────────────────────────────
+
+fn decode_media_source(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<MediaSource> {
+    let kind = read_u8(data, cursor)?;
+    match kind {
+        0 => {
+            // u32 length prefix, mirroring TAG_PATH's own d_raw read
+            // above — see encode_media_source's comment for why this
+            // deliberately isn't the string pool.
+            let len = read_u32(data, cursor)? as usize;
+            if *cursor + len > data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "embedded media blob truncated"));
+            }
+            let bytes = data[*cursor..*cursor + len].to_vec();
+            *cursor += len;
+            Ok(MediaSource::Embedded(bytes))
+        }
+        1 => {
+            let idx = read_u16(data, cursor)?;
+            let path = pool.get(idx as usize).cloned().unwrap_or_default();
+            Ok(MediaSource::FileRef(path))
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown MediaSource kind 0x{:02x}", other),
         )),
     }
 }
