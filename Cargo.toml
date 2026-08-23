@@ -1,13 +1,87 @@
-# render/msx-render-svg/Cargo.toml
+# Cargo.toml (root, updated)
+[workspace]
+resolver = "2"
+members = [
+    "core/msx-ast",
+    "core/msx-anim",
+    "core/msx-binary",
+    "core/msx-parser",
+    "render/msx-render-core",
+    "render/msx-render-svg",
+    "render/msx-render-cpu",
+    "render/msx-render-gpu",
+    "primitives/msx-sdf",
+    "primitives/msx-splat",
+    "apps/msx-cli",
+    "apps/msx-viewer",
+]
+
+[workspace.package]
+version    = "0.2.0"
+edition    = "2021"
+authors    = ["MidManStudio"]
+license    = "MIT"
+
+[workspace.dependencies]
+# Internal
+msx-ast         = { path = "core/msx-ast" }
+msx-anim        = { path = "core/msx-anim" }
+msx-binary      = { path = "core/msx-binary" }
+msx-parser      = { path = "core/msx-parser" }
+msx-render-core = { path = "render/msx-render-core" }
+msx-render-svg  = { path = "render/msx-render-svg" }
+msx-render-cpu  = { path = "render/msx-render-cpu" }
+msx-render-gpu  = { path = "render/msx-render-gpu" }
+msx-sdf         = { path = "primitives/msx-sdf" }
+msx-splat       = { path = "primitives/msx-splat" }
+# External siblings
+mbfa      = { path = "../mbfa" }
+dixscript = { path = "../dixscript" }
+# Rendering
+tiny-skia = "0.11"
+rayon     = "1.8"
+glam      = "0.27"
+# GPU (msx-render-gpu) — see that crate's lib.rs docs for the version-risk
+# note. wgpu ships a breaking release roughly every 3 months by its own
+# stated policy, so whatever patch version actually resolves here is worth
+# diffing against the next time this stops compiling.
+wgpu      = "26"
+lyon      = "1.0"
+bytemuck  = { version = "1.14", features = ["derive"] }
+pollster  = "0.3"
+# CLI
+clap  = { version = "4.5", features = ["derive"] }
+image = "0.25"
+# Viewer (apps/msx-viewer) — pinned versions unchanged from what was already
+# in apps/msx-viewer/Cargo.toml; just centralized here so every crate in the
+# workspace sources its versions the same way. pixels 0.17.x and a later
+# winit than 0.30 are both out now — worth a deliberate, tested bump later,
+# not a drive-by version change here.
+winit  = "0.30"
+pixels = "0.15"
+# Dev
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# ── Root package ─ thin re-export so existing CI / tests still run ──────────
+
 [package]
-name        = "msx-render-svg"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description = "MSX SVG export — Scene to SVG 1.1 string"
+name        = "msx"
+version.workspace  = true
+edition.workspace  = true
+authors.workspace  = true
+license.workspace  = true
+description = "MSX — MidStroke eXtension vector format (workspace facade)"
 publish     = false
 
 [dependencies]
-msx-ast = { workspace = true }
-base64  = { workspace = true }
+msx-ast        = { path = "core/msx-ast" }
+msx-binary     = { path = "core/msx-binary" }
+msx-parser     = { path = "core/msx-parser" }
+msx-render-svg = { path = "render/msx-render-svg" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "compare"
+harness = false
