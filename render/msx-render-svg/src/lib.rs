@@ -98,6 +98,7 @@ pub(crate) fn render_element(ctx: &mut Ctx, element: &Element, defs: &[Def]) {
         Element::Sdf(e)      => sdf::render_sdf(ctx, e),
         Element::Splat(e)    => splat::render_splat(ctx, e, defs),
         Element::Layer(e)    => layer::render_layer(ctx, e, defs),
+        Element::Image(e)    => shapes::render_image(ctx, e),
     }
 }
 
@@ -146,8 +147,8 @@ pub(crate) fn escape_text(s: &str) -> String {
 mod tests {
     use super::*;
     use msx_ast::{
-        BlendMode, Canvas, Circle, Color, Def, Effect, Element, GaussianSplat, Layer,
-        LinearGradient, Paint, Rect, Scene, Stop, Style,
+        Anchor, BlendMode, Canvas, Circle, Color, Def, Effect, Element, GaussianSplat, Image,
+        Layer, LinearGradient, MediaSource, Paint, Rect, Scene, Stop, Style,
     };
 
     fn style_solid(color: Color) -> Style {
@@ -181,6 +182,41 @@ mod tests {
         assert!(svg.contains(r##"fill="#ff0000""##));
         assert!(svg.contains("<circle"));
         assert!(svg.ends_with("</svg>"));
+    }
+
+    #[test]
+    fn embedded_image_renders_as_data_uri_with_correct_mime_and_anchor_offset() {
+        let png_bytes: Vec<u8> = {
+            let mut b = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            b.extend_from_slice(&[0u8; 20]);
+            b
+        };
+        let mut scene = Scene::new(Canvas::new(200.0, 200.0, Color::WHITE));
+        scene.elements.push(Element::Image(
+            Image::new(MediaSource::Embedded(png_bytes), 100.0, 100.0, 40.0, 20.0)
+                .with_anchor(Anchor::Center),
+        ));
+
+        let svg = render(&scene);
+        assert!(svg.contains("<image"));
+        assert!(svg.contains("data:image/png;base64,"));
+        assert!(svg.contains(r#"x="80""#));
+        assert!(svg.contains(r#"y="90""#));
+        assert!(svg.contains(r#"width="40""#));
+        assert!(svg.contains(r#"height="20""#));
+    }
+
+    #[test]
+    fn file_ref_image_renders_href_as_plain_path_not_a_data_uri() {
+        let mut scene = Scene::new(Canvas::new(200.0, 200.0, Color::WHITE));
+        scene.elements.push(Element::Image(Image::new(
+            MediaSource::FileRef("assets/logo.png".to_string()),
+            10.0, 10.0, 64.0, 64.0,
+        )));
+
+        let svg = render(&scene);
+        assert!(svg.contains(r#"href="assets/logo.png""#));
+        assert!(!svg.contains("base64"), "a FileRef must never get base64-encoded — only Embedded blobs do");
     }
 
     #[test]

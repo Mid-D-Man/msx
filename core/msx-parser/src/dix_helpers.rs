@@ -5,7 +5,7 @@
 //! foreign types, so there's no orphan-rule conflict.
 
 use dixscript::Runtime::{DixData, DixDeserialize, DixValue, dix_path};
-use msx_ast::{Color, Paint};
+use msx_ast::{Color, MediaSource, Paint};
 
 /// Raw `DixValue` at `prefix.field` (or just `field` if `prefix` is empty).
 pub fn raw<'a>(data: &'a DixData, prefix: &str, field: &str) -> Option<&'a DixValue> {
@@ -26,6 +26,45 @@ pub fn opt<T: DixDeserialize>(data: &DixData, prefix: &str, field: &str) -> Resu
 /// presence check dixscript's own `Option<T>` impl uses internally.
 pub fn path_present(data: &DixData, path: &str) -> bool {
     data.exists(path) || !data.get_keys(path).is_empty()
+}
+
+/// Shared by `element.rs`'s `image` parser and `gradient.rs`'s `audio` def
+/// parser — exactly one of `data` (an embedded base64 string) or
+/// `source_ref` (a file path, same field name and meaning as
+/// `Def::Shader`'s own `source_ref` — see `gradient.rs`'s shader parsing
+/// for why DixScript's lack of a raw/heredoc string type makes a plain
+/// base64 string literal the only way to embed binary content inline at
+/// all today) must be present.
+///
+/// Base64 decoding happens here, once — this is the ONLY place in the
+/// whole pipeline that ever touches base64 in the decode direction (see
+/// `core/msx-ast/src/media.rs`'s own module doc for the full boundary:
+/// `msx-ast`/`msx-binary` only ever see already-decoded raw bytes;
+/// `msx-render-svg` is the only place that touches base64 again at all,
+/// and only to RE-encode for a `data:` URI).
+pub fn parse_media_source(data: &DixData, prefix: &str) -> Result<MediaSource, String> {
+    let embedded = opt::<String>(data, prefix, "data")?;
+    let source_ref = opt::<String>(data, prefix, "source_ref")?;
+    match (embedded, source_ref) {
+        (Some(_), Some(_)) => Err(format!(
+            "{}: specify exactly one of `data` (embedded base64) or `source_ref` (external file path), not both", prefix
+        )),
+        (None, None) => Err(format!(
+            "{}: requires either `data` (embedded base64) or `source_ref` (external file path)", prefix
+        )),
+        (Some(b64), None) => {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            // `.trim()` — DixScript string literals can't contain a raw
+            // newline (see this crate's own lexer), so a genuinely
+            // multi-line-formatted base64 blob isn't possible here
+            // either way, but trimming stray leading/trailing whitespace
+            // from how someone pasted it in is free and harmless.
+            let bytes = STANDARD.decode(b64.trim())
+                .map_err(|e| format!("{}.data: invalid base64 ({})", prefix, e))?;
+            Ok(MediaSource::Embedded(bytes))
+        }
+        (None, Some(path)) => Ok(MediaSource::FileRef(path)),
+    }
 }
 
 /// Length of the array at `prefix.field`, or 0 if absent.

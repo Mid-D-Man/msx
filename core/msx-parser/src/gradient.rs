@@ -1,8 +1,8 @@
 // core/msx-parser/src/gradient.rs
 use dixscript::Runtime::{DixData, dix_path};
-use msx_ast::{Color, ConicGradient, Def, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, Stop};
+use msx_ast::{AudioDef, Color, ConicGradient, Def, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, Stop};
 
-use crate::dix_helpers::{array_len, color_from, opt, raw, type_tag};
+use crate::dix_helpers::{array_len, color_from, opt, parse_media_source, raw, type_tag};
 
 /// Parse the `defs::` (or nested `defs = [...]`) array on the canvas, or on
 /// any future scope that wants its own local defs.
@@ -73,6 +73,19 @@ fn parse_def(data: &DixData, prefix: &str) -> Result<Def, String> {
                     .with_entry_point(entry_point)
                     .with_uniforms(uniforms),
             ))
+        }
+        "audio" => {
+            let id = opt::<String>(data, prefix, "id")?
+                .ok_or_else(|| format!("{}.id: required", prefix))?;
+            // Deliberately NO format-sniff validation here, unlike
+            // `element.rs`'s `parse_image` — see `AudioDef`'s own doc
+            // comment in `media.rs` for why: nothing in this project
+            // plays audio yet, so there's no render-time failure mode
+            // this would be protecting against the way image format
+            // validation protects three different renderers from a
+            // garbled blob.
+            let source = parse_media_source(data, prefix)?;
+            Ok(Def::Audio(AudioDef::new(id, source)))
         }
         other => Err(format!("{}: unknown def type '{}'", prefix, other)),
     }

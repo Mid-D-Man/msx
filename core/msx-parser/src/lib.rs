@@ -337,4 +337,115 @@ mod tests {
 "#;
         assert!(parse_scene(src).is_err());
     }
+
+    #[test]
+    fn image_element_with_embedded_data_parses_and_decodes() {
+        // base64 of an 8-byte PNG signature + 20 zero bytes — verified
+        // independently (outside this crate, since dixscript makes this
+        // crate itself unexecutable in the environment these tests were
+        // authored in) to decode to exactly that.
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 100, height = 100, background = #ffffff }
+  elements::
+    { type = "image", x = 10, y = 10, width = 50, height = 40,
+      data = "iVBORw0KGgoAAAAAAAAAAAAAAAAAAAAAAAAAAA==" }
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        match &scene.elements[0] {
+            Element::Image(img) => {
+                match &img.source {
+                    msx_ast::MediaSource::Embedded(bytes) => {
+                        assert_eq!(&bytes[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+                    }
+                    other => panic!("expected MediaSource::Embedded, got {:?}", other),
+                }
+                assert_eq!((img.x, img.y, img.width, img.height), (10.0, 10.0, 50.0, 40.0));
+                assert_eq!(img.anchor, msx_ast::Anchor::TopLeft, "anchor should default when omitted");
+            }
+            other => panic!("expected Element::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn image_element_with_source_ref_does_not_touch_base64_at_all() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 100, height = 100, background = #ffffff }
+  elements::
+    { type = "image", x = 0, y = 0, width = 20, height = 20,
+      anchor = "center", source_ref = "assets/logo.png" }
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        match &scene.elements[0] {
+            Element::Image(img) => {
+                assert_eq!(img.source, msx_ast::MediaSource::FileRef("assets/logo.png".to_string()));
+                assert_eq!(img.anchor, msx_ast::Anchor::Center);
+            }
+            other => panic!("expected Element::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn image_element_requires_exactly_one_of_data_or_source_ref() {
+        let neither = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  elements::
+    { type = "image", x = 0, y = 0, width = 5, height = 5 }
+)
+"#;
+        assert!(parse_scene(neither).is_err(), "neither data nor source_ref given should be a parse error");
+
+        let both = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  elements::
+    { type = "image", x = 0, y = 0, width = 5, height = 5,
+      data = "iVBORw0KGgoAAAAAAAAAAAAAAAAAAAAAAAAAAA==", source_ref = "a.png" }
+)
+"#;
+        assert!(parse_scene(both).is_err(), "both data AND source_ref given should be a parse error");
+    }
+
+    #[test]
+    fn image_element_rejects_data_that_does_not_sniff_as_a_known_image_format() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  elements::
+    { type = "image", x = 0, y = 0, width = 5, height = 5,
+      data = "dGhpcyBpcyBkZWZpbml0ZWx5IG5vdCBhbiBpbWFnZSwganVzdCB0ZXh0" }
+)
+"#;
+        assert!(parse_scene(src).is_err(), "base64 that decodes to plain text, not PNG/JPEG, should be a parse error");
+    }
+
+    #[test]
+    fn audio_def_parses_via_the_same_media_source_machinery() {
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "audio", id = "chime", source_ref = "assets/chime.wav" }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        match &scene.defs[0] {
+            Def::Audio(a) => {
+                assert_eq!(a.id, "chime");
+                assert_eq!(a.source, msx_ast::MediaSource::FileRef("assets/chime.wav".to_string()));
+            }
+            other => panic!("expected Def::Audio, got {:?}", other),
+        }
+    }
 }

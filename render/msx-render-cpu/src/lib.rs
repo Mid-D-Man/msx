@@ -14,6 +14,7 @@
 mod composite;
 mod effects;
 mod geom;
+mod image;
 mod pixel;
 mod rasterizer;
 mod sdf_raster;
@@ -49,7 +50,22 @@ impl Renderer for CpuRenderer {
 /// Render straight to a `tiny_skia::Pixmap` — the natural type for callers
 /// already in `tiny-skia` (e.g. `.save_png()` directly), skipping the
 /// premultiplied → straight-alpha conversion `RenderTarget` needs.
+///
+/// A `Def::Shader::source_ref`-style `Element::Image::MediaSource::FileRef`
+/// path resolves relative to the current working directory — use
+/// `render_to_pixmap_with_base_dir` instead when that's not correct for
+/// the caller (this mirrors `msx-render-gpu`'s own `render`/
+/// `render_with_shader_dir` split — the base `Renderer` trait doesn't
+/// carry a base directory, so a `Def::Shader`/`Element::Image` file
+/// reference needs a crate-specific entry point either way).
 pub fn render_to_pixmap(scene: &Scene) -> Pixmap {
+    render_to_pixmap_with_base_dir(scene, std::path::Path::new("."))
+}
+
+/// Same as `render_to_pixmap`, but `Element::Image::MediaSource::FileRef`
+/// paths resolve against `base_dir` instead of the current working
+/// directory.
+pub fn render_to_pixmap_with_base_dir(scene: &Scene, base_dir: &std::path::Path) -> Pixmap {
     let width = scene.canvas.width.round().max(1.0) as u32;
     let height = scene.canvas.height.round().max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, height).expect("non-zero canvas dimensions");
@@ -64,7 +80,7 @@ pub fn render_to_pixmap(scene: &Scene) -> Pixmap {
     // own doc for exactly what this does and doesn't reorder (sibling-
     // scoped by z_index, non-Layer elements untouched).
     for element in msx_ast::layer_reordered(&scene.elements) {
-        rasterizer::render_element(&mut pixmap, element, Matrix2D::identity(), &defs, &index);
+        rasterizer::render_element(&mut pixmap, element, Matrix2D::identity(), &defs, &index, base_dir);
     }
 
     pixmap

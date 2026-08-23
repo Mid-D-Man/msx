@@ -69,7 +69,7 @@ impl<'a> ElementIndex<'a> {
 
 // ── Top-level dispatch ──────────────────────────────────────────────────────
 
-pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2D, defs: &Defs, index: &ElementIndex) {
+pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
     match element {
         Element::Rect(e) => fill_and_stroke(pixmap, build_rect_path(e), &e.style, e.transform.as_ref(), transform, defs),
         Element::Circle(e) => fill_and_stroke(pixmap, build_circle_path(e), &e.style, e.transform.as_ref(), transform, defs),
@@ -83,19 +83,20 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
             // No font shaping/rasterization dependency wired in — see
             // lib.rs docs. Intentionally skipped, not faked.
         }
-        Element::Group(g) => render_group(pixmap, g, transform, defs, index),
-        Element::Use(u) => render_use(pixmap, u, transform, defs, index),
+        Element::Group(g) => render_group(pixmap, g, transform, defs, index, base_dir),
+        Element::Use(u) => render_use(pixmap, u, transform, defs, index, base_dir),
         Element::Sdf(node) => rasterize_sdf(pixmap, node, transform, defs),
         Element::Splat(s) => rasterize_splat(pixmap, s, transform, defs),
-        Element::Layer(l) => render_layer(pixmap, l, transform, defs, index),
+        Element::Layer(l) => render_layer(pixmap, l, transform, defs, index, base_dir),
+        Element::Image(img) => crate::image::render_image(pixmap, img, transform, base_dir),
     }
 }
 
-fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
+fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
     let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
     let combined = parent.concat(local);
     for child in msx_ast::layer_reordered(&g.children) {
-        render_element(pixmap, child, combined, defs, index);
+        render_element(pixmap, child, combined, defs, index, base_dir);
     }
     // `g.style` (inheritable style applied to all children) isn't pushed
     // down yet — proper inheritance needs each leaf shape's resolved style
@@ -103,14 +104,14 @@ fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, i
     // track today. Tracked as a follow-up, not silently dropped.
 }
 
-fn render_use(pixmap: &mut Pixmap, u: &Use, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
+fn render_use(pixmap: &mut Pixmap, u: &Use, parent: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
     let id = u.href.strip_prefix('#').unwrap_or(&u.href);
     let Some(target) = index.get(id) else {
         return; // broken reference — SVG renders nothing for these too
     };
     let offset = Matrix2D::translate(u.x, u.y);
     let local = u.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-    render_element(pixmap, target, parent.concat(offset.concat(local)), defs, index);
+    render_element(pixmap, target, parent.concat(offset.concat(local)), defs, index, base_dir);
 }
 
 // ── Fill + stroke ────────────────────────────────────────────────────────────
@@ -198,6 +199,7 @@ pub(crate) fn average_stop_color(def: &Def) -> Color {
         Def::RadialGradient(g) => &g.stops,
         Def::ConicGradient(g) => &g.stops,
         Def::Shader(s) => return s.fallback_color,
+        Def::Audio(_) => return Color::rgba(0, 0, 0, 0),
     };
     if stops.is_empty() {
         return Color::BLACK;

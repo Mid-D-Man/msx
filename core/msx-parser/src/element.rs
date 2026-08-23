@@ -1,11 +1,11 @@
 // core/msx-parser/src/element.rs
 use dixscript::Runtime::{DixData, dix_path};
 use msx_ast::{
-    path::parse_d, Circle, Element, Ellipse, Group, Line, Path, Point, Polyline, Rect, Text,
-    Transform, Use,
+    path::parse_d, Anchor, Circle, Element, Ellipse, Group, Image, ImageFormat, Line, Path,
+    Point, Polyline, Rect, Text, Transform, Use,
 };
 
-use crate::dix_helpers::{array_len, opt, path_present, type_tag};
+use crate::dix_helpers::{array_len, opt, parse_media_source, path_present, type_tag};
 use crate::layer::parse_layer;
 use crate::sdf::parse_sdf_node;
 use crate::splat::parse_splat;
@@ -38,6 +38,7 @@ pub fn parse_element(data: &DixData, prefix: &str) -> Result<Element, String> {
         "sdf"      => parse_sdf_node(data, prefix).map(Element::Sdf),
         "splat"    => parse_splat(data, prefix).map(Element::Splat),
         "layer"    => parse_layer(data, prefix).map(Element::Layer),
+        "image"    => parse_image(data, prefix).map(Element::Image),
         other => Err(format!("{}: unknown element type '{}'", prefix, other)),
     }
 }
@@ -83,6 +84,39 @@ fn parse_ellipse(data: &DixData, prefix: &str) -> Result<Ellipse, String> {
         cy: opt::<f64>(data, prefix, "cy")?.ok_or_else(|| format!("{}.cy: required", prefix))?,
         rx: opt::<f64>(data, prefix, "rx")?.ok_or_else(|| format!("{}.rx: required", prefix))?,
         ry: opt::<f64>(data, prefix, "ry")?.ok_or_else(|| format!("{}.ry: required", prefix))?,
+        id, transform,
+        style: parse_style(data, prefix)?,
+    })
+}
+
+fn parse_image(data: &DixData, prefix: &str) -> Result<Image, String> {
+    let (id, transform) = id_and_transform(data, prefix)?;
+    let source = parse_media_source(data, prefix)?;
+
+    // Only for the Embedded case — a FileRef's bytes aren't even
+    // available yet at parse time (nothing reads the file until a
+    // renderer actually asks for it, each against its own base_dir), so
+    // there's nothing to sniff here for that variant; each renderer
+    // handles a FileRef that turns out not to be a real image on its own
+    // terms at render time instead (see msx-render-cpu's `image.rs` and
+    // msx-render-svg's `render_image` for how — neither panics either
+    // way).
+    if let msx_ast::MediaSource::Embedded(bytes) = &source {
+        if ImageFormat::sniff(bytes).is_none() {
+            return Err(format!(
+                "{}.data: doesn't look like a PNG or JPEG (checked the first few bytes) \
+                 — double check the base64 wasn't corrupted or truncated", prefix
+            ));
+        }
+    }
+
+    Ok(Image {
+        source,
+        x:      opt::<f64>(data, prefix, "x")?.ok_or_else(|| format!("{}.x: required", prefix))?,
+        y:      opt::<f64>(data, prefix, "y")?.ok_or_else(|| format!("{}.y: required", prefix))?,
+        width:  opt::<f64>(data, prefix, "width")?.ok_or_else(|| format!("{}.width: required", prefix))?,
+        height: opt::<f64>(data, prefix, "height")?.ok_or_else(|| format!("{}.height: required", prefix))?,
+        anchor: opt::<String>(data, prefix, "anchor")?.map(|s| Anchor::parse(&s)).unwrap_or_default(),
         id, transform,
         style: parse_style(data, prefix)?,
     })

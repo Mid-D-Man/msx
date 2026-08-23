@@ -18,14 +18,14 @@ use crate::pixel::{read_premul, write_premul};
 use crate::rasterizer::{render_element, Defs, ElementIndex};
 use msx_render_core::PremulColor;
 
-pub fn render_layer(pixmap: &mut Pixmap, layer: &Layer, parent: Matrix2D, defs: &Defs, index: &ElementIndex) {
+pub fn render_layer(pixmap: &mut Pixmap, layer: &Layer, parent: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
     let local = layer.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
     let combined = parent.concat(local);
 
     let Some(mut buffer) = Pixmap::new(pixmap.width(), pixmap.height()) else { return };
 
     for child in msx_ast::layer_reordered(&layer.children) {
-        render_element(&mut buffer, child, combined, defs, index);
+        render_element(&mut buffer, child, combined, defs, index, base_dir);
     }
 
     apply_effects(&mut buffer, &layer.effects);
@@ -74,11 +74,11 @@ mod tests {
         let empty_index = ElementIndex::build(&[]);
 
         let circle_a = solid_circle(20.0, 20.0, 10.0, Color::rgb(200, 50, 50));
-        render_element(&mut direct, &circle_a, Matrix2D::identity(), &defs, &empty_index);
+        render_element(&mut direct, &circle_a, Matrix2D::identity(), &defs, &empty_index, std::path::Path::new("."));
 
         let circle_b = solid_circle(20.0, 20.0, 10.0, Color::rgb(200, 50, 50));
         let layer = Layer::new(vec![circle_b]);
-        render_layer(&mut via_layer, &layer, Matrix2D::identity(), &defs, &empty_index);
+        render_layer(&mut via_layer, &layer, Matrix2D::identity(), &defs, &empty_index, std::path::Path::new("."));
 
         assert_eq!(direct.data(), via_layer.data());
     }
@@ -95,7 +95,7 @@ mod tests {
         let mut layer = Layer::new(vec![circle]);
         layer.opacity = 0.0;
 
-        render_layer(&mut pixmap, &layer, Matrix2D::identity(), &defs, &index);
+        render_layer(&mut pixmap, &layer, Matrix2D::identity(), &defs, &index, std::path::Path::new("."));
         assert_eq!(pixmap.data(), before.as_slice());
     }
         }

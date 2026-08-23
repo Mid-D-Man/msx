@@ -1,6 +1,7 @@
 // render/msx-render-svg/src/shapes.rs
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use msx_ast::path::commands_to_d;
-use msx_ast::{fmt_f64, Circle, Def, Ellipse, Group, Line, Path, Polyline, Rect, Text, Use};
+use msx_ast::{fmt_f64, Circle, Def, Ellipse, Group, Image, ImageFormat, Line, MediaSource, Path, Polyline, Rect, Text, Use};
 
 use crate::{escape_attr, escape_text, render_element, write_attr, write_id, write_style, write_transform, Ctx};
 
@@ -125,3 +126,26 @@ pub(crate) fn render_use(ctx: &mut Ctx, u: &Use) {
     write_transform(ctx, u.transform.as_ref());
     ctx.push("/>");
   }
+
+pub(crate) fn render_image(ctx: &mut Ctx, img: &Image) {
+    ctx.push("<image");
+    let (tl_x, tl_y) = img.anchor.top_left_for(img.x, img.y, img.width, img.height);
+    write_attr(ctx, "x", fmt_f64(tl_x));
+    write_attr(ctx, "y", fmt_f64(tl_y));
+    write_attr(ctx, "width", fmt_f64(img.width));
+    write_attr(ctx, "height", fmt_f64(img.height));
+
+    let href = match &img.source {
+        MediaSource::Embedded(bytes) => {
+            let mime = ImageFormat::sniff(bytes).map(|f| f.mime()).unwrap_or("application/octet-stream");
+            format!("data:{mime};base64,{}", BASE64.encode(bytes))
+        }
+        MediaSource::FileRef(path) => path.clone(),
+    };
+    write_attr(ctx, "href", escape_attr(&href));
+
+    write_id(ctx, img.id.as_deref());
+    write_transform(ctx, img.transform.as_ref());
+    write_style(ctx, &img.style);
+    ctx.push("/>");
+}

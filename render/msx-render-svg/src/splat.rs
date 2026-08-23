@@ -88,6 +88,7 @@ fn average_stop_color(def: &Def) -> Color {
         Def::RadialGradient(g) => &g.stops,
         Def::ConicGradient(g) => &g.stops,
         Def::Shader(s) => return s.fallback_color,
+        Def::Audio(_) => return Color::rgba(0, 0, 0, 0),
     };
     if stops.is_empty() {
         return Color::BLACK;

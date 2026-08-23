@@ -495,6 +495,7 @@ fn draw_run(
     splat_pipeline: &SplatPipeline,
     shader_pipeline: &ShaderFillPipeline,
     masked_shader_composite: &MaskedShaderComposite,
+    image_pipeline: &crate::image::ImagePipeline,
     defs: &vector::Defs,
     shader_base_dir: &std::path::Path,
     time: f32,
@@ -523,6 +524,14 @@ fn draw_run(
         Some(&SplatShaderContext { shader_pipeline, composite: masked_shader_composite, shader_base_dir, time }),
     );
     queue.submit(std::iter::once(encoder.finish()));
+
+    // Not recorded into the shared `encoder` above like SDF/splat are —
+    // `ImagePipeline::draw_all_elements` manages its own encoder(s)
+    // internally (one per image, since each needs a real texture upload
+    // via `queue.write_texture` ahead of its own draw call), so this
+    // runs as its own, separate step after the rest of this run's
+    // submission, not folded into it.
+    image_pipeline.draw_all_elements(device, queue, view, run, transform, canvas, shader_base_dir);
 }
 
 /// Walks `elements` in real paint order (`paint_order`, above) and
