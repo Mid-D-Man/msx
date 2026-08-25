@@ -278,6 +278,7 @@ impl LayerCompositor {
         splat_pipeline: &SplatPipeline,
         shader_pipeline: &ShaderFillPipeline,
         masked_shader_composite: &MaskedShaderComposite,
+        image_pipeline: &crate::image::ImagePipeline,
         scene_defs: &[Def],
         shader_base_dir: &std::path::Path,
         time: f32,
@@ -329,6 +330,7 @@ impl LayerCompositor {
             splat_pipeline,
             shader_pipeline,
             masked_shader_composite,
+            image_pipeline,
             &defs,
             scene_defs,
             shader_base_dir,
@@ -593,6 +595,7 @@ pub(crate) fn render_ordered(
     splat_pipeline: &SplatPipeline,
     shader_pipeline: &ShaderFillPipeline,
     masked_shader_composite: &MaskedShaderComposite,
+    image_pipeline: &crate::image::ImagePipeline,
     defs: &vector::Defs,
     scene_defs: &[Def],
     shader_base_dir: &std::path::Path,
@@ -619,7 +622,7 @@ pub(crate) fn render_ordered(
                 draw_run(
                     device, queue, view, run, transform, canvas, None,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-                    masked_shader_composite, defs, shader_base_dir, time,
+                    masked_shader_composite, image_pipeline, defs, shader_base_dir, time,
                 );
                 for el in run.iter() {
                     if let Element::Group(g) = el {
@@ -635,7 +638,7 @@ pub(crate) fn render_ordered(
                 layer_compositor.render_layer(
                     device, queue, view, layer, transform, canvas_u32,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-                    masked_shader_composite, scene_defs, shader_base_dir, time,
+                    masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
                 );
             }
         }
@@ -648,7 +651,7 @@ pub(crate) fn render_ordered(
         layer_compositor.render_layer(
             device, queue, view, layer, *layer_transform, canvas_u32,
             vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-            masked_shader_composite, scene_defs, shader_base_dir, time,
+            masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
         );
     }
 }

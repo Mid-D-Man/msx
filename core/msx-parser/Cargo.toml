@@ -11,3 +11,4 @@ publish     = false
 [dependencies]
 msx-ast   = { workspace = true }
 dixscript = { workspace = true }
+base64    = { workspace = true }

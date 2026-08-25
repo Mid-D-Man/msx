@@ -56,6 +56,7 @@
 //! Layer-specific, they're gaps everywhere in this crate).
 
 mod context;
+mod image;
 mod layer;
 mod masked_shader_composite;
 mod pipeline;
@@ -79,6 +80,7 @@ use std::path::Path;
 
 use msx_ast::{Matrix2D, Scene};
 use msx_render_core::{RenderTarget, Renderer};
+use crate::image::ImagePipeline;
 use masked_shader_composite::MaskedShaderComposite;
 use shader::ShaderFillPipeline;
 
@@ -90,6 +92,7 @@ pub struct GpuRenderer {
     shader_pipeline: ShaderFillPipeline,
     masked_shader_composite: MaskedShaderComposite,
     layer_compositor: LayerCompositor,
+    image_pipeline: ImagePipeline,
 }
 
 impl GpuRenderer {
@@ -102,7 +105,8 @@ impl GpuRenderer {
         let shader_pipeline = ShaderFillPipeline::new(&context.device, format);
         let masked_shader_composite = MaskedShaderComposite::new(&context.device, format);
         let layer_compositor = LayerCompositor::new(&context.device, format);
-        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, masked_shader_composite, layer_compositor })
+        let image_pipeline = ImagePipeline::new(&context.device, format);
+        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, masked_shader_composite, layer_compositor, image_pipeline })
     }
 
     /// Renders exactly like the `Renderer` trait's `render`, but with
@@ -167,6 +171,7 @@ impl GpuRenderer {
             &self.splat_pipeline,
             &self.shader_pipeline,
             &self.masked_shader_composite,
+            &self.image_pipeline,
             &defs,
             &scene.defs,
             shader_base_dir,
