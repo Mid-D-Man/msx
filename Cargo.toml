@@ -51,14 +51,19 @@ bytemuck  = { version = "1.14", features = ["derive"] }
 pollster  = "0.3"
 # CLI
 clap  = { version = "4.5", features = ["derive"] }
-# Pinned to exactly 0.25.0 with only the two decoders this project actually
-# uses (PNG, JPEG) — default features pull in the avif encoder path
+# Pinned to exactly 0.25.0 with only the three codecs this workspace
+# actually uses (PNG/JPEG for Element::Image, GIF for msx-cli's animation
+# export) — default features additionally pull in the avif encoder path
 # (ravif -> rav1e -> avif-serialize), and avif-serialize needs Cargo's
 # edition2024 support, which this workspace's rustc/cargo (capped at 1.75 in
 # CI/sandbox) doesn't have. A bare `image = "0.25"` resolves a newer 0.25.x
 # patch by default and pulls that chain in even with default-features left
 # on — confirmed by a real `cargo test` failure before this pin was added.
-image = { version = "=0.25.0", default-features = false, features = ["png", "jpeg"] }
+# `gif` was confirmed separately, in isolation, to pull in only
+# weezl/color_quant/gif (all pure Rust, no edition2024 requirement) before
+# being added here — apps/msx-cli/src/main.rs's GifEncoder usage needs it,
+# and was broken by an earlier, too-narrow version of this same pin.
+image = { version = "=0.25.0", default-features = false, features = ["png", "jpeg", "gif"] }
 # Base64 — the only two crates that ever touch it are msx-parser (decodes an
 # embedded Image/Audio blob's base64 string literal) and msx-render-svg
 # (re-encodes bytes into a `data:` URI). msx-ast/msx-binary never touch it.
