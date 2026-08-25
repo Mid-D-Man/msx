@@ -1,22 +1,80 @@
 // .mdix/replacements/replacements.mdix
-// Drops the msx-anim resolver (Phase 2), animations::/duration/loop_mode
-// DixScript parsing (Phase 3, parser half), the msx-cli `animate` GIF
-// subcommand, the Pages-report animation wiring, mixed SDF+splat
-// animation tests, and the Def::Shader embedding (external .wgsl
-// reference + binary codec + safe non-executing fallbacks) — everything
-// built across this conversation, all in one drop.
 //
-// Every other file in this folder sits at its real target path already
-// (core/msx-anim/src/lib.rs etc.) — nested paths resolve directly under
-// target_root, no search, no ambiguity, which is exactly why this was
-// worth doing over hand-copying: this file set has THREE lib.rs files,
-// TWO gradient.rs files, and several Cargo.toml files, all of which would
-// be genuinely ambiguous under plain basename search.
+// This drop fixes the CI break the previous drop
+// (msx-image-audio-COMPLETE-DROP.tar.gz) introduced, and finishes the
+// msx-render-gpu Image wiring the handover after that left incomplete.
+//
+// ROOT CAUSE of the CI break: this file used to carry a blanket
+//   overrides::
+//     target("Cargo.toml", "./Cargo.toml")
+// which forces ANY file named "Cargo.toml" anywhere in an applied
+// tarball to land at the workspace ROOT, regardless of its real nested
+// path inside the tarball. When the image/audio drop included
+// render/msx-render-svg/Cargo.toml (to add its new `base64` dep), that
+// override redirected it on top of the real workspace-root Cargo.toml
+// instead — clobbering `[workspace]`/`[workspace.dependencies]`
+// entirely. The root Cargo.toml was manually reconstructed afterward,
+// but the `base64` dependency it had accidentally picked up got dropped
+// in that reconstruction rather than routed to where it actually
+// belonged, and the equivalent `image` dependency for
+// msx-render-cpu/msx-render-gpu was never added at all — hence
+// msx-parser failing CI with "cannot find crate `base64`".
+//
+// THE FIX, going forward: that override is gone. A bare basename
+// override like `target("Cargo.toml", ...)` is dangerous in THIS repo
+// specifically because there are 13 different Cargo.toml files in the
+// tree (root + one per crate) — the override-matching check runs BEFORE
+// nested-path resolution and matches on bare basename, so it silently
+// catches every one of them, not just the one it was written for.
+// Nested paths already resolve correctly on their own (direct,
+// target_root-relative, no search, no ambiguity) — that's why removing
+// the override outright is the fix, not narrowing it.
+//
+// The ONE file in this drop that's genuinely at the repo root (the
+// workspace Cargo.toml itself) is shipped inside the archive as
+// `ROOT_Cargo.toml` — a name no other file in this repo's tree could
+// ever collide with — and mapped via an explicit override below. This
+// is the documented mdix-scaffold pattern for exactly this situation
+// (see MDIX_SCAFFOLD_SKILL.md's "Gotcha, found the hard way"): don't
+// override a shared basename, rename the flat file to something
+// globally unique and override THAT.
+//
+// Everything else in this drop sits inside the archive at its real
+// nested subdirectory path (core/msx-parser/Cargo.toml,
+// render/msx-render-svg/Cargo.toml, render/msx-render-cpu/Cargo.toml,
+// render/msx-render-gpu/Cargo.toml, render/msx-render-gpu/src/lib.rs,
+// render/msx-render-gpu/src/layer.rs) — resolved directly by path, never
+// touches the override, never searches.
+//
+// What this drop's file contents actually do:
+//   - adds the missing `base64` workspace dependency (msx-parser,
+//     msx-render-svg) and `image` workspace dependency (msx-render-cpu,
+//     msx-render-gpu) that their own source already required
+//   - pins `image` to `=0.25.0` with `default-features = false,
+//     features = ["png", "jpeg"]` in the root workspace manifest — a
+//     bare `image = "0.25"` (even individually re-pinned via
+//     `cargo update --precise`) still resolves a default-feature build
+//     that pulls in the avif encoder path (ravif -> rav1e ->
+//     avif-serialize), and avif-serialize needs Cargo's edition2024
+//     support, unavailable at this workspace's capped rustc/cargo 1.75.
+//     Restricting features at the Cargo.toml level avoids that chain
+//     ever being resolved in the first place. Confirmed via a real,
+//     from-scratch `cargo test` in an isolated workspace at rustc 1.75.
+//   - finishes msx-render-gpu's Image wiring: `mod image;` was never
+//     declared in lib.rs even though layer.rs's `draw_run` already
+//     referenced `crate::image::ImagePipeline` (an existing,
+//     compile-blocking gap independent of the dependency issue above);
+//     `GpuRenderer` now constructs and stores an `ImagePipeline` and
+//     threads it through `render_ordered`'s signature, its call to
+//     `draw_run`, and BOTH of its calls to `LayerCompositor::render_layer`
+//     (the sibling-scoped `Composite` arm AND the Group-nested-layers
+//     leftover loop — the previous handover's fix plan only accounted
+//     for one of these two call sites)
 
 @CONFIG(
   version    -> "1.0.0"
   author     -> "MidManStudio"
-  
+
   debug_mode -> "off"
 )
 
@@ -26,7 +84,7 @@
 
 @DATA(
   target_root = "."
-overrides::
-  target("Cargo.toml", "./Cargo.toml")
-  
+
+  overrides::
+    target("ROOT_Cargo.toml", "./Cargo.toml")
 )
