@@ -207,6 +207,12 @@ fn tessellate_element(
         Element::Sdf(_) | Element::Splat(_) => {
             // sdf.rs / splat.rs handle these in their own passes.
         }
+        Element::Image(_) => {
+            // image.rs's ImagePipeline handles these in its own pass
+            // (called separately by layer.rs's draw_run) — a raster
+            // image has no vector path to tessellate here, same
+            // reasoning as Sdf/Splat/Layer just above.
+        }
         Element::Layer(_) => {
             // layer.rs handles these via its own isolated render +
             // composite — never flattened into the shared vector pass.
@@ -456,6 +462,11 @@ pub(crate) fn average_stop_color(def: &Def) -> Color {
         Def::RadialGradient(g) => &g.stops,
         Def::ConicGradient(g) => &g.stops,
         Def::Shader(s) => return s.fallback_color,
+        // Same transparent fallback as msx-render-svg's splat.rs and
+        // msx-render-cpu's rasterizer.rs — Audio has no visual
+        // representation, this function is only ever reached via a
+        // Paint::Ref that happens to point at a non-visual def.
+        Def::Audio(_) => return Color::rgba(0, 0, 0, 0),
     };
     if stops.is_empty() {
         return Color::BLACK;
