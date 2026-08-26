@@ -14,6 +14,16 @@ impl RenderTarget {
         RenderTarget { width, height, pixels: vec![0u8; (width as usize) * (height as usize) * 4] }
     }
 
+    // `as_chunks_mut::<4>()` (clippy's own suggestion here) is a nicer,
+    // compile-time-checked way to express this — but it's still gated
+    // behind the unstable `slice_as_chunks` feature at this workspace's
+    // rustc 1.75 floor (confirmed directly: `v.as_chunks_mut::<4>()`
+    // fails with `error[E0658]: use of unstable library feature`).
+    // `chunks_exact_mut` has been stable since 1.31 and is exactly as
+    // correct here; this lint is a newer, pedantic style preference from
+    // a clippy version well ahead of what this crate can actually
+    // require yet, not a real issue with the code.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn fill(&mut self, color: [u8; 4]) {
         for px in self.pixels.chunks_exact_mut(4) {
             px.copy_from_slice(&color);
