@@ -21,37 +21,50 @@
 //! `msx-render-cpu` already has all of these; the GPU path doesn't have
 //! texture-sampling/blur infrastructure built yet.
 //!
-//! **Layer paint order is now sibling-scoped**, matching
-//! `msx-render-svg`/`msx-render-cpu`'s own `layer_reordered`-based
-//! behavior: a `Layer` only ever trades paint-order places with another
-//! `Layer` in the SAME sibling list (`paint_order`, below, calls the
-//! exact same `msx_ast::layer::layer_reordered` those two renderers use
-//! — not a separate reimplementation), and a non-`Layer` sibling's
-//! position relative to any `Layer` around it is always respected. This
-//! replaced the old behavior (every `Layer` anywhere composited after
-//! every non-`Layer` element, unconditionally, sorted globally against
-//! every other `Layer` in the whole scene regardless of nesting depth).
-//! Two deliberate scope boundaries remain, both flagged rather than
-//! silently half-fixed:
+//! **Layer paint order is sibling-scoped, at every nesting level,
+//! including nesting itself.** A `Layer` only ever trades paint-order
+//! places with another `Layer` in the SAME sibling list (`paint_order`,
+//! below, calls the exact same `msx_ast::layer::layer_reordered`
+//! `msx-render-svg`/`msx-render-cpu` use — not a separate
+//! reimplementation), and a non-`Layer` sibling's position relative to
+//! any `Layer` around it is always respected. This replaced the old
+//! behavior (every `Layer` anywhere composited after every non-`Layer`
+//! element, unconditionally, sorted globally against every other `Layer`
+//! in the whole scene regardless of nesting depth).
 //!
-//! - **A `Layer` nested inside a `Group` still keeps the OLD behavior**
-//!   (found via `collect_layers`'s existing Group-recursion, composited
-//!   after everything else in whichever sibling list contains that
-//!   Group, sorted globally against every other Group-nested Layer found
-//!   the same way in that list) — see `render_ordered`'s own doc comment
-//!   for why: real sibling-scoping there would mean teaching
-//!   `vector.rs`/`sdf.rs`/`splat.rs`'s own internal Group-recursion about
-//!   `paint_order` too, a materially bigger, separate change.
-//! - **Nested layers** (a `Layer` inside another `Layer`) still aren't
-//!   rendered — `render_ordered` takes an `allow_nested_layers` flag,
-//!   `false` whenever it's walking a `Layer`'s own children, that turns
-//!   any `Layer` found there into a silent no-op. This is a deliberate
-//!   restriction, not a leftover limitation: nested-layer semantics
-//!   (opacity composition across levels, whether z_index should even
-//!   compare across a nesting boundary) aren't decided or tested
-//!   anywhere in this project yet, not just here — enabling it as an
-//!   incidental side effect of the ordering fix would trade one
-//!   cross-renderer divergence for a new, unspecified one.
+//! The decided nesting model (matching what `msx-render-svg`/
+//! `msx-render-cpu` already do by construction, via plain recursive
+//! dispatch — see those crates' `render_layer`/`render_element`): a
+//! nested `Layer`'s `z_index` is resolved purely against its own
+//! immediate siblings, at its own nesting level, BEFORE the level
+//! containing it is resolved — never against a `Layer` at a different
+//! depth. Opacity composes the same way: a nested `Layer` composites
+//! at its own opacity into its parent's buffer first, and the parent
+//! then composites that already-attenuated result at ITS OWN opacity —
+//! so visual opacity across N nesting levels is the product of all N
+//! opacities, purely as an emergent property of resolving each level
+//! before the one above it, never a separate multiply this crate
+//! computes directly. Two cases previously fell outside this:
+//!
+//! - **A `Layer` nested inside a `Group`** is now given the exact same
+//!   local, sibling-scoped treatment as one nested inside a `Layer`:
+//!   `paint_order` (below) pulls any `Group` that transitively contains
+//!   a `Layer` out of its surrounding `Run` and recurses into it with
+//!   its own fresh `paint_order` call scoped to `group.children` (see
+//!   `PaintOp::GroupSplit` and `render_ops`), drawn inline at exactly
+//!   the Group's real position in its parent's document order — not
+//!   collected into one global bucket and composited last, which is
+//!   what this crate did before. A `Group` that contains no `Layer`
+//!   anywhere in its subtree is untouched by any of this and still goes
+//!   through `vector.rs`/`sdf.rs`/`splat.rs`'s own fast internal
+//!   Group-recursion as one ordinary tessellated batch, exactly as
+//!   before — only a Group that actually needs a composite pass
+//!   somewhere inside it pays for this extra recursion.
+//! - **A `Layer` nested inside another `Layer`** now renders for real:
+//!   `render_layer`'s own call into `render_ops` (below) is no longer
+//!   restricted, so a `Composite` op found while walking a `Layer`'s
+//!   own children performs a genuine recursive `render_layer` call at
+//!   that exact point, instead of being silently skipped.
 //!
 //! Ordering WITHIN one contiguous non-`Layer` run — vector shapes vs SDF
 //! nodes vs splats vs each other — is unaffected by any of this and
@@ -90,7 +103,7 @@
 
 use wgpu::util::DeviceExt;
 
-use msx_ast::{Def, Element, Layer, Matrix2D};
+use msx_ast::{Def, Element, Group, Layer, Matrix2D};
 
 use crate::masked_shader_composite::MaskedShaderComposite;
 use crate::sdf::SdfPipeline;
@@ -308,12 +321,17 @@ impl LayerCompositor {
 
         // `render_ordered` instead of a direct tessellate+draw of
         // `layer.children`: a Layer's own children get the exact same
-        // sibling-scoped Layer-ordering treatment the top level does
-        // (this is what makes a Layer-containing-Layer-and-Rect-siblings
-        // case correct at ANY nesting depth of `render_layer` calls, not
-        // just at the very top) — with `allow_nested_layers = false`, so
-        // a Layer nested inside THIS Layer is still silently skipped,
-        // same restriction `collect_layers` always had. See
+        // sibling-scoped Layer-ordering treatment the top level does —
+        // including a `Layer` nested directly inside THIS Layer, which
+        // now renders for real (a `Composite` op found by `render_ops`
+        // below is never suppressed) — so a
+        // Layer-containing-Layer-and-Rect-siblings case is correct at
+        // ANY nesting depth of `render_layer` calls, not just at the
+        // very top. Its own opacity composites into `buffer` here first,
+        // then `buffer` as a whole composites into `view` below at
+        // `layer.opacity` — the two multiply together purely because
+        // each level resolves before the one above it, not because
+        // anything here computes a product directly. See
         // `render_ordered`'s own doc comment for the full reasoning.
         render_ordered(
             device,
@@ -323,7 +341,6 @@ impl LayerCompositor {
             combined,
             canvas_f,
             wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-            false,
             self,
             vector_pipeline,
             sdf_pipeline,
@@ -390,28 +407,28 @@ impl LayerCompositor {
     }
 }
 
-/// Recurses through `Group`, collects `Layer` elements with their
-/// accumulated transform — does NOT descend into a found `Layer`'s own
-/// children (no nested-layer support; see module docs).
+/// Whether `elements`, reachable purely through `Group` nesting (never
+/// descending into a `Layer`'s own children — each `Layer` gets its own
+/// separate recursive `paint_order` scope via `PaintOp::Composite`, not
+/// this check), contains at least one `Element::Layer` anywhere in the
+/// subtree.
 ///
-/// Kept exactly as it always was. `render_ordered` (below) no longer
-/// calls this at the TOP of a sibling list — top-level Layers now go
-/// through `paint_order`'s real sibling-scoped treatment instead — but
-/// still calls it, deliberately, for Layers found nested inside a
-/// `Group`: see `render_ordered`'s own doc for why that case keeps this
-/// function's original global-collect-then-composite-last behavior
-/// rather than also being taught `paint_order`'s finer-grained ordering.
-pub fn collect_layers<'a>(elements: &'a [Element], transform: Matrix2D, out: &mut Vec<(&'a Layer, Matrix2D)>) {
-    for el in elements {
-        match el {
-            Element::Layer(l) => out.push((l, transform)),
-            Element::Group(g) => {
-                let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-                collect_layers(&g.children, transform.concat(local), out);
-            }
-            _ => {}
-        }
-    }
+/// This is the one question that decides whether a `Group` needs to be
+/// pulled out of its surrounding `Run` and given its own recursive
+/// `paint_order` pass (`PaintOp::GroupSplit`) or can stay exactly where
+/// it is, tessellated inline as ordinary content by `vector.rs`/`sdf.rs`/
+/// `splat.rs`'s own existing internal Group-recursion — which is correct
+/// and unchanged for the common case (a Group with no Layer anywhere
+/// inside it), but cannot represent a Layer's isolated-buffer-plus-
+/// composite semantics at all, since tessellation only ever produces
+/// vertices for the shared vertex/index buffers those crates draw in one
+/// batch.
+fn group_contains_layer(elements: &[Element]) -> bool {
+    elements.iter().any(|el| match el {
+        Element::Layer(_) => true,
+        Element::Group(g) => group_contains_layer(&g.children),
+        _ => false,
+    })
 }
 
 /// One step in a single sibling list's real final paint order — see
@@ -431,18 +448,26 @@ enum PaintOp<'a> {
     /// indices where a `Layer` originally sat).
     Run(&'a [Element]),
     Composite(&'a Layer),
+    /// A `Group`, at this exact position in the sibling list, whose
+    /// subtree contains a `Layer` somewhere (`group_contains_layer`) and
+    /// therefore can't be folded into a surrounding `Run`'s ordinary
+    /// tessellated batch. Recursed into via `render_ops`'s own
+    /// `paint_order(&group.children)` call, not tessellated here.
+    GroupSplit(&'a Group),
 }
 
 /// Splits `elements` into the ordered sequence of `PaintOp`s that
-/// reflects this ONE sibling list's real paint order — the piece that
-/// was missing before this fix. Previously (`collect_layers` called at
-/// the top of the whole tree) every `Layer` anywhere painted after every
-/// non-`Layer` element, unconditionally, sorted against every OTHER
-/// `Layer` in the whole scene regardless of nesting depth. This asks the
-/// same question SVG/CPU already ask via `layer_reordered`, but scoped
-/// to exactly one sibling list at a time, and preserves exactly where
-/// each resulting composite falls relative to its real non-`Layer`
-/// neighbors in THIS list.
+/// reflects this ONE sibling list's real paint order. This asks the same
+/// question SVG/CPU already ask via `layer_reordered`, but scoped to
+/// exactly one sibling list at a time, and preserves exactly where each
+/// resulting `Composite`/`GroupSplit` falls relative to its real
+/// non-`Layer` neighbors in THIS list.
+///
+/// `layer_reordered` only ever moves `Layer`-occupied slots (see its own
+/// doc); every `Group` slot — whether or not it needs `GroupSplit` — is
+/// therefore guaranteed to sit at the exact same index in `reordered` as
+/// in `elements`, the same invariant the existing `Run` slicing below
+/// already relies on for non-`Layer` elements generally.
 fn paint_order(elements: &[Element]) -> Vec<PaintOp<'_>> {
     let reordered = msx_ast::layer::layer_reordered(elements);
     debug_assert_eq!(reordered.len(), elements.len(), "layer_reordered must be a same-length permutation");
@@ -450,12 +475,22 @@ fn paint_order(elements: &[Element]) -> Vec<PaintOp<'_>> {
     let mut ops = Vec::new();
     let mut run_start = 0usize;
     for (i, el) in reordered.iter().enumerate() {
-        if let Element::Layer(layer) = el {
-            if run_start < i {
-                ops.push(PaintOp::Run(&elements[run_start..i]));
+        match el {
+            Element::Layer(layer) => {
+                if run_start < i {
+                    ops.push(PaintOp::Run(&elements[run_start..i]));
+                }
+                ops.push(PaintOp::Composite(layer));
+                run_start = i + 1;
             }
-            ops.push(PaintOp::Composite(layer));
-            run_start = i + 1;
+            Element::Group(g) if group_contains_layer(&g.children) => {
+                if run_start < i {
+                    ops.push(PaintOp::Run(&elements[run_start..i]));
+                }
+                ops.push(PaintOp::GroupSplit(g));
+                run_start = i + 1;
+            }
+            _ => {}
         }
     }
     if run_start < elements.len() {
@@ -536,49 +571,15 @@ fn draw_run(
     image_pipeline.draw_all_elements(device, queue, view, run, transform, canvas, shader_base_dir);
 }
 
-/// Walks `elements` in real paint order (`paint_order`, above) and
-/// issues the corresponding operations into `view`: each `Run` gets
-/// `draw_run`'s existing batch treatment, each `Composite` gets a real,
-/// recursive `render_layer` call at exactly that point in the sequence
-/// — replacing the old "every non-Layer element first, then every Layer
-/// anywhere, sorted globally, always last" split entirely.
-///
-/// `view` is unconditionally cleared to `initial_clear` as the very
-/// first operation, before anything in `elements` is looked at — this
-/// has to happen regardless of whether `elements` happens to start with
-/// a `Layer` (no leading `Run` to piggyback a clear onto) or is empty,
-/// so it's pulled out as its own explicit step rather than special-cased
-/// onto "whichever op happens to run first."
-///
-/// `allow_nested_layers = false` makes any `Composite` encountered here
-/// a silent no-op instead of a real render — this is what keeps a
-/// `Layer` nested inside another `Layer` unsupported, on purpose, same
-/// as `collect_layers` always refusing to descend into one. Nested-layer
-/// semantics (opacity composition across levels, whether z_index should
-/// even compare across a nesting boundary) aren't decided or tested
-/// ANYWHERE in this project yet — not just here, `msx-render-svg`/
-/// `msx-render-cpu` have zero nested-layer tests either. Making this
-/// function naturally recursive would have made nested layers "work" as
-/// an incidental side effect of this fix; that would trade one
-/// cross-renderer divergence (Layer ordering, what this fix is actually
-/// for) for a new, unspecified one (GPU alone having some behavior for
-/// nested layers that nothing else in the project agrees on). `lib.rs`
-/// calls this with `true`; `render_layer` below calls it on its own
-/// `layer.children` with `false`.
-///
-/// Layers found nested inside a `Group` (at any depth) within a `Run`
-/// are deliberately NOT given this same sibling-scoped treatment — see
-/// this function's body: each `Run`'s `Group` children are still walked
-/// with the old `collect_layers`, and every layer found that way across
-/// this whole `elements` list composites after everything else here,
-/// sorted globally against each other (exactly `collect_layers`'s
-/// original behavior, just no longer swallowing top-level Layers too).
-/// Teaching `vector.rs`/`sdf.rs`/`splat.rs`'s OWN internal
-/// Group-recursion about `paint_order` as well, so a Layer nested inside
-/// a Group gets real sibling-scoping against ITS OWN Group-level
-/// siblings, is a materially bigger, separate change — this preserves
-/// today's exact (already-existing, non-regressing) behavior for that
-/// case instead of silently dropping those layers or half-fixing them.
+/// Entry point: clears `view` to `initial_clear`, then hands off to
+/// `render_ops` for the actual walk. `view` is unconditionally cleared
+/// as its own explicit first step — before anything in `elements` is
+/// looked at — because this has to happen regardless of whether
+/// `elements` happens to start with a `Layer` (no leading `Run` to
+/// piggyback a clear onto) or is empty; recursive calls for nested
+/// `Layer`s and `Group`s go straight to `render_ops` instead, since only
+/// the outermost call for a given target (the real scene, or a fresh
+/// `Layer` buffer in `render_layer`) should ever clear it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_ordered(
     device: &wgpu::Device,
@@ -588,7 +589,6 @@ pub(crate) fn render_ordered(
     transform: Matrix2D,
     canvas: (f32, f32),
     initial_clear: wgpu::Color,
-    allow_nested_layers: bool,
     layer_compositor: &LayerCompositor,
     vector_pipeline: &VectorPipeline,
     sdf_pipeline: &SdfPipeline,
@@ -612,9 +612,57 @@ pub(crate) fn render_ordered(
         queue.submit(std::iter::once(encoder.finish()));
     }
 
+    render_ops(
+        device, queue, view, elements, transform, canvas,
+        layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
+        shader_pipeline, masked_shader_composite, image_pipeline,
+        defs, scene_defs, shader_base_dir, time,
+    );
+}
+
+/// Walks `elements` in real paint order (`paint_order`, above) and
+/// issues the corresponding operations into `view`, WITHOUT clearing it
+/// first — `view` is assumed to already hold whatever came before this
+/// call in real document order (a previous sibling `Run`, an enclosing
+/// `Layer`'s own already-cleared fresh buffer, or an enclosing `Group`'s
+/// parent content), and every `Run` here draws with `draw_run`'s
+/// load-not-clear path accordingly.
+///
+/// Each `PaintOp` gets exactly the treatment its own doc comment
+/// describes: `Run` draws inline via the existing tessellated batch,
+/// `Composite` performs a real, unconditionally-recursive `render_layer`
+/// call (this is what makes a `Layer` nested inside another `Layer`
+/// render for real — there is no longer any flag suppressing it, and
+/// `msx-render-svg`/`msx-render-cpu` already do the equivalent via their
+/// own plain recursive dispatch, so this isn't GPU inventing new
+/// cross-renderer behavior, just matching what those two already do),
+/// and `GroupSplit` recurses into THIS SAME function on `group.children`
+/// with the Group's accumulated transform — giving that Group's own
+/// contents the exact same local, sibling-scoped `paint_order` treatment
+/// as any other sibling list in the tree, drawn inline at exactly the
+/// Group's real position rather than deferred and globally sorted.
+#[allow(clippy::too_many_arguments)]
+fn render_ops(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    elements: &[Element],
+    transform: Matrix2D,
+    canvas: (f32, f32),
+    layer_compositor: &LayerCompositor,
+    vector_pipeline: &VectorPipeline,
+    sdf_pipeline: &SdfPipeline,
+    splat_pipeline: &SplatPipeline,
+    shader_pipeline: &ShaderFillPipeline,
+    masked_shader_composite: &MaskedShaderComposite,
+    image_pipeline: &crate::image::ImagePipeline,
+    defs: &vector::Defs,
+    scene_defs: &[Def],
+    shader_base_dir: &std::path::Path,
+    time: f32,
+) {
     let canvas_u32 = (canvas.0.round().max(1.0) as u32, canvas.1.round().max(1.0) as u32);
     let ops = paint_order(elements);
-    let mut leftover_group_layers: Vec<(&Layer, Matrix2D)> = Vec::new();
 
     for op in &ops {
         match op {
@@ -624,42 +672,43 @@ pub(crate) fn render_ordered(
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
                     masked_shader_composite, image_pipeline, defs, shader_base_dir, time,
                 );
-                for el in run.iter() {
-                    if let Element::Group(g) = el {
-                        let local = g.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-                        collect_layers(&g.children, transform.concat(local), &mut leftover_group_layers);
-                    }
-                }
             }
             PaintOp::Composite(layer) => {
-                if !allow_nested_layers {
-                    continue;
-                }
                 layer_compositor.render_layer(
                     device, queue, view, layer, transform, canvas_u32,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
                     masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
                 );
             }
+            PaintOp::GroupSplit(group) => {
+                let local = group.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
+                let combined = transform.concat(local);
+                render_ops(
+                    device, queue, view, &group.children, combined, canvas,
+                    layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
+                    shader_pipeline, masked_shader_composite, image_pipeline,
+                    defs, scene_defs, shader_base_dir, time,
+                );
+            }
         }
-    }
-
-    // Group-nested layers: old behavior, preserved — see this function's
-    // own doc comment's last paragraph.
-    leftover_group_layers.sort_by(|a, b| a.0.z_index.partial_cmp(&b.0.z_index).unwrap_or(std::cmp::Ordering::Equal));
-    for (layer, layer_transform) in &leftover_group_layers {
-        layer_compositor.render_layer(
-            device, queue, view, layer, *layer_transform, canvas_u32,
-            vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-            masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
-        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Element as MsxElement, Group};
+    use msx_ast::{Element as MsxElement, Group, Rect, Style};
+
+    fn rect() -> Element {
+        MsxElement::Rect(Rect::new(0.0, 0.0, 1.0, 1.0, Style::default()))
+    }
+
+    fn id_of_run<'a>(op: &PaintOp<'a>) -> &'a [Element] {
+        match op {
+            PaintOp::Run(r) => *r,
+            _ => panic!("expected Run"),
+        }
+    }
 
     /// `composite.wgsl`'s `struct CompositeParams { opacity: f32, _pad:
     /// vec3<f32> }` is 32 bytes under WGSL's own uniform-address-space
@@ -678,31 +727,101 @@ mod tests {
     }
 
     #[test]
-    fn collect_layers_finds_top_level_layer() {
-        let layer = Layer::new(vec![]);
-        let elements = vec![MsxElement::Layer(layer)];
-        let mut out = Vec::new();
-        collect_layers(&elements, Matrix2D::identity(), &mut out);
-        assert_eq!(out.len(), 1);
+    fn group_contains_layer_true_for_direct_layer_child() {
+        let elements = vec![MsxElement::Layer(Layer::new(vec![]))];
+        assert!(group_contains_layer(&elements));
     }
 
     #[test]
-    fn collect_layers_recurses_through_groups() {
-        let layer = Layer::new(vec![]);
-        let group = Group::new(vec![MsxElement::Layer(layer)]);
+    fn group_contains_layer_true_through_nested_group() {
+        let inner = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
+        let elements = vec![rect(), MsxElement::Group(inner)];
+        assert!(group_contains_layer(&elements));
+    }
+
+    #[test]
+    fn group_contains_layer_false_with_no_layer_anywhere() {
+        let inner = Group::new(vec![rect(), rect()]);
+        let elements = vec![rect(), MsxElement::Group(inner)];
+        assert!(!group_contains_layer(&elements));
+    }
+
+    #[test]
+    fn group_contains_layer_does_not_need_to_look_inside_a_found_layers_children() {
+        // Finding the Layer itself is sufficient to require a GroupSplit;
+        // what's inside IT is a separate, later recursive concern
+        // (`PaintOp::Composite` -> `render_layer` -> its own
+        // `render_ops` call), not something `group_contains_layer` needs
+        // to answer on its own behalf.
+        let deeply_nested_layer = Layer::new(vec![MsxElement::Layer(Layer::new(vec![rect()]))]);
+        let elements = vec![MsxElement::Layer(deeply_nested_layer)];
+        assert!(group_contains_layer(&elements));
+    }
+
+    #[test]
+    fn paint_order_leaves_a_layer_free_group_inside_one_run() {
+        // No Layer anywhere in the Group's subtree -> the whole slice
+        // stays a single Run, exactly as before this fix (still
+        // tessellated inline by vector.rs's own Group-recursion).
+        let group = Group::new(vec![rect(), rect()]);
+        let elements = vec![rect(), MsxElement::Group(group), rect()];
+        let ops = paint_order(&elements);
+        assert_eq!(ops.len(), 1, "a Layer-free Group must not be split out of its Run");
+        assert_eq!(id_of_run(&ops[0]).len(), 3);
+    }
+
+    #[test]
+    fn paint_order_splits_a_layer_containing_group_out_of_its_run() {
+        let group = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
+        let elements = vec![rect(), MsxElement::Group(group), rect()];
+        let ops = paint_order(&elements);
+        assert_eq!(ops.len(), 3, "expected Run, GroupSplit, Run");
+        assert_eq!(id_of_run(&ops[0]).len(), 1, "leading rect stays its own Run");
+        assert!(matches!(ops[1], PaintOp::GroupSplit(_)));
+        assert_eq!(id_of_run(&ops[2]).len(), 1, "trailing rect stays its own Run");
+    }
+
+    #[test]
+    fn paint_order_recurses_into_a_group_split_for_its_own_local_ordering() {
+        // A GroupSplit isn't a leaf: recursing paint_order on its own
+        // children must, on its own terms, still resolve correctly —
+        // here that Group's children are themselves just one Layer, so
+        // recursing into it should yield exactly one Composite op with
+        // no surrounding Run (nothing else in there to run).
+        let group = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
         let elements = vec![MsxElement::Group(group)];
-        let mut out = Vec::new();
-        collect_layers(&elements, Matrix2D::identity(), &mut out);
-        assert_eq!(out.len(), 1);
+        let ops = paint_order(&elements);
+        assert_eq!(ops.len(), 1);
+        let PaintOp::GroupSplit(g) = &ops[0] else { panic!("expected GroupSplit") };
+        let inner_ops = paint_order(&g.children);
+        assert_eq!(inner_ops.len(), 1);
+        assert!(matches!(inner_ops[0], PaintOp::Composite(_)));
     }
 
     #[test]
-    fn collect_layers_does_not_descend_into_nested_layers() {
-        let nested = Layer::new(vec![]);
-        let outer = Layer::new(vec![MsxElement::Layer(nested)]);
-        let elements = vec![MsxElement::Layer(outer)];
-        let mut out = Vec::new();
-        collect_layers(&elements, Matrix2D::identity(), &mut out);
-        assert_eq!(out.len(), 1, "only the outer layer should be found");
+    fn paint_order_still_reorders_top_level_layers_by_z_index_alongside_a_group_split() {
+        // Confirms GroupSplit detection doesn't interfere with the
+        // pre-existing sibling-scoped Layer z_index reordering at the
+        // SAME list level.
+        let mut front = Layer::new(vec![]);
+        front.id = Some("front".into());
+        front.z_index = 5.0;
+        let mut back = Layer::new(vec![]);
+        back.id = Some("back".into());
+        back.z_index = 1.0;
+        let group = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
+
+        // Document order: front(z=5), group(has a layer), back(z=1).
+        // back's lower z_index must still win the earlier composite slot
+        // among the top-level Layers, exactly as layer_reordered dictates,
+        // regardless of the GroupSplit sitting between them.
+        let elements = vec![MsxElement::Layer(front), MsxElement::Group(group), MsxElement::Layer(back)];
+        let ops = paint_order(&elements);
+        assert_eq!(ops.len(), 3);
+        let PaintOp::Composite(first) = &ops[0] else { panic!("expected Composite first") };
+        assert_eq!(first.id.as_deref(), Some("back"), "lower z_index must composite first");
+        assert!(matches!(ops[1], PaintOp::GroupSplit(_)));
+        let PaintOp::Composite(third) = &ops[2] else { panic!("expected Composite third") };
+        assert_eq!(third.id.as_deref(), Some("front"));
     }
-                    }
+}

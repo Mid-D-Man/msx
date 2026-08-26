@@ -140,19 +140,18 @@ impl Layer {
 /// tree: a `Layer` only reorders relative to its *immediate* siblings in
 /// `elements`, the same list a caller would otherwise have iterated
 /// directly. `msx-render-cpu` and `msx-render-svg` both recurse through
-/// `Group` children with plain per-element dispatch (unlike
-/// `msx-render-gpu`, which flattens every `Layer` anywhere in the tree —
-/// including ones nested inside `Group`s — into one global pass; see
-/// that crate's `layer::collect_layers`), so calling this once per
-/// sibling list — `Scene::elements` itself, and again inside every
-/// `Group::children` — gives each renderer the right per-level ordering
-/// without needing to know about tree depth at all. For the common case
-/// this whole feature was built for (two-plus top-level Layers, no
-/// Groups involved), sibling-scoped and global agree exactly; they can
-/// only differ once Layers at *different* nesting depths compare
-/// `z_index` against each other, which sibling-scoping deliberately
-/// treats as out of scope rather than guessing at a global order Groups
-/// were never designed to participate in.
+/// `Group` children with plain per-element dispatch, calling this once
+/// per sibling list — `Scene::elements` itself, and again inside every
+/// `Group::children` — which gives each renderer the right per-level
+/// ordering without needing to know about tree depth at all.
+/// `msx-render-gpu` recurses the same way, just through its own
+/// `paint_order`/`render_ops` (its `PaintOp::GroupSplit`, specifically —
+/// see that crate's `layer.rs` module doc), since a GPU `Layer` needs a
+/// real isolated-buffer-plus-composite pass rather than the plain
+/// recursive dispatch SVG/CPU can get away with; all three renderers
+/// agree on the same nesting model as a result: a nested `Layer`'s
+/// `z_index` resolves purely against its own sibling list, at its own
+/// nesting level, before the level containing it does.
 ///
 /// A single Layer (or none) short-circuits without allocating a sorted
 /// copy, since there's nothing to reorder relative to.

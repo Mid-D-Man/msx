@@ -148,14 +148,16 @@ impl GpuRenderer {
         // Layer — walked in real document order via
         // `layer::render_ordered`, instead of the old "every non-layer
         // element first, then every Layer anywhere, sorted globally,
-        // always last" split. See `layer.rs`'s module doc and
-        // `render_ordered`'s own doc comment for the full reasoning, the
-        // remaining deliberate scope boundaries (a Layer nested inside a
-        // `Group` still keeps the old always-last, globally-sorted
-        // behavior; a Layer nested inside another Layer is still
-        // unsupported), and the separate, pre-existing, NOT-fixed-here
-        // gap in ordering between vector/SDF/splat content within one
-        // contiguous non-Layer run.
+        // always last" split. Layer paint order is sibling-scoped at
+        // every nesting level, including a Layer nested inside a Group
+        // and a Layer nested inside another Layer — both now resolve
+        // locally at their own nesting level before the level containing
+        // them does, matching `msx-render-svg`/`msx-render-cpu`'s own
+        // recursive-dispatch behavior. See `layer.rs`'s module doc and
+        // `render_ordered`'s own doc comment for the full reasoning, and
+        // the separate, pre-existing, NOT-fixed-here gap in ordering
+        // between vector/SDF/splat content within one contiguous
+        // non-Layer run.
         layer::render_ordered(
             &self.context.device,
             &self.context.queue,
@@ -164,7 +166,6 @@ impl GpuRenderer {
             Matrix2D::identity(),
             canvas_f,
             clear_color,
-            true, // this call's own direct Layer children ARE the top-level scene layers, not nested ones — always honor them. render_layer's own recursive call below passes `false` instead, which is what actually stops nesting at one level.
             &self.layer_compositor,
             &self.vector_pipeline,
             &self.sdf_pipeline,
