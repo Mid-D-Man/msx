@@ -1,0 +1,64 @@
+// examples/image_audio_demo.msx
+// Element::Image (both MediaSource variants) + a Def::Audio def.
+//
+// Left icon: MediaSource::Embedded (a base64 PNG literal, decoded by
+// msx-parser, sniff-validated at parse time), anchor = "center" — the
+// (x, y) below is the icon's CENTER, not its corner, so it's drawn
+// straddling the small red dot rather than starting from it.
+//
+// Right icon: MediaSource::FileRef (examples/assets/msx_icon.png,
+// resolved against this .msx file's own directory at render time — see
+// msx-render-cpu's render_to_pixmap_with_base_dir / msx-render-gpu's
+// render_with_shader_dir), default anchor ("top_left") — its (x, y) IS
+// its corner, so the icon starts exactly at the red dot instead.
+//
+// Both icons are the same source image, so the anchor difference is the
+// only variable — same reasoning as this project's other side-by-side
+// comparison examples (see gradients.msx's three gradient types).
+//
+// The `audio` def below has no visual output anywhere (Def::Audio is a
+// deliberate no-op in every renderer, same treatment as Element::Text) —
+// it's declared here purely so the corpus has a real, round-tripping
+// example of the def existing and parsing correctly, not to be "seen."
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 600, height = 400, background = #12141a }
+
+  defs::
+    // A tiny embedded WAV blip. Nothing plays it — see header comment —
+    // this def exists only to prove Def::Audio round-trips end to end.
+    { type = "audio", id = "blip",
+      data = "UklGRiwAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQgAAACAoMDg/+DAoA==" }
+
+  elements::
+    // ── Panel backdrops (purely visual grouping, no functional role) ──
+    { type = "rect", x = 40,  y = 60, width = 220, height = 220, rx = 12, ry = 12,
+      style = { fill = #1c2028, stroke = #2a2f3a, stroke_width = 1.5, opacity = 1.0 } }
+    { type = "rect", x = 340, y = 60, width = 220, height = 220, rx = 12, ry = 12,
+      style = { fill = #1c2028, stroke = #2a2f3a, stroke_width = 1.5, opacity = 1.0 } }
+
+    // ── Left: embedded PNG, anchor = "center" ──
+    { type = "image", id = "icon-embedded",
+      data = "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAA+0lEQVR42u2aUQ6DMAxDfYHdYCfeHaYdFbTPSVAKi90+bR98QRO7tImbVMvrvmw9t+djqmcPp/ZezESihbFJYAYSR/gOCYwk0YOti8AIEr24ugkkSZzBpLMDZgL//l5XB84A/oPAaBJXfavK0AjwmwTSJL71JZfhBPgmATeJKttKOXLZVNph9YQoOWuOv6nUunXtJyU2nzMYyB3+3OFYiRjuzCVKZVFXNldSCjikiNJirFoMaoSirFSyfwL4JYTexOgwik5kaCmBFnNoOY0+0KCPlOhDPbqsgi5soUuL6OIuuryObnCgW0z4Jt9PtFnRjW70VQP0ZQ/KdZsVjXa2LBm9fMUAAAAASUVORK5CYII=",
+      x = 150, y = 170, width = 120, height = 120, anchor = "center" }
+    { type = "circle", cx = 150, cy = 170, r = 4,
+      style = { fill = #ff4d4d, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 150, y = 100, content = "embedded · anchor: center",
+      style = { fill = #d8dee9, font_size = 13, text_anchor = "middle",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
+
+    // ── Right: FileRef PNG, default anchor ("top_left") ──
+    { type = "image", id = "icon-fileref",
+      source_ref = "assets/msx_icon.png",
+      x = 390, y = 110, width = 120, height = 120 }
+    { type = "circle", cx = 390, cy = 110, r = 4,
+      style = { fill = #ff4d4d, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 390, y = 100, content = "file ref · anchor: top_left (default)",
+      style = { fill = #d8dee9, font_size = 13, text_anchor = "middle",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
+
+    // ── Caption ──
+    { type = "text", x = 300, y = 370, content = "Element::Image — embedded + file ref · Def::Audio also declared (silent)",
+      style = { fill = #8b92a3, font_size = 12, text_anchor = "middle",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
