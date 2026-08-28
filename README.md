@@ -206,9 +206,12 @@ what is the whole story:
 
 `msx animate-gpu` is the only command that drives both at the same `t` per
 frame, into one GIF — the right tool whenever a scene uses (or might use)
-a shader def and keyframes together. `msx-viewer` doesn't drive either
-clock continuously yet (see Known Gaps) — everything animated today is a
-baked GIF, not live playback.
+a shader def and keyframes together. `msx-viewer` plays the keyframe
+timeline live (see `apps/msx-viewer/src/playback.rs`), but doesn't drive
+the shader `time` uniform — that clock is GPU-only, and live GPU playback
+in the viewer is a separate, not-yet-started piece of work (see Known
+Gaps). `msx animate`/`msx animate-gpu` remain the way to get a shareable
+baked GIF either way.
 
 ## Layers
 

@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 msx-ast         = { workspace = true }
+msx-anim        = { workspace = true }
 msx-binary      = { workspace = true }
 msx-parser      = { workspace = true }
 msx-render-core = { workspace = true }

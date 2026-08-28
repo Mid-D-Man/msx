@@ -4,39 +4,95 @@
 //! `resumed()`, per winit's own current guidance ("create windows inside
 //! the actively running event loop"), and held as `Option` until then.
 //!
-//! Redraws are requested only when something actually changed (initial
-//! load, resize, a dropped file) — not every frame — matching winit's own
-//! stated preference for apps that don't render continuously.
+//! ## Redraw model
+//!
+//! A **static** scene (no `animations::` tracks, or an effective
+//! duration of `0.0`) keeps exactly the original behaviour: redraws are
+//! requested only when something actually changed (initial load, resize,
+//! a dropped file) — matching winit's own stated preference for apps
+//! that don't render continuously.
+//!
+//! An **animated** scene switches into live playback: `about_to_wait`
+//! (called once per event-loop iteration, right before it would
+//! otherwise sleep) schedules the next redraw via
+//! `ControlFlow::WaitUntil`, and the actual per-frame work — resampling
+//! `msx-anim`'s keyframe clock and writing the new pixels — happens in
+//! `WindowEvent::RedrawRequested`, per winit's own guidance that
+//! `about_to_wait` "is not an ideal event to drive application rendering
+//! from." Once a `Once`-mode timeline settles on its final pose (see
+//! `playback::should_keep_playing`), the viewer drops back to on-demand
+//! redraws, same as any static scene — it doesn't keep polling a frame
+//! that can never change again.
+//!
+//! Only the keyframe clock (`msx-anim`) plays live here. The shader
+//! `time` uniform is a GPU-only clock this CPU-rendered viewer never
+//! touches — see `renderer.rs`'s module doc for why GPU live playback is
+//! deliberately out of scope for this pass.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
+use msx_ast::{LoopMode, Scene};
 use pixels::{Pixels, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{Window, WindowId};
 
 use crate::input::dropped_file;
+use crate::playback::{should_keep_playing, FRAME_INTERVAL};
 use crate::renderer::{load_scene, render_scene, RenderedScene};
+
+/// Tracks a live playback session for the currently-loaded scene. Only
+/// exists while a scene has a real keyframe timeline (`Scene::is_animated`)
+/// — a static scene never has one of these.
+struct Playback {
+    start: Instant,
+    duration: f64,
+    loop_mode: LoopMode,
+}
 
 pub struct App {
     initial_path: PathBuf,
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
+    scene: Option<Scene>,
+    playback: Option<Playback>,
     current: Option<RenderedScene>,
 }
 
 impl App {
     pub fn new(initial_path: PathBuf) -> Self {
-        App { initial_path, window: None, pixels: None, current: None }
+        App { initial_path, window: None, pixels: None, scene: None, playback: None, current: None }
     }
 
     fn load_and_render(&mut self, path: &std::path::Path) -> Result<(), String> {
         let scene = load_scene(path)?;
-        self.current = Some(render_scene(&scene));
+        self.playback = if scene.is_animated() {
+            Some(Playback {
+                start: Instant::now(),
+                duration: scene.effective_duration(),
+                loop_mode: scene.loop_mode,
+            })
+        } else {
+            None
+        };
+        self.scene = Some(scene);
+        self.render_current_frame();
         Ok(())
+    }
+
+    /// Resamples the loaded scene at the current playback position (`0.0`,
+    /// a no-op sample, for a non-animated scene — `resolve_at_time`
+    /// returns the scene unchanged whenever it has no tracks at all) and
+    /// re-renders it into `self.current`.
+    fn render_current_frame(&mut self) {
+        let Some(scene) = self.scene.as_ref() else { return };
+        let t = self.playback.as_ref().map(|p| p.start.elapsed().as_secs_f64()).unwrap_or(0.0);
+        let resolved = msx_anim::resolve_at_time(scene, t);
+        self.current = Some(render_scene(&resolved));
     }
 
     fn sync_pixels_buffer_size(&mut self) {
@@ -131,6 +187,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Only an actively-playing scene needs a fresh sample —
+                // a static scene's buffer already holds the right pixels
+                // from whatever load/resize triggered this redraw.
+                if self.playback.is_some() {
+                    self.render_current_frame();
+                    self.write_frame();
+                }
                 if let Some(pixels) = self.pixels.as_ref() {
                     if let Err(e) = pixels.render() {
                         eprintln!("warning: render failed: {}", e);
@@ -139,5 +202,29 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(playback) = &self.playback else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+
+        let elapsed = playback.start.elapsed().as_secs_f64();
+        if !should_keep_playing(playback.loop_mode, elapsed, playback.duration) {
+            // The pose already on screen (see `RedrawRequested`'s own
+            // `resolve_at_time` call, which clamps internally) is already
+            // the timeline's final frame — nothing further to sample.
+            // Stop scheduling and fall back to on-demand redraws, same
+            // as a static scene.
+            self.playback = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
     }
 }

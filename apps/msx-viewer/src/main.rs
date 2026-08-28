@@ -5,8 +5,12 @@
 //!
 //! CPU-rendered via `msx-render-cpu`, displayed via `pixels`. See
 //! `renderer.rs`'s module doc for why the GPU path isn't wired in yet.
+//!
+//! Scenes with a real `animations::` timeline play live — see
+//! `window.rs`'s "Redraw model" section and `playback.rs` for how.
 
 mod input;
+mod playback;
 mod renderer;
 mod window;
 
