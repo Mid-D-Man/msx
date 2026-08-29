@@ -13,8 +13,8 @@
 use std::io;
 
 use msx_ast::{
-    Circle, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer, Line, MediaSource, Path,
-    Polyline, Rect, Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
+    Circle, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer, Line, LoopMode,
+    MediaSource, Path, Polyline, Rect, Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
 };
 
 use crate::encoder::*;
@@ -56,6 +56,19 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
     }
     write_u8(&mut elem_payload, TAG_END);
 
+    // Animation section — gated on non-default state rather than
+    // `Scene::is_animated()` (see `encode_animations`'s own comment).
+    // Built here, before the pool is patched/appended below, so any
+    // `target_id` interned by `encode_animations` still lands in the
+    // same shared pool as everything else.
+    let has_animations = !scene.animations.is_empty()
+        || scene.duration != 0.0
+        || scene.loop_mode != LoopMode::default();
+    let mut anim_payload: Vec<u8> = Vec::new();
+    if has_animations {
+        encode_animations(scene, &mut anim_payload, &mut pool);
+    }
+
     // Patch pool count
     let count_bytes = (pool.len() as u16).to_le_bytes();
     payload[pool_len_offset]     = count_bytes[0];
@@ -68,9 +81,10 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
         payload.extend_from_slice(bytes);
     }
 
-    // Append defs + elements
+    // Append defs + elements + animations
     payload.extend_from_slice(&def_payload);
     payload.extend_from_slice(&elem_payload);
+    payload.extend_from_slice(&anim_payload);
 
     // Header
     let mut header = MsxHeader::new(scene.canvas.width as f32, scene.canvas.height as f32);
@@ -81,6 +95,7 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
 
     if scene.canvas.viewbox.is_some() { header.set_viewbox(true); }
     if !scene.defs.is_empty()         { header.set_defs(true); }
+    if has_animations                 { header.set_animations(true); }
 
     // Optionally compress
     let final_payload = if compress {
@@ -165,6 +180,47 @@ fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
             let id_idx = intern_string(pool, &a.id);
             write_u16(out, id_idx);
             encode_media_source(&a.source, out, pool);
+        }
+    }
+}
+
+// ── Animation encoding ───────────────────────────────────────────────────────
+
+/// `duration`/`loop_mode`/`animations[]` — appended after the element
+/// stream (past its `TAG_END` sentinel), gated by
+/// `MsxHeader::FLAG_HAS_ANIMATIONS`. A decoder built before this flag
+/// existed never looks past the elements it already knows how to read,
+/// so it degrades gracefully on a file that has this section (same
+/// silent-drop as today, not a crash) — see `scene_decode::decode`'s own
+/// comment on the sentinel byte for the read side of that.
+///
+/// Gated on non-default state (`compile`'s `has_animations`) rather than
+/// `Scene::is_animated()` — `is_animated()` additionally requires
+/// `effective_duration() > 0.0`, which is a *rendering* question ("does
+/// this scene currently produce motion"), not a *roundtrip* one. An
+/// explicitly-authored `duration`/`loop_mode` sitting alongside
+/// zero-keyframe or otherwise inert tracks should still survive a
+/// compile/decode cycle unchanged rather than silently reverting to
+/// `Scene::new()`'s defaults.
+///
+/// `target_id` goes through the shared string pool (`intern_string`), not
+/// inline like `Path::d_raw` — track target ids are short and often
+/// repeat (several properties on the same element each get their own
+/// track), so pool dedup is the right fit here, same reasoning as
+/// `MediaSource::FileRef` paths in `encode_media_source`.
+fn encode_animations(scene: &Scene, out: &mut Vec<u8>, pool: &mut Vec<String>) {
+    write_f32(out, scene.duration);
+    write_u8(out, scene.loop_mode.to_byte());
+    write_u16(out, scene.animations.len() as u16);
+    for track in &scene.animations {
+        let target_idx = intern_string(pool, &track.target_id);
+        write_u16(out, target_idx);
+        write_u8(out, track.property.to_byte());
+        write_u16(out, track.keyframes.len() as u16);
+        for kf in &track.keyframes {
+            write_f32(out, kf.time);
+            write_f32(out, kf.value);
+            write_u8(out, kf.easing.to_byte());
         }
     }
 }
@@ -737,6 +793,99 @@ mod tests {
                 other => panic!("expected an Image, got {other:?}"),
             }
         }
+    }
+
+    /// The actual bug this section exists to fix: a scene with real
+    /// keyframe tracks used to compile and decode "successfully" while
+    /// silently dropping every track, `duration`, and `loop_mode` — no
+    /// error, just an animated scene coming back static. Covers both
+    /// `compress` states, since MBFA compression sees the animation
+    /// section as opaque bytes but the header flag/gating logic doesn't
+    /// know that in advance.
+    #[test]
+    fn animation_tracks_survive_roundtrip() {
+        use msx_ast::{AnimatedProperty, AnimationTrack, Easing, Keyframe, LoopMode};
+
+        for compress in [false, true] {
+            let mut scene = basic_scene();
+            scene.duration  = 2.5;
+            scene.loop_mode = LoopMode::PingPong;
+            scene.animations.push(AnimationTrack::new(
+                "circle",
+                AnimatedProperty::Opacity,
+                vec![
+                    Keyframe::linear(0.0, 0.0),
+                    Keyframe::new(2.5, 1.0, Easing::EaseInOut),
+                ],
+            ));
+            scene.animations.push(AnimationTrack::new(
+                "circle",
+                AnimatedProperty::TranslateX,
+                vec![Keyframe::linear(0.0, 0.0), Keyframe::linear(2.5, 100.0)],
+            ));
+
+            let binary  = compile(&scene, compress).unwrap();
+            let decoded = crate::decode(&binary).unwrap();
+
+            assert!((decoded.duration - 2.5).abs() < 1e-4, "compress={compress}");
+            assert_eq!(decoded.loop_mode, LoopMode::PingPong, "compress={compress}");
+            assert_eq!(decoded.animations.len(), 2, "compress={compress}");
+
+            let opacity = decoded.animations.iter()
+                .find(|t| t.property == AnimatedProperty::Opacity)
+                .expect("opacity track");
+            assert_eq!(opacity.target_id, "circle");
+            assert_eq!(opacity.keyframes.len(), 2);
+            assert!((opacity.keyframes[0].value - 0.0).abs() < 1e-4);
+            assert!((opacity.keyframes[1].value - 1.0).abs() < 1e-4);
+            assert_eq!(opacity.keyframes[1].easing, Easing::EaseInOut);
+
+            let translate = decoded.animations.iter()
+                .find(|t| t.property == AnimatedProperty::TranslateX)
+                .expect("translate_x track");
+            assert_eq!(translate.target_id, "circle", "shared target_id across both tracks");
+
+            assert!(decoded.is_animated(), "compress={compress}");
+        }
+    }
+
+    /// A scene with no `animations::` block at all must decode exactly
+    /// as it always has — the flag stays unset, the section is never
+    /// written, and no unrelated behaviour changes. Regression guard
+    /// against this fix accidentally touching the non-animated path.
+    #[test]
+    fn scene_without_animation_is_unaffected() {
+        let binary  = compile(&basic_scene(), false).unwrap();
+        let header  = crate::header::MsxHeader::parse(&binary).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        assert!(!header.has_animations());
+        assert_eq!(decoded.duration, 0.0);
+        assert_eq!(decoded.loop_mode, msx_ast::LoopMode::Once);
+        assert!(decoded.animations.is_empty());
+        assert!(!decoded.is_animated());
+    }
+
+    /// `encode_animations` is gated on non-default state, not
+    /// `Scene::is_animated()` — an explicit `duration`/`loop_mode` with
+    /// zero tracks is a real authoring choice (e.g. a composition length
+    /// declared ahead of adding any keyframes) and must still round-trip,
+    /// even though `is_animated()` is false both before and after.
+    #[test]
+    fn explicit_duration_and_loop_mode_survive_with_no_tracks() {
+        use msx_ast::LoopMode;
+
+        let mut scene = basic_scene();
+        scene.duration  = 4.0;
+        scene.loop_mode = LoopMode::Loop;
+
+        let binary  = compile(&scene, false).unwrap();
+        let decoded = crate::decode(&binary).unwrap();
+
+        assert!((decoded.duration - 4.0).abs() < 1e-4);
+        assert_eq!(decoded.loop_mode, LoopMode::Loop);
+        assert!(decoded.animations.is_empty());
+        assert!(!decoded.is_animated(), "no tracks means not animated, regardless of duration/loop_mode");
     }
 
     #[test]

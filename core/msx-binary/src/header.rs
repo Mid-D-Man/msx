@@ -9,9 +9,10 @@ pub const COMPRESS_NONE: u8 = 0;
 pub const COMPRESS_MBFA: u8 = 1;
 
 // flags bits
-pub const FLAG_HAS_VIEWBOX:  u8 = 0b0000_0001;
-pub const FLAG_HAS_METADATA: u8 = 0b0000_0010;
-pub const FLAG_HAS_DEFS:     u8 = 0b0000_0100;
+pub const FLAG_HAS_VIEWBOX:     u8 = 0b0000_0001;
+pub const FLAG_HAS_METADATA:    u8 = 0b0000_0010;
+pub const FLAG_HAS_DEFS:        u8 = 0b0000_0100;
+pub const FLAG_HAS_ANIMATIONS:  u8 = 0b0000_1000; // v0.5 — animation section
 
 #[derive(Debug, Clone)]
 pub struct MsxHeader {
@@ -39,13 +40,15 @@ impl MsxHeader {
         }
     }
 
-    pub fn has_viewbox(&self)  -> bool { self.flags & FLAG_HAS_VIEWBOX  != 0 }
-    pub fn has_metadata(&self) -> bool { self.flags & FLAG_HAS_METADATA != 0 }
-    pub fn has_defs(&self)     -> bool { self.flags & FLAG_HAS_DEFS     != 0 }
+    pub fn has_viewbox(&self)    -> bool { self.flags & FLAG_HAS_VIEWBOX    != 0 }
+    pub fn has_metadata(&self)   -> bool { self.flags & FLAG_HAS_METADATA   != 0 }
+    pub fn has_defs(&self)       -> bool { self.flags & FLAG_HAS_DEFS       != 0 }
+    pub fn has_animations(&self) -> bool { self.flags & FLAG_HAS_ANIMATIONS != 0 }
 
-    pub fn set_viewbox(&mut self,  v: bool) { set_flag(&mut self.flags, FLAG_HAS_VIEWBOX,  v); }
-    pub fn set_metadata(&mut self, v: bool) { set_flag(&mut self.flags, FLAG_HAS_METADATA, v); }
-    pub fn set_defs(&mut self,     v: bool) { set_flag(&mut self.flags, FLAG_HAS_DEFS,     v); }
+    pub fn set_viewbox(&mut self,    v: bool) { set_flag(&mut self.flags, FLAG_HAS_VIEWBOX,    v); }
+    pub fn set_metadata(&mut self,   v: bool) { set_flag(&mut self.flags, FLAG_HAS_METADATA,   v); }
+    pub fn set_defs(&mut self,       v: bool) { set_flag(&mut self.flags, FLAG_HAS_DEFS,       v); }
+    pub fn set_animations(&mut self, v: bool) { set_flag(&mut self.flags, FLAG_HAS_ANIMATIONS, v); }
 
     pub fn serialize(&self) -> [u8; HEADER_SIZE] {
         let mut buf = [0u8; HEADER_SIZE];
@@ -115,6 +118,16 @@ mod tests {
         assert!((h2.width - 640.0).abs() < 1e-4);
         assert_eq!(h2.elem_count, 5);
         assert!(h2.has_viewbox());
+    }
+
+    #[test]
+    fn animations_flag_roundtrips() {
+        let mut h = MsxHeader::new(320.0, 240.0);
+        h.set_animations(true);
+        let bytes = h.serialize();
+        let h2 = MsxHeader::parse(&bytes).unwrap();
+        assert!(h2.has_animations());
+        assert!(!h2.has_viewbox(), "setting animations must not set unrelated flag bits");
     }
 
     #[test]

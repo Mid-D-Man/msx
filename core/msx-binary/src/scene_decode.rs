@@ -4,9 +4,10 @@
 use std::io;
 
 use msx_ast::{
-    Canvas, Circle, ConicGradient, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer,
-    Line, LinearGradient, MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode,
-    Scene, ShaderDef, ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
+    AnimatedProperty, AnimationTrack, Canvas, Circle, ConicGradient, Def, Easing, Element,
+    Ellipse, GaussianSplat, Group, Image, Keyframe, Layer, Line, LinearGradient, LoopMode,
+    MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
+    ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
 };
 
 use crate::decoder::*;
@@ -65,13 +66,80 @@ pub fn decode(data: &[u8]) -> io::Result<Scene> {
         elements.push(decode_element(payload, &mut cursor, &pool)?);
     }
 
+    // The element stream always ends with a TAG_END sentinel (see
+    // `compiler::compile`) — the fixed-count loop above never reads it,
+    // so it's still sitting right here, unconsumed. A file compiled
+    // before the animation section existed ends right after this byte,
+    // which is exactly why every read below is gated on
+    // `header.has_animations()`: an old file's cursor lands at EOF here
+    // and this function returns, same as it always has.
+    let tag_end = read_u8(payload, &mut cursor)?;
+    if tag_end != TAG_END {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected element-stream sentinel 0x{:02x}, got 0x{:02x}", TAG_END, tag_end),
+        ));
+    }
+
+    let (duration, loop_mode, animations) = if header.has_animations() {
+        decode_animations(payload, &mut cursor, &pool)?
+    } else {
+        (0.0, LoopMode::default(), Vec::new())
+    };
+
     let mut canvas = Canvas::new(header.width as f64, header.height as f64, bg);
     canvas.viewbox = viewbox;
 
     let mut scene = Scene::new(canvas);
-    scene.defs     = defs;
-    scene.elements = elements;
+    scene.defs       = defs;
+    scene.elements   = elements;
+    scene.duration   = duration;
+    scene.loop_mode  = loop_mode;
+    scene.animations = animations;
     Ok(scene)
+}
+
+// ── Animation decoding ──────────────────────────────────────────────────────
+
+/// The complement of `compiler::encode_animations`. Only called when
+/// `header.has_animations()` — see that function's own comment for why
+/// the section (and this call) is skipped entirely for a file compiled
+/// before it existed.
+fn decode_animations(
+    data: &[u8],
+    cursor: &mut usize,
+    pool: &[String],
+) -> io::Result<(f64, LoopMode, Vec<AnimationTrack>)> {
+    let duration   = read_f32(data, cursor)?;
+    let loop_mode  = LoopMode::from_byte(read_u8(data, cursor)?);
+    let track_count = read_u16(data, cursor)? as usize;
+
+    let mut tracks = Vec::with_capacity(track_count);
+    for _ in 0..track_count {
+        let target_idx = read_u16(data, cursor)?;
+        let target_id  = lookup_string(pool, target_idx)?.to_string();
+
+        let property_byte = read_u8(data, cursor)?;
+        let property = AnimatedProperty::from_byte(property_byte).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown animated property byte 0x{:02x}", property_byte),
+            )
+        })?;
+
+        let kf_count = read_u16(data, cursor)? as usize;
+        let mut keyframes = Vec::with_capacity(kf_count);
+        for _ in 0..kf_count {
+            let time   = read_f32(data, cursor)?;
+            let value  = read_f32(data, cursor)?;
+            let easing = Easing::from_byte(read_u8(data, cursor)?);
+            keyframes.push(Keyframe::new(time, value, easing));
+        }
+
+        tracks.push(AnimationTrack::new(target_id, property, keyframes));
+    }
+
+    Ok((duration, loop_mode, tracks))
 }
 
 // ── Def decoding ─────────────────────────────────────────────────────────────
