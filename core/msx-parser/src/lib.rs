@@ -448,4 +448,88 @@ mod tests {
             other => panic!("expected Def::Audio, got {:?}", other),
         }
     }
+
+    #[test]
+    fn audio_def_with_embedded_data_decodes_base64() {
+        // The one real coverage gap flagged when this project last asked
+        // "how do we even test the audio exactly": everything else
+        // (`AudioFormat::sniff`'s own unit tests, this file's own
+        // `FileRef` test above, msx-binary's `audio_def_roundtrips`)
+        // covers either format-sniffing in isolation or the `source_ref`
+        // path — nothing exercised the embedded-base64 path at the
+        // parser level specifically, even though it's the ONLY place in
+        // the whole pipeline that ever decodes audio base64 at all (see
+        // `dix_helpers::parse_media_source`'s own doc comment).
+        //
+        // base64 of a 52-byte synthetic RIFF/WAVE header — 4 zero bytes
+        // for the (unchecked, for this test's purposes) chunk size, then
+        // 40 zero bytes of body — the same fixture shape
+        // `msx-binary::compiler`'s own `audio_def_roundtrips` test
+        // already uses, so a WAV-sniffing failure here and a roundtrip
+        // failure there would be recognizably the same underlying bytes.
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "audio", id = "chime",
+      data = "UklGRgAAAABXQVZFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse");
+        match &scene.defs[0] {
+            Def::Audio(a) => {
+                assert_eq!(a.id, "chime");
+                match &a.source {
+                    msx_ast::MediaSource::Embedded(bytes) => {
+                        assert_eq!(bytes.len(), 52);
+                        assert_eq!(&bytes[0..4], b"RIFF");
+                        assert_eq!(&bytes[8..12], b"WAVE");
+                        assert_eq!(
+                            msx_ast::AudioFormat::sniff(bytes),
+                            Some(msx_ast::AudioFormat::Wav),
+                            "decoded bytes should sniff as WAV, confirming this is real audio-shaped data, not just any bytes"
+                        );
+                    }
+                    other => panic!("expected MediaSource::Embedded, got {:?}", other),
+                }
+            }
+            other => panic!("expected Def::Audio, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn audio_def_with_embedded_data_that_does_not_sniff_as_audio_still_parses() {
+        // Deliberate asymmetry with images (see
+        // `image_element_rejects_data_that_does_not_sniff_as_a_known_image_format`
+        // above): `gradient.rs`'s own "audio" arm does NOT call
+        // `AudioFormat::sniff` at parse time at all — see its comment on
+        // why (nothing plays audio yet, so there's no render-time
+        // failure mode format validation would be protecting against).
+        // Plain text that decodes fine as base64 but sniffs as `None`
+        // must still parse successfully; this pins that asymmetry down
+        // as an explicit, tested behaviour rather than something only
+        // documented in a comment.
+        let src = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 10, height = 10, background = #000000 }
+  defs::
+    { type = "audio", id = "not_really_audio",
+      data = "dGhpcyBpcyBkZWZpbml0ZWx5IG5vdCBhbiBhdWRpbyBmaWxlLCBqdXN0IHRleHQ=" }
+  elements::
+)
+"#;
+        let scene = parse_scene(src).expect("parse should succeed — audio def parsing does not format-sniff");
+        match &scene.defs[0] {
+            Def::Audio(a) => match &a.source {
+                msx_ast::MediaSource::Embedded(bytes) => {
+                    assert_eq!(msx_ast::AudioFormat::sniff(bytes), None);
+                }
+                other => panic!("expected MediaSource::Embedded, got {:?}", other),
+            },
+            other => panic!("expected Def::Audio, got {:?}", other),
+        }
+    }
 }

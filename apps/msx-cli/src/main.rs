@@ -104,6 +104,28 @@ enum Command {
     Roundtrip { input: PathBuf },
     /// Rasterize to a temp PNG and open it in the system's default image viewer.
     View { input: PathBuf },
+    /// Pull a `Def::Audio`'s raw bytes back out to a standalone file —
+    /// the one thing nothing in this project's tooling could do before
+    /// this. `Def::Audio` round-trips losslessly through
+    /// parse/compile/decode (see `msx-binary`'s `audio_def_roundtrips`),
+    /// but nothing anywhere actually listens to it. This doesn't play
+    /// the audio either — it just gets the bytes onto disk as a real
+    /// file a real audio-aware tool (or your own ears) can open, which
+    /// is the only way to confirm "is this genuinely valid, playable
+    /// audio" rather than just "did the bytes survive intact."
+    ExtractMedia {
+        input: PathBuf,
+        /// The `id` of the `Def::Audio` to extract.
+        #[arg(long)]
+        id: String,
+        /// Defaults to `<id>.<detected-extension>` next to `input` —
+        /// `.bin` if the bytes don't sniff as a recognized format
+        /// (still written either way; sniffing is informational here,
+        /// not a gate — see `AudioDef`'s own doc comment on why audio
+        /// parsing never format-validates).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -122,6 +144,7 @@ fn main() {
         Command::Validate { input } => cmd_validate(input),
         Command::Roundtrip { input } => cmd_roundtrip(input),
         Command::View { input } => cmd_view(input),
+        Command::ExtractMedia { input, id, output } => cmd_extract_media(input, id, output.as_deref()),
     };
 
     if let Err(e) = result {
@@ -454,18 +477,138 @@ fn cmd_roundtrip(input: &Path) -> Result<(), String> {
     let svg_b = msx_render_svg::render(&scene_b);
 
     let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalize(&svg_a) == normalize(&svg_b) {
-        println!(
-            "PASS — {} element(s), {} bytes binary ({} bytes SVG, {:.1}%)",
-            scene_a.element_count(),
-            binary.len(),
-            svg_a.len(),
-            binary.len() as f64 / svg_a.len() as f64 * 100.0,
-        );
-        Ok(())
-    } else {
-        Err("FAIL — SVG output differs between source-parsed and binary-decoded scenes".to_string())
+    if normalize(&svg_a) != normalize(&svg_b) {
+        return Err("FAIL — SVG output differs between source-parsed and binary-decoded scenes".to_string());
     }
+
+    // The SVG comparison above can't see `animations`/`duration`/
+    // `loop_mode` at all — a static render doesn't consume them. Check
+    // those separately, with a float tolerance rather than `==`, since
+    // `Keyframe.time`/`.value` go through the same f64->f32->f64
+    // downcast every other coordinate in the binary format already
+    // does; an exact comparison would fail legitimate round-trips (e.g.
+    // trig-derived values in orbit_pulse.msx) that this format has
+    // always silently accepted elsewhere.
+    if let Err(reason) = animations_match(&scene_a, &scene_b) {
+        return Err(format!("FAIL — animation data differs after roundtrip: {reason}"));
+    }
+
+    println!(
+        "PASS — {} element(s), {} bytes binary ({} bytes SVG, {:.1}%)",
+        scene_a.element_count(),
+        binary.len(),
+        svg_a.len(),
+        binary.len() as f64 / svg_a.len() as f64 * 100.0,
+    );
+    Ok(())
+}
+
+/// Compares the animation-related fields SVG comparison can't reach.
+/// Returns `Err` describing the first mismatch found, matching this
+/// file's existing single-message failure style.
+fn animations_match(a: &Scene, b: &Scene) -> Result<(), String> {
+    if !approx_eq(a.duration, b.duration) {
+        return Err(format!("duration differs: {} vs {}", a.duration, b.duration));
+    }
+    if a.loop_mode != b.loop_mode {
+        return Err(format!("loop_mode differs: {:?} vs {:?}", a.loop_mode, b.loop_mode));
+    }
+    if a.animations.len() != b.animations.len() {
+        return Err(format!(
+            "animation track count differs: {} vs {}",
+            a.animations.len(),
+            b.animations.len()
+        ));
+    }
+    for (ta, tb) in a.animations.iter().zip(&b.animations) {
+        if ta.target_id != tb.target_id {
+            return Err(format!("track target_id differs: {} vs {}", ta.target_id, tb.target_id));
+        }
+        if ta.property != tb.property {
+            return Err(format!(
+                "track property differs on '{}': {:?} vs {:?}",
+                ta.target_id, ta.property, tb.property
+            ));
+        }
+        if ta.keyframes.len() != tb.keyframes.len() {
+            return Err(format!(
+                "keyframe count differs on '{}'/{:?}: {} vs {}",
+                ta.target_id, ta.property, ta.keyframes.len(), tb.keyframes.len()
+            ));
+        }
+        for (ka, kb) in ta.keyframes.iter().zip(&tb.keyframes) {
+            if !approx_eq(ka.time, kb.time) || !approx_eq(ka.value, kb.value) {
+                return Err(format!(
+                    "keyframe differs on '{}'/{:?}: {}@{}s vs {}@{}s",
+                    ta.target_id, ta.property, ka.value, ka.time, kb.value, kb.time
+                ));
+            }
+            if ka.easing != kb.easing {
+                return Err(format!(
+                    "keyframe easing differs on '{}'/{:?}: {:?} vs {:?}",
+                    ta.target_id, ta.property, ka.easing, kb.easing
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Relative tolerance with an absolute floor for near-zero values —
+/// scales with magnitude so it stays tight for small numbers (a 0.001s
+/// keyframe time) without being needlessly strict on large ones (a
+/// 1000px translate), rather than one flat epsilon that's wrong at
+/// either end.
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-4 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// The `id` of a `Def::Audio` isn't guaranteed unique by anything in this
+/// pipeline today — this takes the first match, same "simplest thing
+/// that works" spirit as everything else here defaulting rather than
+/// validating a constraint nothing else enforces either.
+fn cmd_extract_media(input: &Path, id: &str, output: Option<&Path>) -> Result<(), String> {
+    let scene = load_scene(input)?;
+    let base_dir = input.parent().unwrap_or_else(|| Path::new("."));
+
+    let audio = scene.defs.iter().find_map(|d| match d {
+        Def::Audio(a) if a.id == id => Some(a),
+        _ => None,
+    }).ok_or_else(|| format!("no audio def with id '{}' found in {}", id, input.display()))?;
+
+    let bytes: Vec<u8> = match &audio.source {
+        msx_ast::MediaSource::Embedded(bytes) => bytes.clone(),
+        // Same base_dir convention every renderer already uses for a
+        // FileRef — see e.g. msx-render-cpu/src/image.rs.
+        msx_ast::MediaSource::FileRef(path) => {
+            let full_path = base_dir.join(path);
+            std::fs::read(&full_path)
+                .map_err(|e| format!("couldn't read referenced audio file {}: {}", full_path.display(), e))?
+        }
+    };
+
+    let format = msx_ast::AudioFormat::sniff(&bytes);
+    let ext = match format {
+        Some(msx_ast::AudioFormat::Wav) => "wav",
+        Some(msx_ast::AudioFormat::Ogg) => "ogg",
+        Some(msx_ast::AudioFormat::Mp3) => "mp3",
+        None => "bin",
+    };
+    let out_path = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base_dir.join(format!("{}.{}", id, ext)));
+
+    std::fs::write(&out_path, &bytes).map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+
+    println!(
+        "Wrote {} bytes to {} (detected format: {})",
+        bytes.len(),
+        out_path.display(),
+        format
+            .map(|f| format!("{:?}", f))
+            .unwrap_or_else(|| "unrecognized — could still be a bare-frame MP3 (no reliable magic bytes to sniff), or just isn't audio".to_string()),
+    );
+    Ok(())
 }
 
 fn cmd_view(input: &Path) -> Result<(), String> {
@@ -544,7 +687,7 @@ fn open_in_system_viewer(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Canvas, Color};
+    use msx_ast::{AnimatedProperty, AnimationTrack, Canvas, Color, Easing, Keyframe, LoopMode};
 
     #[test]
     fn load_scene_bytes_detects_dixscript_source() {
@@ -571,5 +714,146 @@ mod tests {
     fn load_scene_bytes_rejects_invalid_input() {
         let garbage = [0xFFu8, 0xFE, 0x00, 0x01, 0x02];
         assert!(load_scene_bytes(&garbage).is_err());
+    }
+
+    fn blank_scene() -> Scene {
+        Scene::new(Canvas::new(100.0, 100.0, Color::WHITE))
+    }
+
+    #[test]
+    fn animations_match_accepts_f32_roundtrip_noise() {
+        // Exactly what compiler.rs's write_f32/read_f32 does to a
+        // trig-derived value — the case an exact `==` would wrongly
+        // fail (e.g. orbit_pulse.msx's keyframe values).
+        let mut a = blank_scene();
+        let original = std::f64::consts::PI * 37.0;
+        a.animations.push(AnimationTrack::new(
+            "orbiter",
+            AnimatedProperty::Rotate,
+            vec![Keyframe::linear(0.0, original)],
+        ));
+
+        let mut b = blank_scene();
+        let roundtripped = original as f32 as f64;
+        b.animations.push(AnimationTrack::new(
+            "orbiter",
+            AnimatedProperty::Rotate,
+            vec![Keyframe::linear(0.0, roundtripped)],
+        ));
+
+        assert_ne!(original, roundtripped, "sanity check: f32 downcast must actually lose precision here");
+        assert!(animations_match(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn animations_match_catches_a_real_difference() {
+        let mut a = blank_scene();
+        a.animations.push(AnimationTrack::new(
+            "box",
+            AnimatedProperty::TranslateX,
+            vec![Keyframe::linear(0.0, 100.0)],
+        ));
+        let mut b = blank_scene();
+        b.animations.push(AnimationTrack::new(
+            "box",
+            AnimatedProperty::TranslateX,
+            vec![Keyframe::linear(0.0, 105.0)], // a real 5-unit difference, not roundoff
+        ));
+        assert!(animations_match(&a, &b).is_err());
+    }
+
+    #[test]
+    fn animations_match_catches_loop_mode_and_duration() {
+        let mut a = blank_scene();
+        a.duration = 2.0;
+        a.loop_mode = LoopMode::Once;
+        let mut b = blank_scene();
+        b.duration = 2.0;
+        b.loop_mode = LoopMode::Loop;
+        assert!(animations_match(&a, &b).is_err());
+
+        let mut c = blank_scene();
+        c.duration = 3.0;
+        assert!(animations_match(&a, &c).is_err());
+    }
+
+    #[test]
+    fn animations_match_catches_easing_difference() {
+        let mut a = blank_scene();
+        a.animations.push(AnimationTrack::new("x", AnimatedProperty::Opacity, vec![Keyframe::linear(0.0, 1.0)]));
+        let mut b = blank_scene();
+        b.animations.push(AnimationTrack::new(
+            "x",
+            AnimatedProperty::Opacity,
+            vec![Keyframe::new(0.0, 1.0, Easing::EaseInOut)],
+        ));
+        assert!(animations_match(&a, &b).is_err());
+    }
+
+    fn wav_fixture() -> Vec<u8> {
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(&[0u8; 40]);
+        b
+    }
+
+    #[test]
+    fn extract_media_writes_embedded_audio_with_detected_extension() {
+        let dir = std::env::temp_dir().join(format!("msx-extract-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("scene.msx");
+
+        let mut scene = blank_scene();
+        scene.defs.push(msx_ast::Def::Audio(msx_ast::AudioDef::new(
+            "chime",
+            msx_ast::MediaSource::Embedded(wav_fixture()),
+        )));
+        let binary = msx_binary::compile(&scene, false).unwrap();
+        std::fs::write(&input, &binary).unwrap();
+
+        cmd_extract_media(&input, "chime", None).expect("extraction should succeed");
+
+        let expected_out = dir.join("chime.wav");
+        let written = std::fs::read(&expected_out).expect("should have written chime.wav");
+        assert_eq!(written, wav_fixture());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_media_honors_explicit_output_path() {
+        let dir = std::env::temp_dir().join(format!("msx-extract-test-explicit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("scene.msx");
+        let out = dir.join("custom_name.audio");
+
+        let mut scene = blank_scene();
+        scene.defs.push(msx_ast::Def::Audio(msx_ast::AudioDef::new(
+            "chime",
+            msx_ast::MediaSource::Embedded(wav_fixture()),
+        )));
+        let binary = msx_binary::compile(&scene, false).unwrap();
+        std::fs::write(&input, &binary).unwrap();
+
+        cmd_extract_media(&input, "chime", Some(&out)).expect("extraction should succeed");
+        assert_eq!(std::fs::read(&out).unwrap(), wav_fixture());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_media_errors_on_unknown_id() {
+        let dir = std::env::temp_dir().join(format!("msx-extract-test-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("scene.msx");
+
+        let binary = msx_binary::compile(&blank_scene(), false).unwrap();
+        std::fs::write(&input, &binary).unwrap();
+
+        let result = cmd_extract_media(&input, "does_not_exist", None);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
             }
