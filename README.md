@@ -126,15 +126,18 @@ An `.msx` file is a valid DixScript file with a vector-graphics schema.
 
 `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`, `text`,
 `group`, `use`, `layer` (isolated-buffer compositing — see "Layers" below),
-`sdf` (signed-distance-field shapes, `primitives/msx-sdf`), and `splat`
-(Gaussian-splat elements, `primitives/msx-splat`).
+`sdf` (signed-distance-field shapes, `primitives/msx-sdf`), `splat`
+(Gaussian-splat elements, `primitives/msx-splat`), and `image` (file-ref or
+embedded base64 PNG/JPEG/GIF, format-sniffed at parse time).
 
 ### Def types
 
 Referenced by any element's `fill`/`stroke` via `"url(#id)"`:
-`linear_gradient`, `radial_gradient`, `conic_gradient`, and `shader` — a
-real WGSL fragment shader, executed for real on `msx-render-gpu`. A minimal
-shader def:
+`linear_gradient`, `radial_gradient`, `conic_gradient`, `shader` — a
+real WGSL fragment shader, executed for real on `msx-render-gpu` — and
+`audio` (file-ref or embedded base64 WAV/OGG/MP3, referenced by id rather
+than painted — see "Animation" and `msx extract-media` for the only way
+to currently get audio bytes back out and verify them).
 
 ```dixscript
 defs::
@@ -216,20 +219,25 @@ baked GIF either way.
 ## Layers
 
 `{ type = "layer", children = [...] }` composites its children into an
-isolated offscreen buffer first (own opacity, own future blend mode),
-rather than drawing straight into the shared scene buffer the way `group`
-does. The tradeoff: content inside a `layer` doesn't get real shader
-execution (see the table above) — that's `layer.rs`'s own render path, not
-the one the top-level shader routing goes through.
+isolated offscreen buffer first (own opacity, own blend mode, own
+effects), rather than drawing straight into the shared scene buffer the
+way `group` does. Shader fills inside a `layer`'s children DO get real
+GPU execution — `layer.rs`'s own render path is given the real scene
+defs and the same shader pipeline/composite the top-level path uses, not
+a stripped-down one. Non-Normal blend modes (`multiply`, `screen`, etc.)
+and the `blur` effect are implemented on all three renderers;
+`drop_shadow`/`inner_shadow`/`outer_glow`/`inner_glow` are CPU/SVG only
+so far — see `msx-render-gpu/src/effects.rs`'s own module doc for the
+shared foundation those four would build on.
 
 ## Binary Format (MSX)
 
 Header (32 bytes):
 ```
 [0..4]   magic:      0x4D 0x53 0x58 0x00  ("MSX\0")
-[4]      version:    u8 = 1
+[4]      version:    u8 = 2
 [5]      compress:   u8  (0=none  1=mbfa)
-[6]      flags:      u8  (bit0=has_viewbox  bit1=has_metadata  bit2=has_defs)
+[6]      flags:      u8  (bit0=has_viewbox  bit1=has_metadata  bit2=has_defs  bit3=has_animations)
 [7]      reserved:   u8
 [8..12]  width:      f32 LE
 [12..16] height:     f32 LE
@@ -244,24 +252,22 @@ Payload (optionally MBFA-compressed):
 Background RGBA    4 bytes
 Viewbox            16 bytes  (if flags bit 0)
 String pool        [u16 count][u16 len + bytes]*
-Def section        [element]* — gradient, pattern, AND shader defs
+Def section        [element]* — gradient, pattern, shader, AND audio defs
 Element stream      [element]*  (recursive, terminated by 0xFF) — every
-                    element type above, including sdf/splat/layer
+                    element type above, including sdf/splat/layer/image
+Animation section   duration/loop_mode/animations, only if flags bit 3
 ```
 
-Full tag values and per-type wire layouts are in `docs/format-spec.md` —
-**that document is significantly further behind current reality than this
-README was before this pass** (its element/tag tables and "v0.1 feature
-scope" section predate `sdf`, `splat`, `shader` defs, `layer`, and
-`msx-anim` entirely, and its CLI reference lists commands that don't
-exist). Flagging rather than silently rewriting it — it's a bigger, more
-structural pass than this README update was.
+Full tag values and per-type wire layouts are in `docs/format-spec.md`,
+updated alongside this README rather than left to drift — it now covers
+`sdf`/`splat`/`shader`/`image`/`audio` defs and elements, `layer`
+(including blend modes and effects), the animation section below, and
+the CLI's actual current command list.
 
-**Known gap:** the binary codec does not currently serialize
-`animations`/`duration`/`loop_mode` at all — compiling an animated scene to
-binary silently drops its keyframe tracks. Confirmed still open as of this
-pass (`core/msx-binary/src/compiler.rs` has no reference to any of the
-three).
+The binary codec now serializes `animations`/`duration`/`loop_mode` —
+compiling an animated scene to binary no longer silently drops its
+keyframe tracks (previously an open, confirmed gap; closed with real
+round-trip tests in `core/msx-binary/src/compiler.rs`).
 
 ## MBFA Co-design
 
