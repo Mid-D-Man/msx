@@ -161,7 +161,7 @@ impl GpuRenderer {
         layer::render_ordered(
             &self.context.device,
             &self.context.queue,
-            &offscreen.view,
+            &offscreen,
             &scene.elements,
             Matrix2D::identity(),
             canvas_f,
@@ -359,6 +359,90 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         // Half-opacity red over black background → roughly half red.
         let px = target.get_pixel(10, 10);
         assert!(px[0] > 100 && px[0] < 180, "expected a half-strength red, got {:?}", px);
+        assert_eq!(px[3], 255);
+    }
+
+    /// The core fix for GPU parity item (2) — non-Normal blend modes
+    /// used to always composite as Normal regardless of what the scene
+    /// specified (see `layer.rs`'s module doc, pre-fix). A red backdrop
+    /// times a fully-opaque green layer is deliberately chosen because
+    /// Normal and Multiply give MAXIMALLY different answers for it:
+    /// Normal would just replace the backdrop outright (opaque source),
+    /// landing on pure green; Multiply is genuinely `backdrop x source`
+    /// per channel, and red (1,0,0) has a zero in every channel green
+    /// (0,1,0) doesn't and vice versa, so the product is exactly black
+    /// in every channel — (0,0,0,255). If this regressed back to the
+    /// old "everything composites as Normal" behavior, this test would
+    /// read green, not black, and fail loudly rather than passing by
+    /// coincidence. Hand-derivation of this exact expected value is in
+    /// `shaders/backdrop_blend.wgsl`'s own module doc.
+    #[test]
+    fn multiply_blend_mode_actually_multiplies_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let style = Style {
+            fill: Some(Paint::Color(Color::rgb(0, 255, 0))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
+        let rect = Element::Rect(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style });
+        let mut layer = Layer::new(vec![rect]);
+        layer.blend_mode = BlendMode::Multiply;
+        layer.opacity = 1.0;
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::rgb(255, 0, 0)));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render(&scene, &mut target);
+
+        assert_eq!(target.get_pixel(10, 10), [0, 0, 0, 255], "red backdrop x green source should multiply to black, not just replace it (Normal behavior)");
+    }
+
+    /// `Darken` at less-than-full opacity — covers opacity attenuation
+    /// interacting with a non-Normal blend, not just Multiply at full
+    /// strength (the test above). Backdrop white (1,1,1), source black
+    /// (0,0,0) at 50% opacity: full-strength `darken(1,0) = 0` in every
+    /// channel, but at half opacity the source only partially covers the
+    /// backdrop, so the correct result sits halfway between white and
+    /// that fully-blended black — mid-gray, not full black. Loose bounds
+    /// (100..155 of 255) rather than an exact value leave room for
+    /// filtering/rounding without leaving room for "opacity wasn't
+    /// applied at all" (black, 0) or "blending didn't happen at all,
+    /// just the untouched backdrop" (white, 255) to slip through as a
+    /// pass.
+    #[test]
+    fn darken_blend_mode_at_half_opacity_only_partially_darkens_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let style = Style {
+            fill: Some(Paint::Color(Color::rgb(0, 0, 0))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
+        let rect = Element::Rect(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style });
+        let mut layer = Layer::new(vec![rect]);
+        layer.blend_mode = BlendMode::Darken;
+        layer.opacity = 0.5;
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::rgb(255, 255, 255)));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render(&scene, &mut target);
+
+        let px = target.get_pixel(10, 10);
+        assert!(px[0] > 100 && px[0] < 155, "expected mid-gray from a half-opacity full darken, got {:?}", px);
         assert_eq!(px[3], 255);
     }
 

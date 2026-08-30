@@ -3,23 +3,46 @@
 //! (cleared to transparent, not the canvas background), then that buffer
 //! composites onto the parent target at the layer's opacity.
 //!
-//! ## Known gaps, both flagged rather than hidden
-//!
-//! **Blend modes other than Normal don't work yet.** Proper
-//! `Multiply`/`Screen`/etc. compositing needs the fragment shader to read
-//! BOTH the existing backdrop and the new source per pixel — but a render
-//! pass can't sample the texture it's currently writing to (no
-//! framebuffer-fetch in WebGPU). The correct technique is a backdrop
-//! snapshot (copy the current target to a separate readable texture) plus
-//! a dual-texture-sampling pass implementing the W3C blend formulas in
-//! WGSL — a genuinely separate, focused piece of work. Every blend mode
-//! currently composites as `Normal` (plain alpha blending): visually
-//! wrong for non-Normal modes, but opacity/isolation/draw-order are all
-//! correct, and it's a contained fix once the snapshot pass exists.
+//! ## Known gaps, flagged rather than hidden
 //!
 //! **`effects` (blur, drop shadow, glow) aren't applied on this path.**
 //! `msx-render-cpu` already has all of these; the GPU path doesn't have
 //! texture-sampling/blur infrastructure built yet.
+//!
+//! ## Blend modes
+//!
+//! `Normal` takes a separate, unchanged fixed-function fast path
+//! (`composite`, `PREMULTIPLIED_ALPHA_BLENDING` — no shader-side blend
+//! math at all) precisely because it was already proven correct by this
+//! file's existing tests before any of this existed; reusing it
+//! byte-for-byte rather than routing Normal through the general formula
+//! too means that proof still covers exactly the code Normal actually
+//! runs.
+//!
+//! Every other mode (`Multiply`/`Screen`/`Overlay`/etc.) goes through
+//! `composite_blended`: a render pass can't sample the texture it's
+//! currently writing to (no framebuffer-fetch in WebGPU/wgpu), so
+//! `dst`'s current contents are copied into a separate "backdrop"
+//! texture first (`copy_texture_to_texture` — needs a real `Texture`
+//! handle on both ends, not just a `TextureView`, which is why
+//! `render_ordered`/`render_ops`/`render_layer` all take
+//! `&OffscreenTarget` rather than `&wgpu::TextureView` now), then
+//! `shaders/backdrop_blend.wgsl` samples that backdrop copy AND the
+//! layer buffer together and writes the fully W3C-blended pixel
+//! straight into `dst`, with `blend: None` on that pipeline so nothing
+//! composites it a second time. See that shader's own module doc for
+//! the exact formula and its derivation from
+//! `msx-render-core::blend::composite` (already real-adapter-independent
+//! and unit-tested there), and `layer.rs`'s own `wgsl_blend_port_matches_real_rust_reference`
+//! /`wgsl_full_composite_formula_matches_reference` tests for a
+//! GPU-adapter-independent numerical cross-check of that derivation
+//! against the same reference — the two `..._if_a_gpu_adapter_is_available`
+//! tests in `lib.rs` are the only pieces of this feature that actually
+//! exercise the real wgpu pipeline/bind-group/texture-copy plumbing,
+//! and (like everything else marked that way in this crate) can only
+//! ever be confirmed by real CI, not local sandbox verification — `wgpu`
+//! itself needs a newer rustc than this project's local/sandbox floor
+//! provides.
 //!
 //! **Layer paint order is sibling-scoped, at every nesting level,
 //! including nesting itself.** A `Layer` only ever trades paint-order
@@ -146,9 +169,42 @@ struct CompositeParams {
     _pad: [f32; 7],
 }
 
+// Deliberately `_pad: [f32; 2]` (WGSL `vec2<f32>`, alignment 8), not a
+// 3-wide pad — a `vec3<f32>` field in WGSL needs its OWN field to start
+// 16-byte-aligned, which is exactly the trap `CompositeParams` above
+// already fell into once. Laid out by hand against WGSL's struct-layout
+// rules (offset = round_up(current_offset, member_align)):
+//   opacity (f32,  align 4, size 4)  -> offset 0
+//   blend_mode (u32, align 4, size 4) -> offset 4  (already 4-aligned)
+//   _pad (vec2<f32>, align 8, size 8) -> offset 8  (already 8-aligned —
+//                                         no gap needed before it)
+//   struct align = max(4,4,8) = 8; size = round_up(16, 8) = 16
+// A plain Rust `#[repr(C)]` struct with the same three fields in the
+// same order produces that identical 16-byte/offset-8 layout on its
+// own (unlike `[f32; 3]`, a `[f32; 2]` has alignment 4, and 4 already
+// divides the offset-8 starting point evenly) — so, unlike
+// `CompositeParams`, no explicit extra padding arithmetic is needed to
+// make the two sides agree.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlendParams {
+    opacity: f32,
+    blend_mode: u32,
+    _pad: [f32; 2],
+}
+
 pub struct LayerCompositor {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    // Non-Normal blend modes (`composite_blended`) — separate pipeline
+    // and layout from the Normal-only fast path above, since the bind
+    // group shapes genuinely differ (two sampled textures plus a
+    // `blend_mode` field, vs. one texture) — see this struct's `new`
+    // and `composite_blended` for why the two paths stay independent
+    // rather than sharing one bind group layout sized for the larger
+    // case.
+    blend_pipeline: wgpu::RenderPipeline,
+    blend_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
 }
 
@@ -253,7 +309,103 @@ impl LayerCompositor {
             ..Default::default()
         });
 
-        LayerCompositor { pipeline, bind_group_layout, sampler }
+        // ── Non-Normal blend pipeline ──────────────────────────────────
+        // See `composite_blended`'s own doc comment and
+        // `shaders/backdrop_blend.wgsl` for the technique and the
+        // formula it implements; this is just the pipeline plumbing.
+        let blend_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("msx layer backdrop blend shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/backdrop_blend.wgsl").into()),
+        });
+
+        let blend_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("msx layer backdrop blend bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, // backdrop_texture
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, // source_texture
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, // tex_sampler
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, // params
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("msx layer backdrop blend pipeline layout"),
+            bind_group_layouts: &[&blend_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("msx layer backdrop blend pipeline"),
+            layout: Some(&blend_layout),
+            vertex: wgpu::VertexState {
+                module: &blend_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blend_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    // `None`, not a `BlendState` — the fragment shader's
+                    // own output IS the fully-composited pixel (source
+                    // blended over the sampled backdrop, per the W3C
+                    // formula in backdrop_blend.wgsl), so it must
+                    // overwrite the destination outright. Blending it
+                    // again here with a `BlendState` would mix an
+                    // already-final color with the backdrop a SECOND
+                    // time — the exact double-application bug class
+                    // `composite.wgsl`'s own module doc already
+                    // describes for a different field (premultiplied
+                    // rgb/alpha), same underlying lesson: know which
+                    // stage is responsible for compositing, and only let
+                    // that one stage do it.
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        LayerCompositor { pipeline, bind_group_layout, blend_pipeline, blend_bind_group_layout, sampler }
     }
 
     /// Renders `layer`'s children into a fresh offscreen buffer (vector +
@@ -282,7 +434,7 @@ impl LayerCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
+        target: &OffscreenTarget,
         layer: &Layer,
         parent_transform: Matrix2D,
         canvas: (u32, u32),
@@ -336,7 +488,7 @@ impl LayerCompositor {
         render_ordered(
             device,
             queue,
-            &buffer.view,
+            &buffer,
             &layer.children,
             combined,
             canvas_f,
@@ -354,18 +506,29 @@ impl LayerCompositor {
             time,
         );
 
-        self.composite(device, queue, view, &buffer.view, layer.opacity as f32);
+        self.composite(device, queue, target, &buffer.view, layer.opacity as f32, layer.blend_mode);
     }
 
     /// Blends `src_view` (a fully-rendered layer buffer — see this
     /// module's "The layer buffer is premultiplied alpha" doc section)
-    /// onto `dst_view` at `opacity`. Requires `src_view`'s contents to
-    /// already be premultiplied alpha; this function does not itself
-    /// premultiply anything, it only preserves the invariant through the
-    /// opacity scale (`composite.wgsl`) and blends accordingly
-    /// (`PREMULTIPLIED_ALPHA_BLENDING`, set at pipeline-creation time in
-    /// `new` above).
-    fn composite(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, src_view: &wgpu::TextureView, opacity: f32) {
+    /// onto `dst`'s current contents at `opacity`, honoring `blend_mode`.
+    /// Requires `src_view`'s contents to already be premultiplied alpha;
+    /// this function does not itself premultiply anything.
+    ///
+    /// `BlendMode::Normal` takes the original, unchanged fast path
+    /// (fixed-function `PREMULTIPLIED_ALPHA_BLENDING` — no shader-side
+    /// blend math at all) precisely because it's already proven correct
+    /// by the existing tests below, most pointedly the splat/premultiplied
+    /// -alpha regression test — reusing it byte-for-byte rather than
+    /// routing Normal through the new general formula too means that
+    /// proof still covers exactly the code path Normal actually takes.
+    /// Every other mode goes through `composite_blended`.
+    fn composite(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst: &OffscreenTarget, src_view: &wgpu::TextureView, opacity: f32, blend_mode: msx_ast::BlendMode) {
+        if blend_mode != msx_ast::BlendMode::Normal {
+            self.composite_blended(device, queue, dst, src_view, opacity, blend_mode);
+            return;
+        }
+
         let params = CompositeParams { opacity, _pad: [0.0; 7] };
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx layer composite params"),
@@ -390,7 +553,7 @@ impl LayerCompositor {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("msx layer composite pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst_view,
+                    view: &dst.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
@@ -400,6 +563,104 @@ impl LayerCompositor {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// The non-Normal blend-mode path — see `shaders/backdrop_blend.wgsl`
+    /// for the formula and its derivation from
+    /// `msx-render-core::blend::composite`.
+    ///
+    /// A render pass can't sample the texture it's currently writing to
+    /// (no framebuffer-fetch in WebGPU/wgpu), so `dst`'s CURRENT contents
+    /// are copied into a fresh, separate "backdrop" texture first — that
+    /// copy is exactly why this function needs `dst: &OffscreenTarget`
+    /// rather than just a `TextureView` the way the Normal path above
+    /// still does (`copy_texture_to_texture` needs real `Texture`
+    /// handles on both ends, a view alone can't be a copy source). The
+    /// blend shader then reads that backdrop copy AND `src_view`
+    /// together and writes the final composited pixel straight into
+    /// `dst.view`, with pipeline `blend: None` (see `new`'s own comment
+    /// on that) so nothing composites it a second time.
+    fn composite_blended(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst: &OffscreenTarget, src_view: &wgpu::TextureView, opacity: f32, blend_mode: msx_ast::BlendMode) {
+        let backdrop = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("msx layer blend backdrop snapshot"),
+            size: wgpu::Extent3d { width: dst.width(), height: dst.height(), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let backdrop_view = backdrop.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let params = BlendParams { opacity, blend_mode: blend_mode as u32, _pad: [0.0; 2] };
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("msx layer backdrop blend params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("msx layer backdrop blend bind group"),
+            layout: &self.blend_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&backdrop_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: params_buffer.as_entire_binding() },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("msx layer backdrop blend encoder"),
+        });
+
+        // The snapshot: dst's own texture (its state as of right now,
+        // before this call changes it) copied into `backdrop`. Must
+        // happen as a distinct encoder step before the render pass
+        // below opens — `copy_texture_to_texture` and
+        // `begin_render_pass` can't overlap on the same encoder.
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: dst.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &backdrop,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: dst.width(), height: dst.height(), depth_or_array_layers: 1 },
+        );
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("msx layer backdrop blend pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    // `Load`, not `Clear` — this pass's own shader output
+                    // already accounts for whatever was in `dst` (that's
+                    // the entire point of sampling the backdrop copy),
+                    // so the attachment just needs to still hold that
+                    // same content up until the draw call overwrites it;
+                    // `Clear` here would erase it before the shader ever
+                    // gets to read the (separate, already-safe) copy.
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blend_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
@@ -584,7 +845,7 @@ fn draw_run(
 pub(crate) fn render_ordered(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    view: &wgpu::TextureView,
+    target: &OffscreenTarget,
     elements: &[Element],
     transform: Matrix2D,
     canvas: (f32, f32),
@@ -601,6 +862,8 @@ pub(crate) fn render_ordered(
     shader_base_dir: &std::path::Path,
     time: f32,
 ) {
+    let view = &target.view;
+
     // Unconditional up-front clear — see doc comment above for why this
     // can't just be "the first Run clears."
     {
@@ -613,7 +876,7 @@ pub(crate) fn render_ordered(
     }
 
     render_ops(
-        device, queue, view, elements, transform, canvas,
+        device, queue, target, elements, transform, canvas,
         layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
         shader_pipeline, masked_shader_composite, image_pipeline,
         defs, scene_defs, shader_base_dir, time,
@@ -645,7 +908,7 @@ pub(crate) fn render_ordered(
 fn render_ops(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    view: &wgpu::TextureView,
+    target: &OffscreenTarget,
     elements: &[Element],
     transform: Matrix2D,
     canvas: (f32, f32),
@@ -661,6 +924,7 @@ fn render_ops(
     shader_base_dir: &std::path::Path,
     time: f32,
 ) {
+    let view = &target.view;
     let canvas_u32 = (canvas.0.round().max(1.0) as u32, canvas.1.round().max(1.0) as u32);
     let ops = paint_order(elements);
 
@@ -675,7 +939,7 @@ fn render_ops(
             }
             PaintOp::Composite(layer) => {
                 layer_compositor.render_layer(
-                    device, queue, view, layer, transform, canvas_u32,
+                    device, queue, target, layer, transform, canvas_u32,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
                     masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
                 );
@@ -684,7 +948,7 @@ fn render_ops(
                 let local = group.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
                 let combined = transform.concat(local);
                 render_ops(
-                    device, queue, view, &group.children, combined, canvas,
+                    device, queue, target, &group.children, combined, canvas,
                     layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
                     shader_pipeline, masked_shader_composite, image_pipeline,
                     defs, scene_defs, shader_base_dir, time,
@@ -710,6 +974,169 @@ mod tests {
         }
     }
 
+    // ── backdrop_blend.wgsl formula cross-check ─────────────────────────
+    //
+    // Everything below this point is a verbatim Rust transcription of
+    // `shaders/backdrop_blend.wgsl`'s `blend_channel`/`hard_light`/
+    // `soft_light`, checked against `msx_render_core::blend`'s real,
+    // independently-unit-tested reference. This is the one piece of the
+    // whole non-Normal-blend-mode feature that can be given real,
+    // GPU-adapter-independent test coverage — everything else here only
+    // runs `if_a_gpu_adapter_is_available` (see lib.rs's own tests), so
+    // this is what actually runs on every CI invocation regardless of
+    // runner GPU support. If a future edit to either the WGSL or this
+    // mirror introduces a transcription slip (wrong operator, swapped
+    // argument, a typo'd constant), this is what catches it — not a real
+    // adapter, since none of this touches wgpu at all.
+
+    fn wgsl_hard_light(cb: f32, cs: f32) -> f32 {
+        if cs <= 0.5 {
+            return cb * (2.0 * cs);
+        }
+        let s = 2.0 * cs - 1.0;
+        cb + s - cb * s
+    }
+
+    fn wgsl_soft_light(cb: f32, cs: f32) -> f32 {
+        if cs <= 0.5 {
+            return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+        }
+        let d = if cb <= 0.25 { ((16.0 * cb - 12.0) * cb + 4.0) * cb } else { cb.sqrt() };
+        cb + (2.0 * cs - 1.0) * (d - cb)
+    }
+
+    fn wgsl_blend_channel(cb: f32, cs: f32, mode: msx_ast::BlendMode) -> f32 {
+        use msx_ast::BlendMode::*;
+        match mode {
+            Multiply => cb * cs,
+            Screen => cb + cs - cb * cs,
+            Overlay => wgsl_hard_light(cs, cb),
+            Add => (cb + cs).min(1.0),
+            SoftLight => wgsl_soft_light(cb, cs),
+            HardLight => wgsl_hard_light(cb, cs),
+            Difference => (cb - cs).abs(),
+            Exclusion => cb + cs - 2.0 * cb * cs,
+            Darken => cb.min(cs),
+            Lighten => cb.max(cs),
+            Subtract => (cb - cs).max(0.0),
+            Divide => {
+                if cs <= 0.0 { 1.0 } else { (cb / cs).min(1.0) }
+            }
+            Normal => cs,
+        }
+    }
+
+    #[test]
+    fn wgsl_blend_port_matches_real_rust_reference() {
+        use msx_ast::BlendMode::*;
+        let modes = [Multiply, Screen, Overlay, Add, SoftLight, HardLight, Difference, Exclusion, Darken, Lighten, Subtract, Divide];
+        let vals = [0.0f32, 0.1, 0.24, 0.25, 0.26, 0.5, 0.75, 0.9, 1.0];
+
+        for mode in modes {
+            for &cb in &vals {
+                for &cs in &vals {
+                    let real = match mode {
+                        Multiply => msx_render_core::blend::multiply(cb, cs),
+                        Screen => msx_render_core::blend::screen(cb, cs),
+                        Overlay => msx_render_core::blend::overlay(cb, cs),
+                        Add => msx_render_core::blend::add(cb, cs),
+                        SoftLight => msx_render_core::blend::soft_light(cb, cs),
+                        HardLight => msx_render_core::blend::hard_light(cb, cs),
+                        Difference => msx_render_core::blend::difference(cb, cs),
+                        Exclusion => msx_render_core::blend::exclusion(cb, cs),
+                        Darken => msx_render_core::blend::darken(cb, cs),
+                        Lighten => msx_render_core::blend::lighten(cb, cs),
+                        Subtract => msx_render_core::blend::subtract(cb, cs),
+                        Divide => msx_render_core::blend::divide(cb, cs),
+                        Normal => cs,
+                    };
+                    let ported = wgsl_blend_channel(cb, cs, mode);
+                    assert!(
+                        (real - ported).abs() < 1e-5,
+                        "{:?} cb={} cs={}: rust reference={} wgsl-mirror={}",
+                        mode, cb, cs, real, ported
+                    );
+                }
+            }
+        }
+    }
+
+    /// The full premultiplied-domain formula (not just `blend_channel`
+    /// in isolation) — mirrors `backdrop_blend.wgsl`'s `fs_main` exactly,
+    /// including opacity scaling and the premultiplied<->straight
+    /// conversions, cross-checked against `msx_render_core::composite`'s
+    /// straight-alpha reference across partial-alpha AND partial-opacity
+    /// cases. This is the derivation in this file's own `composite_blended`
+    /// doc comment, confirmed numerically rather than just algebraically.
+    #[test]
+    fn wgsl_full_composite_formula_matches_reference() {
+        use msx_ast::BlendMode::*;
+        // (backdrop straight color, backdrop alpha, source straight color,
+        //  source alpha before opacity, opacity, mode)
+        let cases: &[(f32, f32, f32, f32, f32, msx_ast::BlendMode)] = &[
+            (1.0, 1.0, 0.0, 1.0, 1.0, Multiply),
+            (0.3, 1.0, 0.6, 1.0, 1.0, Screen),
+            (0.8, 0.6, 0.2, 0.7, 1.0, Darken),
+            (0.2, 0.4, 0.9, 0.3, 0.5, Lighten),
+            (0.5, 1.0, 0.5, 1.0, 0.5, Difference),
+            (0.9, 0.2, 0.1, 0.8, 0.75, HardLight),
+            (1.0, 1.0, 0.0, 1.0, 0.5, Darken), // the exact case the lib.rs GPU test also checks
+        ];
+
+        for &(cb, ab, cs, a_src, opacity, mode) in cases {
+            let a_src_scaled = a_src * opacity;
+            let (ref_r, _, _, ref_a) = msx_render_core::composite(mode, (cb, cb, cb, ab), (cs, cs, cs, a_src_scaled));
+
+            let bp_rgb = cb * ab;
+            let sp_rgb_scaled = cs * a_src * opacity;
+            let sp_a_scaled = a_src_scaled;
+
+            let (result_premul_rgb, result_a) = if sp_a_scaled <= 0.0 {
+                (bp_rgb, ab)
+            } else {
+                let cs_straight = sp_rgb_scaled / sp_a_scaled.max(0.0001);
+                let cb_straight = bp_rgb / ab.max(0.0001);
+                let blended = wgsl_blend_channel(cb_straight, cs_straight, mode);
+                let rgb = (1.0 - sp_a_scaled) * bp_rgb + (1.0 - ab) * sp_rgb_scaled + sp_a_scaled * ab * blended;
+                let a = sp_a_scaled + ab * (1.0 - sp_a_scaled);
+                (rgb, a)
+            };
+
+            assert!((result_a - ref_a).abs() < 1e-4, "{:?}: alpha mismatch: ported={} ref={}", mode, result_a, ref_a);
+            let result_straight_rgb = if result_a > 0.0 { result_premul_rgb / result_a } else { 0.0 };
+            assert!(
+                (result_straight_rgb - ref_r).abs() < 1e-4,
+                "{:?}: rgb mismatch: ported={} ref={} (cb={cb} ab={ab} cs={cs} a_src={a_src} opacity={opacity})",
+                mode, result_straight_rgb, ref_r
+            );
+        }
+    }
+
+    /// `Normal` (mode 0) is never actually routed through this shader in
+    /// practice (`composite` takes the separate fixed-function fast path
+    /// instead — see its own doc comment for why), but if that ever
+    /// changed, the formula's own `Normal => cs` fallback must still
+    /// agree with `msx_render_core::composite`'s Normal case, not just
+    /// silently produce something plausible-looking.
+    #[test]
+    fn wgsl_formula_would_still_be_correct_for_normal_if_ever_routed_here() {
+        let (ref_r, _, _, ref_a) = msx_render_core::composite(msx_ast::BlendMode::Normal, (0.2, 0.2, 0.2, 0.6), (0.9, 0.9, 0.9, 0.8));
+
+        let cb = 0.2_f32;
+        let ab = 0.6_f32;
+        let cs = 0.9_f32;
+        let a_src = 0.8_f32;
+        let bp_rgb = cb * ab;
+        let sp_rgb = cs * a_src;
+        let blended = wgsl_blend_channel(cb, cs, msx_ast::BlendMode::Normal);
+        let result_rgb = (1.0 - a_src) * bp_rgb + (1.0 - ab) * sp_rgb + a_src * ab * blended;
+        let result_a = a_src + ab * (1.0 - a_src);
+        let result_straight = result_rgb / result_a;
+
+        assert!((result_a - ref_a).abs() < 1e-4);
+        assert!((result_straight - ref_r).abs() < 1e-4);
+    }
+
     /// `composite.wgsl`'s `struct CompositeParams { opacity: f32, _pad:
     /// vec3<f32> }` is 32 bytes under WGSL's own uniform-address-space
     /// layout rules (the `vec3<f32>` field needs a 16-byte-aligned start
@@ -724,6 +1151,19 @@ mod tests {
     #[test]
     fn composite_params_matches_the_wgsl_struct_size() {
         assert_eq!(std::mem::size_of::<CompositeParams>(), 32);
+    }
+
+    /// Same category of check as `composite_params_matches_the_wgsl_struct_size`
+    /// above, for `BlendParams`/`backdrop_blend.wgsl`'s own uniform struct
+    /// — see `BlendParams`'s own doc comment for the byte-by-byte layout
+    /// arithmetic this pins down. 16, not 32: this struct's widest member
+    /// is a `vec2<f32>` (align 8), not the `vec3<f32>` (align 16)
+    /// `CompositeParams` has to accommodate, which is exactly why the two
+    /// numbers differ and why this one didn't need the same explicit
+    /// padding-arithmetic fix.
+    #[test]
+    fn blend_params_matches_the_wgsl_struct_size() {
+        assert_eq!(std::mem::size_of::<BlendParams>(), 16);
     }
 
     #[test]

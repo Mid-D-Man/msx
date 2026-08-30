@@ -61,6 +61,30 @@ impl OffscreenTarget {
         OffscreenTarget { texture, view, width, height }
     }
 
+    /// Exposes the backing texture, not just `view` — needed by
+    /// `layer.rs`'s non-Normal blend-mode path, which has to
+    /// `copy_texture_to_texture` this target's CURRENT contents into a
+    /// separate, readable "backdrop" texture before drawing into it
+    /// again (a render pass can't sample the texture it's currently
+    /// writing to — no framebuffer-fetch in WebGPU — so the backdrop the
+    /// blend shader reads has to be a real, separate copy). A `TextureView`
+    /// alone can't be the source of a texture-to-texture copy;
+    /// `copy_texture_to_texture` needs the actual `Texture` handle on
+    /// both ends. The field stays private — this is the one place
+    /// outside this struct that needs it, not a reason to make it `pub`
+    /// outright.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
     /// Copies the texture to a CPU-readable buffer, blocks until the copy
     /// completes, and unpacks it into a `RenderTarget`.
     ///
