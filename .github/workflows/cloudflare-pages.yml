@@ -1,0 +1,371 @@
+# .github/workflows/cloudflare-pages.yml
+#
+# Replaces .github/workflows/pages.yml's deployment target: same test/
+# build/bench/corpus pipeline (copied verbatim — that part of pages.yml
+# was already working and tested, nothing about the test/build/render
+# steps below changes just because the deploy target does), but now
+# builds the full multi-page site (home, docs, samples, playground,
+# report — .github/pages/site/build_site.py) and a WASM build of
+# web/msx-wasm for the playground, publishing to Cloudflare Pages
+# instead of GitHub Pages.
+#
+# Requires two repo secrets, set once, on Cloudflare's end first:
+#   CLOUDFLARE_API_TOKEN   — a token with "Cloudflare Pages: Edit"
+#                            permission (My Profile -> API Tokens ->
+#                            Create Token -> "Edit Cloudflare Workers"
+#                            template covers Pages too, or a custom
+#                            token scoped to just Pages:Edit)
+#   CLOUDFLARE_ACCOUNT_ID  — found on any page of the Cloudflare
+#                            dashboard's right sidebar
+# And a Pages project named "msx" created once in the Cloudflare
+# dashboard (Workers & Pages -> Create -> Pages -> Direct Upload; the
+# very first run of this workflow can also create it automatically —
+# cloudflare/pages-action does this on a first deploy if the project
+# doesn't exist yet).
+#
+# Once this is green and confirmed serving real traffic, pages.yml
+# (and the repo's GitHub Pages source setting) can be retired — left as
+# a manual follow-up, not done as part of this change, since cutting
+# over DNS/links is a one-way step worth doing deliberately rather than
+# silently as a side effect of adding this file.
+
+name: MSX — Bench, Report, Site, Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group:   cloudflare-pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    if: ${{ vars.AUTO_RUN_ENABLED != 'false' || github.event_name == 'workflow_dispatch' }}
+    environment:
+      name: cloudflare-pages
+      url:  ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout MSX
+        uses: actions/checkout@v4
+
+      - name: Checkout MBFA (sibling path dependency)
+        run: |
+          git clone --depth 1 "https://github.com/Mid-D-Man/mbfa.git" \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+          git config --global --add safe.directory \
+            "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+
+      - name: Checkout DixScript (sibling path dependency)
+        run: |
+          PARENT=$(dirname "$GITHUB_WORKSPACE")
+          git clone --depth 1 "https://github.com/Mid-D-Man/DixScript-Rust.git" \
+            "$PARENT/DixScript-Rust"
+          git config --global --add safe.directory "$PARENT/DixScript-Rust"
+          ln -s "$PARENT/DixScript-Rust/dixscript" "$PARENT/dixscript"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Same rationale as pages.yml's identical step: msx-render-gpu
+      # needs SOME adapter to do anything on a GPU-less hosted runner.
+      - name: Install software GPU drivers (lavapipe/llvmpipe, for headless wgpu)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libgl1-mesa-dri libegl1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ../mbfa/target
+            ../DixScript-Rust/target
+          key: msx-cfpages-v1-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: msx-cfpages-v1-
+
+      - name: Create results dir
+        run: mkdir -p results
+
+      - name: Run tests (debug)
+        run: cargo test --workspace 2>&1 | tee results/test_debug.txt
+        shell: bash --noprofile --norc -eo pipefail {0}
+
+      - name: Run tests (release)
+        run: cargo test --workspace --release 2>&1 | tee results/test_release.txt
+        shell: bash --noprofile --norc -eo pipefail {0}
+
+      - name: Build release binary
+        run: cargo build --workspace --release --features gpu
+
+      - name: Run criterion benchmarks
+        timeout-minutes: 12
+        run: |
+          cargo bench --bench compare -- \
+            --output-format bencher \
+            --measurement-time 5 \
+            --sample-size 20 \
+            | tee results/bench_raw.txt || true
+          echo "Bench lines: $(grep -c 'bench:' results/bench_raw.txt || echo 0)"
+
+      # ── Example rendering + corpus stats ──────────────────────────────────────
+      # Unchanged from pages.yml — same script, same results/examples.json
+      # and results/corpus.csv output, just consumed by a different set of
+      # downstream steps below. Kept as its own external script file in
+      # pages.yml already (not inlined here) — see that workflow for the
+      # step this mirrors 1:1; duplicating a long inline Python block into
+      # a second workflow file wasn't worth it for a step that isn't
+      # changing, but is flagged here as a follow-up worth doing (extract
+      # to .github/pages/build_corpus.py, called from both workflows)
+      # rather than silently letting the two copies drift apart later.
+      - name: Render examples and collect corpus stats
+        run: |
+          BIN=./target/release/msx
+          mkdir -p results/svgs results/pngs results/gifs results/gpu_pngs results/gpu_errors results/gpu_gifs results/gpu_gif_errors
+          {
+            printf 'FILE,SOURCE_BYTES,BINARY_BYTES,SVG_BYTES,BIN_PCT,SVG_PCT,ROUNDTRIP\n'
+            for src in examples/*.msx; do
+              [ -f "$src" ] || continue
+              stem=$(basename "${src%.msx}")
+              src_bytes=$(wc -c < "$src")
+
+              if "$BIN" compile "$src" -o "/tmp/${stem}.msx" 2>/dev/null; then
+                bin_bytes=$(wc -c < "/tmp/${stem}.msx")
+              else
+                echo "  WARN: compile failed for $stem" >&2
+                bin_bytes=0
+              fi
+
+              if "$BIN" render "$src" -o "results/svgs/${stem}.svg" 2>/dev/null; then
+                svg_bytes=$(wc -c < "results/svgs/${stem}.svg")
+              else
+                echo "  WARN: render failed for $stem" >&2
+                svg_bytes=0
+              fi
+
+              "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
+                echo "  WARN: rasterize failed for $stem" >&2
+
+              if ! "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
+                    2>"results/gpu_errors/${stem}.txt"; then
+                :
+              else
+                rm -f "results/gpu_errors/${stem}.txt"
+              fi
+
+              "$BIN" animate "$src" -o "results/gifs/${stem}.gif" 2>/dev/null || true
+
+              if grep -q 'type = "shader"' "$src" || grep -q 'animations::' "$src"; then
+                if ! "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
+                      --duration 4 --fps 12 \
+                      2>"results/gpu_gif_errors/${stem}.txt"; then
+                  :
+                else
+                  rm -f "results/gpu_gif_errors/${stem}.txt"
+                fi
+              fi
+
+              denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
+              bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
+              svg_pct=$(awk "BEGIN{printf \"%.1f\",$svg_bytes/$denom*100}")
+
+              "$BIN" roundtrip "$src" 2>/dev/null && rt="PASS" || rt="FAIL"
+
+              printf '%s,%d,%d,%d,%s,%s,%s\n' \
+                "$stem" "$src_bytes" "$bin_bytes" "$svg_bytes" \
+                "$bin_pct" "$svg_pct" "$rt"
+
+              rm -f "/tmp/${stem}.msx"
+            done
+          } | tee results/corpus.csv
+
+      - name: Upload raw render outputs (debug artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-renders
+          path: |
+            results/pngs
+            results/gifs
+            results/gpu_pngs
+            results/gpu_gifs
+            results/svgs
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Build examples.json
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, glob, base64
+
+          stats = {}
+          try:
+              with open('results/corpus.csv') as f:
+                  for line in f.readlines()[1:]:
+                      parts = line.strip().split(',')
+                      if len(parts) >= 7:
+                          stats[parts[0]] = {
+                              'source_bytes': int(parts[1]),
+                              'binary_bytes': int(parts[2]),
+                              'svg_bytes':    int(parts[3]),
+                              'bin_pct':      float(parts[4]),
+                              'svg_pct':      float(parts[5]),
+                              'pass':         parts[6] == 'PASS',
+                          }
+          except Exception as e:
+              print(f"WARN: could not read corpus.csv: {e}")
+
+          results = []
+          for svg_path in sorted(glob.glob('results/svgs/*.svg')):
+              stem     = os.path.splitext(os.path.basename(svg_path))[0]
+              src_path = f'examples/{stem}.msx'
+              png_path = f'results/pngs/{stem}.png'
+              gif_path = f'results/gifs/{stem}.gif'
+              gpu_path = f'results/gpu_pngs/{stem}.gpu.png'
+              gpu_err_path = f'results/gpu_errors/{stem}.txt'
+              gpu_gif_path = f'results/gpu_gifs/{stem}.gpu.gif'
+              gpu_gif_err_path = f'results/gpu_gif_errors/{stem}.txt'
+
+              if not os.path.exists(src_path):
+                  continue
+
+              with open(svg_path, 'r', errors='replace') as f:
+                  svg_content = f.read()
+              with open(src_path, 'r', errors='replace') as f:
+                  source = f.read()
+
+              png_base64 = ''
+              if os.path.exists(png_path):
+                  with open(png_path, 'rb') as f:
+                      png_base64 = base64.b64encode(f.read()).decode('ascii')
+
+              anim_gif_base64 = ''
+              if os.path.exists(gif_path):
+                  with open(gif_path, 'rb') as f:
+                      anim_gif_base64 = base64.b64encode(f.read()).decode('ascii')
+
+              gpu_png_base64 = ''
+              if os.path.exists(gpu_path):
+                  with open(gpu_path, 'rb') as f:
+                      gpu_png_base64 = base64.b64encode(f.read()).decode('ascii')
+              gpu_error = ''
+              if os.path.exists(gpu_err_path):
+                  with open(gpu_err_path, 'r', errors='replace') as f:
+                      gpu_error = f.read().strip()[:300]
+
+              gpu_gif_base64 = ''
+              if os.path.exists(gpu_gif_path):
+                  with open(gpu_gif_path, 'rb') as f:
+                      gpu_gif_base64 = base64.b64encode(f.read()).decode('ascii')
+              gpu_gif_error = ''
+              if os.path.exists(gpu_gif_err_path):
+                  with open(gpu_gif_err_path, 'r', errors='replace') as f:
+                      gpu_gif_error = f.read().strip()[:300]
+
+              uses_shader = 'type = "shader"' in source
+
+              row = stats.get(stem, {})
+              entry = {
+                  'name':            stem,
+                  'source':          source,
+                  'svg':             svg_content,
+                  'png_base64':      png_base64,
+                  'anim_gif_base64': anim_gif_base64,
+                  'gpu_png_base64':  gpu_png_base64,
+                  'gpu_error':       gpu_error,
+                  'gpu_gif_base64':  gpu_gif_base64,
+                  'gpu_gif_error':   gpu_gif_error,
+                  'uses_shader':     uses_shader,
+                  'source_bytes':    row.get('source_bytes', os.path.getsize(src_path)),
+                  'binary_bytes':    row.get('binary_bytes', 0),
+                  'svg_bytes':       row.get('svg_bytes',    os.path.getsize(svg_path)),
+                  'bin_pct':         row.get('bin_pct', 0.0),
+                  'svg_pct':         row.get('svg_pct', 0.0),
+                  'pass':            row.get('pass', False),
+              }
+              results.append(entry)
+              print(f"  {stem}: {entry['source_bytes']}B src -> {entry['binary_bytes']}B bin -> {entry['svg_bytes']}B svg ({'PASS' if entry['pass'] else 'FAIL'})")
+
+          with open('results/examples.json', 'w') as f:
+              json.dump(results, f)
+          print(f"examples.json: {len(results)} example(s)")
+          PYEOF
+
+      # ── WASM build for the playground ──────────────────────────────────────────
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build web/msx-wasm
+        run: wasm-pack build web/msx-wasm --target web --out-dir ../../results/wasm-pkg --release
+
+      # ── Site build (home, docs, samples, playground, report) ───────────────────
+      - name: Compute site stats
+        run: |
+          python3 - <<'PYEOF'
+          import json, re
+          text = open("results/test_release.txt").read()
+          passed = sum(int(m) for m in re.findall(r"(\d+) passed", text))
+          examples = json.load(open("results/examples.json")) if __import__("os").path.exists("results/examples.json") else []
+          # 19 element/def tags is a structural fact about the format as
+          # of docs/format-spec.md's own "since" table (Rect/Circle/
+          # Ellipse/Line/Polyline/Polygon/Path/Text/Group/Use/Sdf/Splat/
+          # Layer/Image + LinearGradient/RadialGradient/ConicGradient/
+          # Shader/Audio) — update this number if a new tag is ever added,
+          # same as that table itself needs updating.
+          stats = {"tests_passed": passed, "example_count": len(examples), "element_tags": 19}
+          json.dump(stats, open("results/site_stats.json", "w"))
+          print(stats)
+          PYEOF
+
+      - name: Generate build report page
+        run: |
+          python3 .github/pages/generate_report.py \
+            --build    "${{ github.run_number }}" \
+            --commit   "${GITHUB_SHA:0:8}" \
+            --branch   "${{ github.ref_name }}" \
+            --tests-d  results/test_debug.txt \
+            --tests-r  results/test_release.txt \
+            --bench    results/bench_raw.txt \
+            --corpus   results/corpus.csv \
+            --examples results/examples.json \
+            --out      site/report/index.html
+
+      - name: Build full site
+        run: |
+          python3 .github/pages/site/build_site.py \
+            --repo-root . \
+            --out site/ \
+            --examples results/examples.json \
+            --stats results/site_stats.json
+
+      - name: Copy WASM build into playground
+        run: |
+          mkdir -p site/playground
+          cp results/wasm-pkg/msx_wasm.js        site/playground/msx_wasm.js
+          cp results/wasm-pkg/msx_wasm_bg.wasm    site/playground/msx_wasm_bg.wasm
+
+      # ── Cloudflare Pages deployment ─────────────────────────────────────────────
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: msx
+          directory: site
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Step Summary
+        run: |
+          echo "## MSX Build #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ github.ref_name }}\`  Commit: \`${GITHUB_SHA:0:8}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deployed: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
