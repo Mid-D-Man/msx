@@ -5,9 +5,13 @@
 //!
 //! ## Known gaps, flagged rather than hidden
 //!
-//! **`effects` (blur, drop shadow, glow) aren't applied on this path.**
-//! `msx-render-cpu` already has all of these; the GPU path doesn't have
-//! texture-sampling/blur infrastructure built yet.
+//! **`effects`: only `Effect::Blur` is applied on this path.**
+//! `msx-render-cpu` already has all five (`Blur`/`DropShadow`/
+//! `InnerShadow`/`OuterGlow`/`InnerGlow`); `DropShadow`/`InnerShadow`/
+//! `OuterGlow`/`InnerGlow` aren't wired up here yet — see `effects.rs`'s
+//! own module doc for the plan (all four reuse the same blur pass) and
+//! exactly what "not wired up" means today (silently skipped, not
+//! silently wrong).
 //!
 //! ## Blend modes
 //!
@@ -128,6 +132,7 @@ use wgpu::util::DeviceExt;
 
 use msx_ast::{Def, Element, Group, Layer, Matrix2D};
 
+use crate::effects::GpuEffects;
 use crate::masked_shader_composite::MaskedShaderComposite;
 use crate::sdf::SdfPipeline;
 use crate::sdf_shader::SdfShaderContext;
@@ -444,6 +449,7 @@ impl LayerCompositor {
         shader_pipeline: &ShaderFillPipeline,
         masked_shader_composite: &MaskedShaderComposite,
         image_pipeline: &crate::image::ImagePipeline,
+        gpu_effects: &GpuEffects,
         scene_defs: &[Def],
         shader_base_dir: &std::path::Path,
         time: f32,
@@ -500,13 +506,24 @@ impl LayerCompositor {
             shader_pipeline,
             masked_shader_composite,
             image_pipeline,
+            gpu_effects,
             &defs,
             scene_defs,
             shader_base_dir,
             time,
         );
 
-        self.composite(device, queue, target, &buffer.view, layer.opacity as f32, layer.blend_mode);
+        // Effects run on the fully-rendered layer buffer, BEFORE
+        // compositing — matching msx-render-cpu's own ordering (see
+        // that crate's layer-rendering for the equivalent step). `None`
+        // means `layer.effects` had no `Effect::Blur` in it (the common
+        // case — most layers have no effects at all), and `buffer`
+        // itself, unblurred, is what gets composited; see `GpuEffects::apply`'s
+        // own doc for why that's cheap rather than a wasted allocation.
+        let blurred = gpu_effects.apply(device, queue, &buffer, &layer.effects);
+        let composite_src = blurred.as_ref().map(|b| &b.view).unwrap_or(&buffer.view);
+
+        self.composite(device, queue, target, composite_src, layer.opacity as f32, layer.blend_mode);
     }
 
     /// Blends `src_view` (a fully-rendered layer buffer — see this
@@ -857,6 +874,7 @@ pub(crate) fn render_ordered(
     shader_pipeline: &ShaderFillPipeline,
     masked_shader_composite: &MaskedShaderComposite,
     image_pipeline: &crate::image::ImagePipeline,
+    gpu_effects: &GpuEffects,
     defs: &vector::Defs,
     scene_defs: &[Def],
     shader_base_dir: &std::path::Path,
@@ -879,7 +897,7 @@ pub(crate) fn render_ordered(
         device, queue, target, elements, transform, canvas,
         layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
         shader_pipeline, masked_shader_composite, image_pipeline,
-        defs, scene_defs, shader_base_dir, time,
+        gpu_effects, defs, scene_defs, shader_base_dir, time,
     );
 }
 
@@ -919,6 +937,7 @@ fn render_ops(
     shader_pipeline: &ShaderFillPipeline,
     masked_shader_composite: &MaskedShaderComposite,
     image_pipeline: &crate::image::ImagePipeline,
+    gpu_effects: &GpuEffects,
     defs: &vector::Defs,
     scene_defs: &[Def],
     shader_base_dir: &std::path::Path,
@@ -941,7 +960,7 @@ fn render_ops(
                 layer_compositor.render_layer(
                     device, queue, target, layer, transform, canvas_u32,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-                    masked_shader_composite, image_pipeline, scene_defs, shader_base_dir, time,
+                    masked_shader_composite, image_pipeline, gpu_effects, scene_defs, shader_base_dir, time,
                 );
             }
             PaintOp::GroupSplit(group) => {
@@ -951,7 +970,7 @@ fn render_ops(
                     device, queue, target, &group.children, combined, canvas,
                     layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
                     shader_pipeline, masked_shader_composite, image_pipeline,
-                    defs, scene_defs, shader_base_dir, time,
+                    gpu_effects, defs, scene_defs, shader_base_dir, time,
                 );
             }
         }

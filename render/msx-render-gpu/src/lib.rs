@@ -56,6 +56,7 @@
 //! Layer-specific, they're gaps everywhere in this crate).
 
 mod context;
+mod effects;
 mod image;
 mod layer;
 mod masked_shader_composite;
@@ -69,6 +70,7 @@ mod target;
 mod vector;
 
 pub use context::GpuContext;
+pub use effects::GpuEffects;
 pub use layer::LayerCompositor;
 pub use pipeline::VectorPipeline;
 pub use sdf::SdfPipeline;
@@ -93,6 +95,7 @@ pub struct GpuRenderer {
     masked_shader_composite: MaskedShaderComposite,
     layer_compositor: LayerCompositor,
     image_pipeline: ImagePipeline,
+    gpu_effects: GpuEffects,
 }
 
 impl GpuRenderer {
@@ -106,7 +109,8 @@ impl GpuRenderer {
         let masked_shader_composite = MaskedShaderComposite::new(&context.device, format);
         let layer_compositor = LayerCompositor::new(&context.device, format);
         let image_pipeline = ImagePipeline::new(&context.device, format);
-        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, masked_shader_composite, layer_compositor, image_pipeline })
+        let gpu_effects = GpuEffects::new(&context.device, format);
+        Ok(GpuRenderer { context, vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline, masked_shader_composite, layer_compositor, image_pipeline, gpu_effects })
     }
 
     /// Renders exactly like the `Renderer` trait's `render`, but with
@@ -173,6 +177,7 @@ impl GpuRenderer {
             &self.shader_pipeline,
             &self.masked_shader_composite,
             &self.image_pipeline,
+            &self.gpu_effects,
             &defs,
             &scene.defs,
             shader_base_dir,
@@ -567,5 +572,55 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let px = target.get_pixel(10, 10);
         assert_eq!([px[0], px[2], px[3]], [0, 0, 255], "expected zero red/blue and full alpha, got {:?}", px);
         assert!(px[1] > 250, "expected very close to the real shader's solid green (not the def's red fallback_color, and not the pre-fix double-alpha-darkened ~249), got {:?}", px);
+    }
+
+    /// `Effect::Blur` end-to-end. A `Layer` containing an opaque red
+    /// rect covering only the LEFT HALF of the canvas, over an opaque
+    /// black scene background: before any blur, a pixel just to the
+    /// RIGHT of the rect's edge would read pure black (the layer's own
+    /// buffer is transparent there, so premultiplied compositing leaves
+    /// the black backdrop untouched). After a real blur, the red edge
+    /// bleeds across that boundary — the same pixel should show a
+    /// nonzero-but-not-255 RED channel, neither the un-blurred "still
+    /// pure black" (0) nor "fully red" (255) value. Deliberately does
+    /// NOT assert on alpha: the scene background is fully opaque, and
+    /// premultiplied-over-opaque compositing (`a_new = a_src + a_dst *
+    /// (1 - a_src)`) always lands back at 255 regardless of how blurred
+    /// `a_src` itself is — asserting alpha == 255 here would pass
+    /// whether or not blur actually ran, so it isn't the signal that
+    /// matters for this test (unlike the RED channel, which genuinely
+    /// can't move off 0 without a real, working blur pass).
+    #[test]
+    fn layer_blur_effect_bleeds_color_across_a_hard_edge_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let style = Style {
+            fill: Some(Paint::Color(Color::rgb(255, 0, 0))),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            ..Default::default()
+        };
+        // Left half only (x: 0..10 of a 20-wide canvas) — the hard edge
+        // this test blurs across sits at x=10.
+        let rect = Element::Rect(Rect { x: 0.0, y: 0.0, width: 10.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style });
+        let mut layer = Layer::new(vec![rect]);
+        layer.effects = vec![msx_ast::Effect::Blur { radius: 6.0 }];
+
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.elements.push(Element::Layer(layer));
+
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render(&scene, &mut target);
+
+        // A few pixels right of the edge, still well inside the 20-wide
+        // canvas — close enough for a radius-6 blur to visibly reach,
+        // far enough from x=19 to avoid any canvas-edge sampling
+        // artifact muddying the assertion.
+        let px = target.get_pixel(13, 10);
+        assert!(px[0] > 0 && px[0] < 255, "expected a blurred (partial) red channel past the edge, got {:?} — 0 means blur didn't run at all, 255 means the edge itself moved", px);
     }
     }
