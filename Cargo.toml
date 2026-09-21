@@ -14,6 +14,7 @@ members = [
     "primitives/msx-splat",
     "apps/msx-cli",
     "apps/msx-viewer",
+    "web/msx-wasm",
 ]
 
 [workspace.package]

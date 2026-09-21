@@ -1,0 +1,38 @@
+# web/msx-wasm/Cargo.toml
+[package]
+name        = "msx-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WASM bindings for the site playground (site/playground/) — thin wrapper over the msx facade crate, no engine logic of its own"
+publish     = false
+
+[lib]
+# cdylib: what wasm-bindgen/wasm-pack actually needs to produce a .wasm
+# binary. rlib alongside it (the default `crate-type` already implies
+# this, but listed explicitly) keeps this crate usable as an ordinary
+# Rust dependency too, e.g. from a future native test that wants to
+# call these functions directly without going through JS at all.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Path dependency on the root facade crate, not on the individual
+# msx-parser/msx-binary/msx-render-svg crates separately — this crate's
+# whole point is "exactly what the CLI calls," and `msx` is already the
+# single place that re-exports precisely that surface (see src/lib.rs
+# at the repo root).
+msx = { path = "../.." }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+# Optimize for binary size, not speed — this ships over the network to
+# a browser on every playground page load; a few extra milliseconds of
+# render time for a single scene is a better trade than a larger
+# download for every visitor. `lto = true` and `codegen-units = 1` are
+# the standard wasm-pack-recommended pair alongside opt-level "s" for
+# squeezing a release wasm-bindgen build further.
+opt-level = "s"
+lto = true
+codegen-units = 1

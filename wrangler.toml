@@ -1,0 +1,26 @@
+# wrangler.toml
+#
+# Cloudflare Pages project config for the MSX site. Deployment itself
+# goes through cloudflare/pages-action in
+# .github/workflows/cloudflare-pages.yml (not `wrangler pages deploy`
+# run by hand) — this file exists so the project's build output
+# directory and name are declared in one place either tool can read,
+# and so `wrangler pages dev site/` works for previewing a local build
+# of site/ before pushing.
+#
+# name must match `projectName: msx` in cloudflare-pages.yml exactly —
+# wrangler and the pages-action both resolve the Cloudflare Pages
+# project by this name, and CI creates the project under this name on
+# its first successful deploy if it doesn't exist yet.
+
+name = "msx"
+pages_build_output_dir = "site"
+
+[build]
+# CI (.github/workflows/cloudflare-pages.yml) builds `site/` itself —
+# via the Rust toolchain, the compiled examples/CI corpus, and
+# .github/pages/site/build_site.py — before Cloudflare ever sees it.
+# Nothing here needs Cloudflare's own build step to do anything; this
+# is the "bring your own build output" mode wrangler/Pages supports,
+# not a Cloudflare-side build.
+command = ""
