@@ -37,7 +37,7 @@ msx-sdf         = { path = "primitives/msx-sdf" }
 msx-splat       = { path = "primitives/msx-splat" }
 # External siblings
 mbfa      = { path = "../mbfa" }
-dixscript = "dixscript"
+dixscript = "1.0.0"
 # Rendering
 tiny-skia = "0.11"
 rayon     = "1.8"
