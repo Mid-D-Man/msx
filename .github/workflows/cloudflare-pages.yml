@@ -20,8 +20,15 @@
 # And a Pages project named "msx" created once in the Cloudflare
 # dashboard (Workers & Pages -> Create -> Pages -> Direct Upload; the
 # very first run of this workflow can also create it automatically —
-# cloudflare/pages-action does this on a first deploy if the project
-# doesn't exist yet).
+# cloudflare/wrangler-action's `pages deploy` does this on a first
+# deploy if the project doesn't exist yet).
+#
+# Deploys via cloudflare/wrangler-action, not cloudflare/pages-action:
+# the latter was deprecated and its repo archived by Cloudflare (last
+# release v1.5.0, "No Maintenance Intended"), which is exactly why the
+# first run of this workflow failed with "Unable to resolve action
+# `cloudflare/pages-action`, not found" — confirmed directly against
+# Cloudflare's own current docs before making this fix, not guessed.
 #
 # Once this is green and confirmed serving real traffic, pages.yml
 # (and the repo's GitHub Pages source setting) can be retired — left as
@@ -38,6 +45,7 @@ on:
 
 permissions:
   contents: read
+  deployments: write
 
 concurrency:
   group:   cloudflare-pages
@@ -49,7 +57,7 @@ jobs:
     if: ${{ vars.AUTO_RUN_ENABLED != 'false' || github.event_name == 'workflow_dispatch' }}
     environment:
       name: cloudflare-pages
-      url:  ${{ steps.deploy.outputs.url }}
+      url:  ${{ steps.deploy.outputs.deployment-url }}
 
     steps:
       - name: Checkout MSX
@@ -352,14 +360,22 @@ jobs:
           cp results/wasm-pkg/msx_wasm_bg.wasm    site/playground/msx_wasm_bg.wasm
 
       # ── Cloudflare Pages deployment ─────────────────────────────────────────────
+      # cloudflare/wrangler-action, not cloudflare/pages-action (see this
+      # file's own header comment for why) — this is the exact
+      # Pages-deploy shape from wrangler-action's own current README
+      # ("Deploy your Pages site (production & preview)"): pass the
+      # built directory and project name to `wrangler pages deploy`
+      # rather than to separate action inputs, since pages-action's
+      # `directory`/`projectName` inputs don't exist on this action at
+      # all. `--project-name=msx` must keep matching wrangler.toml's own
+      # `name = "msx"` and this environment block's project reference.
       - name: Deploy to Cloudflare Pages
         id: deploy
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/wrangler-action@v4
         with:
-          apiToken:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: msx
-          directory: site
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command:     pages deploy site --project-name=msx
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish Step Summary
@@ -368,4 +384,4 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Branch: \`${{ github.ref_name }}\`  Commit: \`${GITHUB_SHA:0:8}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Deployed: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+          echo "Deployed: ${{ steps.deploy.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
