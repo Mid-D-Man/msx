@@ -17,11 +17,6 @@
 #                            token scoped to just Pages:Edit)
 #   CLOUDFLARE_ACCOUNT_ID  — found on any page of the Cloudflare
 #                            dashboard's right sidebar
-# And a Pages project named "msx" created once in the Cloudflare
-# dashboard (Workers & Pages -> Create -> Pages -> Direct Upload; the
-# very first run of this workflow can also create it automatically —
-# cloudflare/wrangler-action's `pages deploy` does this on a first
-# deploy if the project doesn't exist yet).
 #
 # Deploys via cloudflare/wrangler-action, not cloudflare/pages-action:
 # the latter was deprecated and its repo archived by Cloudflare (last
@@ -69,7 +64,6 @@ jobs:
             "$(dirname "$GITHUB_WORKSPACE")/mbfa"
           git config --global --add safe.directory \
             "$(dirname "$GITHUB_WORKSPACE")/mbfa"
-
       - name: Checkout DixScript (sibling path dependency)
         run: |
           PARENT=$(dirname "$GITHUB_WORKSPACE")
@@ -77,7 +71,6 @@ jobs:
             "$PARENT/DixScript-Rust"
           git config --global --add safe.directory "$PARENT/DixScript-Rust"
           ln -s "$PARENT/DixScript-Rust/dixscript" "$PARENT/dixscript"
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -123,7 +116,6 @@ jobs:
             --sample-size 20 \
             | tee results/bench_raw.txt || true
           echo "Bench lines: $(grep -c 'bench:' results/bench_raw.txt || echo 0)"
-
       # ── Example rendering + corpus stats ──────────────────────────────────────
       # Unchanged from pages.yml — same script, same results/examples.json
       # and results/corpus.csv output, just consumed by a different set of
@@ -144,34 +136,28 @@ jobs:
               [ -f "$src" ] || continue
               stem=$(basename "${src%.msx}")
               src_bytes=$(wc -c < "$src")
-
               if "$BIN" compile "$src" -o "/tmp/${stem}.msx" 2>/dev/null; then
                 bin_bytes=$(wc -c < "/tmp/${stem}.msx")
               else
                 echo "  WARN: compile failed for $stem" >&2
                 bin_bytes=0
               fi
-
               if "$BIN" render "$src" -o "results/svgs/${stem}.svg" 2>/dev/null; then
                 svg_bytes=$(wc -c < "results/svgs/${stem}.svg")
               else
                 echo "  WARN: render failed for $stem" >&2
                 svg_bytes=0
               fi
-
               "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
                 echo "  WARN: rasterize failed for $stem" >&2
-
               if ! "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
                     2>"results/gpu_errors/${stem}.txt"; then
                 :
               else
                 rm -f "results/gpu_errors/${stem}.txt"
               fi
-
               "$BIN" animate "$src" -o "results/gifs/${stem}.gif" 2>/dev/null || true
-
-              if grep -q 'type = "shader"' "$src" || grep -q 'animations::' "$src"; then
+              if grep -q 'type = "shader"' "$src" \vert{}\vert{} grep -q 'animations::' "$src"; then
                 if ! "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
                       --duration 4 --fps 12 \
                       2>"results/gpu_gif_errors/${stem}.txt"; then
@@ -180,21 +166,16 @@ jobs:
                   rm -f "results/gpu_gif_errors/${stem}.txt"
                 fi
               fi
-
               denom=$([ "$src_bytes" -gt 0 ] && echo "$src_bytes" || echo 1)
               bin_pct=$(awk "BEGIN{printf \"%.1f\",$bin_bytes/$denom*100}")
               svg_pct=$(awk "BEGIN{printf \"%.1f\",$svg_bytes/$denom*100}")
-
               "$BIN" roundtrip "$src" 2>/dev/null && rt="PASS" || rt="FAIL"
-
               printf '%s,%d,%d,%d,%s,%s,%s\n' \
                 "$stem" "$src_bytes" "$bin_bytes" "$svg_bytes" \
                 "$bin_pct" "$svg_pct" "$rt"
-
               rm -f "/tmp/${stem}.msx"
             done
           } | tee results/corpus.csv
-
       - name: Upload raw render outputs (debug artifacts)
         uses: actions/upload-artifact@v4
         with:
@@ -212,7 +193,6 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, os, glob, base64
-
           stats = {}
           try:
               with open('results/corpus.csv') as f:
@@ -229,7 +209,6 @@ jobs:
                           }
           except Exception as e:
               print(f"WARN: could not read corpus.csv: {e}")
-
           results = []
           for svg_path in sorted(glob.glob('results/svgs/*.svg')):
               stem     = os.path.splitext(os.path.basename(svg_path))[0]
@@ -240,25 +219,20 @@ jobs:
               gpu_err_path = f'results/gpu_errors/{stem}.txt'
               gpu_gif_path = f'results/gpu_gifs/{stem}.gpu.gif'
               gpu_gif_err_path = f'results/gpu_gif_errors/{stem}.txt'
-
               if not os.path.exists(src_path):
                   continue
-
               with open(svg_path, 'r', errors='replace') as f:
                   svg_content = f.read()
               with open(src_path, 'r', errors='replace') as f:
                   source = f.read()
-
               png_base64 = ''
               if os.path.exists(png_path):
                   with open(png_path, 'rb') as f:
                       png_base64 = base64.b64encode(f.read()).decode('ascii')
-
               anim_gif_base64 = ''
               if os.path.exists(gif_path):
                   with open(gif_path, 'rb') as f:
                       anim_gif_base64 = base64.b64encode(f.read()).decode('ascii')
-
               gpu_png_base64 = ''
               if os.path.exists(gpu_path):
                   with open(gpu_path, 'rb') as f:
@@ -267,7 +241,6 @@ jobs:
               if os.path.exists(gpu_err_path):
                   with open(gpu_err_path, 'r', errors='replace') as f:
                       gpu_error = f.read().strip()[:300]
-
               gpu_gif_base64 = ''
               if os.path.exists(gpu_gif_path):
                   with open(gpu_gif_path, 'rb') as f:
@@ -276,9 +249,7 @@ jobs:
               if os.path.exists(gpu_gif_err_path):
                   with open(gpu_gif_err_path, 'r', errors='replace') as f:
                       gpu_gif_error = f.read().strip()[:300]
-
               uses_shader = 'type = "shader"' in source
-
               row = stats.get(stem, {})
               entry = {
                   'name':            stem,
@@ -300,12 +271,10 @@ jobs:
               }
               results.append(entry)
               print(f"  {stem}: {entry['source_bytes']}B src -> {entry['binary_bytes']}B bin -> {entry['svg_bytes']}B svg ({'PASS' if entry['pass'] else 'FAIL'})")
-
           with open('results/examples.json', 'w') as f:
               json.dump(results, f)
           print(f"examples.json: {len(results)} example(s)")
           PYEOF
-
       # ── WASM build for the playground ──────────────────────────────────────────
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -331,7 +300,6 @@ jobs:
           json.dump(stats, open("results/site_stats.json", "w"))
           print(stats)
           PYEOF
-
       - name: Generate build report page
         run: |
           python3 scripts/site/generate_report.py \
@@ -344,7 +312,6 @@ jobs:
             --corpus   results/corpus.csv \
             --examples results/examples.json \
             --out      site/report/index.html
-
       - name: Build full site
         run: |
           python3 scripts/site/build_site.py \
@@ -352,23 +319,20 @@ jobs:
             --out site/ \
             --examples results/examples.json \
             --stats results/site_stats.json
-
       - name: Copy WASM build into playground
         run: |
           mkdir -p site/playground
           cp results/wasm-pkg/msx_wasm.js        site/playground/msx_wasm.js
           cp results/wasm-pkg/msx_wasm_bg.wasm    site/playground/msx_wasm_bg.wasm
-
       # ── Cloudflare Pages deployment ─────────────────────────────────────────────
-      # cloudflare/wrangler-action, not cloudflare/pages-action (see this
-      # file's own header comment for why) — this is the exact
-      # Pages-deploy shape from wrangler-action's own current README
-      # ("Deploy your Pages site (production & preview)"): pass the
-      # built directory and project name to `wrangler pages deploy`
-      # rather than to separate action inputs, since pages-action's
-      # `directory`/`projectName` inputs don't exist on this action at
-      # all. `--project-name=msx` must keep matching wrangler.toml's own
-      # `name = "msx"` and this environment block's project reference.
+      - name: Create Cloudflare Pages project if missing
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command:     pages project create msx --production-branch=main
+        continue-on-error: true
+
       - name: Deploy to Cloudflare Pages
         id: deploy
         uses: cloudflare/wrangler-action@v4
