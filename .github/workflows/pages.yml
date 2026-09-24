@@ -392,7 +392,7 @@ jobs:
       # ── Report generation ─────────────────────────────────────────────────────
       - name: Generate HTML report
         run: |
-          python3 .github/pages/generate_report.py \
+          python3 scripts/site/generate_report.py \
             --build    "${{ github.run_number }}" \
             --commit   "${GITHUB_SHA:0:8}" \
             --branch   "${{ github.ref_name }}" \
