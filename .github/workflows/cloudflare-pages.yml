@@ -5,7 +5,7 @@
 # was already working and tested, nothing about the test/build/render
 # steps below changes just because the deploy target does), but now
 # builds the full multi-page site (home, docs, samples, playground,
-# report — .github/pages/site/build_site.py) and a WASM build of
+# report — scripts/site/build_site.py) and a WASM build of
 # web/msx-wasm for the playground, publishing to Cloudflare Pages
 # instead of GitHub Pages.
 #
@@ -132,7 +132,7 @@ jobs:
       # step this mirrors 1:1; duplicating a long inline Python block into
       # a second workflow file wasn't worth it for a step that isn't
       # changing, but is flagged here as a follow-up worth doing (extract
-      # to .github/pages/build_corpus.py, called from both workflows)
+      # to scripts/site/build_corpus.py, called from both workflows)
       # rather than silently letting the two copies drift apart later.
       - name: Render examples and collect corpus stats
         run: |
@@ -334,7 +334,7 @@ jobs:
 
       - name: Generate build report page
         run: |
-          python3 .github/pages/generate_report.py \
+          python3 scripts/site/generate_report.py \
             --build    "${{ github.run_number }}" \
             --commit   "${GITHUB_SHA:0:8}" \
             --branch   "${{ github.ref_name }}" \
@@ -347,7 +347,7 @@ jobs:
 
       - name: Build full site
         run: |
-          python3 .github/pages/site/build_site.py \
+          python3 scripts/site/build_site.py \
             --repo-root . \
             --out site/ \
             --examples results/examples.json \
