@@ -150,18 +150,22 @@ jobs:
               fi
               "$BIN" rasterize "$src" -o "results/pngs/${stem}.png" 2>/dev/null || \
                 echo "  WARN: rasterize failed for $stem" >&2
-              if ! "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
-                    2>"results/gpu_errors/${stem}.txt"; then
-                :
+              "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
+                    2>"results/gpu_errors/${stem}.txt" || true
+              if [ -s "results/gpu_errors/${stem}.txt" ]; then
+                echo "  GPU stderr for $stem:" >&2
+                sed 's/^/    /' "results/gpu_errors/${stem}.txt" >&2
               else
                 rm -f "results/gpu_errors/${stem}.txt"
               fi
               "$BIN" animate "$src" -o "results/gifs/${stem}.gif" 2>/dev/null || true
-              if grep -q 'type = "shader"' "$src" \vert{}\vert{} grep -q 'animations::' "$src"; then
-                if ! "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
+              if grep -q 'type = "shader"' "$src" || grep -q 'animations::' "$src"; then
+                "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
                       --duration 4 --fps 12 \
-                      2>"results/gpu_gif_errors/${stem}.txt"; then
-                  :
+                      2>"results/gpu_gif_errors/${stem}.txt" || true
+                if [ -s "results/gpu_gif_errors/${stem}.txt" ]; then
+                  echo "  GPU GIF stderr for $stem:" >&2
+                  sed 's/^/    /' "results/gpu_gif_errors/${stem}.txt" >&2
                 else
                   rm -f "results/gpu_gif_errors/${stem}.txt"
                 fi

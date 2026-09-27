@@ -182,9 +182,16 @@ jobs:
               # on some runner, not a code bug. stderr is captured per
               # example so the report can surface the actual reason in the
               # shader badge tooltip rather than a generic "unavailable".
-              if ! "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
-                    2>"results/gpu_errors/${stem}.txt"; then
-                : # non-fatal — examples.json reads gpu_errors/*.txt if present
+              "$BIN" rasterize-gpu "$src" -o "results/gpu_pngs/${stem}.gpu.png" \
+                    2>"results/gpu_errors/${stem}.txt" || true
+              # non-fatal either way — examples.json reads gpu_errors/*.txt if
+              # present. Kept whenever non-empty regardless of exit code: a
+              # graceful internal fallback (e.g. falling back to fallback_color)
+              # still exits 0, so gating on exit status alone silently discarded
+              # the one diagnostic that explains why a shader render fell back.
+              if [ -s "results/gpu_errors/${stem}.txt" ]; then
+                echo "  GPU stderr for $stem:" >&2
+                sed 's/^/    /' "results/gpu_errors/${stem}.txt" >&2
               else
                 rm -f "results/gpu_errors/${stem}.txt"
               fi
@@ -216,10 +223,14 @@ jobs:
               # (lavapipe) adapter this runner uses, which is measurably
               # slower per-frame than a real GPU.
               if grep -q 'type = "shader"' "$src" || grep -q 'animations::' "$src"; then
-                if ! "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
+                "$BIN" animate-gpu "$src" -o "results/gpu_gifs/${stem}.gpu.gif" \
                       --duration 4 --fps 12 \
-                      2>"results/gpu_gif_errors/${stem}.txt"; then
-                  : # non-fatal — examples.json reads gpu_gif_errors/*.txt if present
+                      2>"results/gpu_gif_errors/${stem}.txt" || true
+                # non-fatal either way — see rasterize-gpu above for why this
+                # is gated on non-empty stderr rather than exit status
+                if [ -s "results/gpu_gif_errors/${stem}.txt" ]; then
+                  echo "  GPU GIF stderr for $stem:" >&2
+                  sed 's/^/    /' "results/gpu_gif_errors/${stem}.txt" >&2
                 else
                   rm -f "results/gpu_gif_errors/${stem}.txt"
                 fi
