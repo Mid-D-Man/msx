@@ -146,7 +146,7 @@ document.querySelectorAll('.pg-examples button').forEach(btn => {{
 
 editor.value = MSX_EXAMPLES[{DEFAULT_EXAMPLE!r}];
 </script>
-<script src="/playground/wasm-loader.js"></script>'''
+<script type="module" src="/playground/wasm-loader.js"></script>'''
 
     return page(title="Playground", active="playground", body=body, wide=True)
 

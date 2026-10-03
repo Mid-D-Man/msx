@@ -246,6 +246,11 @@ def svg_gallery_html(examples: list) -> str:
         gpu_error       = ex.get("gpu_error", "")
         gpu_gif_base64  = ex.get("gpu_gif_base64", "")
         gpu_gif_error   = ex.get("gpu_gif_error", "")
+        # msx-render-gpu's graceful fallback (flat fallback_color) still
+        # exits 0 and still writes a PNG, so "a GPU image exists" does not
+        # mean "the shader ran". The stderr line it prints is the only
+        # signal; the corpus step keeps it whenever it is non-empty.
+        gpu_fell_back   = any("falling back" in (e or "") for e in (gpu_error, gpu_gif_error))
         uses_shader     = ex.get("uses_shader", False)
         source_bytes    = ex.get("source_bytes", 0)
         binary_bytes    = ex.get("binary_bytes", 0)
@@ -280,6 +285,9 @@ def svg_gallery_html(examples: list) -> str:
         #    render statically.
         # 4. The plain static CPU PNG, then inline SVG rendered by the
         #    browser, if nothing else is available.
+        visual_label = "native CPU raster"
+        if uses_shader and (gpu_gif_base64 or gpu_png_base64):
+            visual_label = "GPU raster (msx-render-gpu)"
         if uses_shader and gpu_gif_base64:
             img_id = f"render-{name}"
             # Compare against whatever the CPU-only equivalent would have
@@ -445,6 +453,28 @@ def svg_gallery_html(examples: list) -> str:
             anim_badge = ''
             shader_badge = ''
 
+        if uses_shader and gpu_fell_back:
+            shader_badge = (
+                '<span class="stat-chip accent" '
+                'title="msx-render-gpu reported that it fell back to the def\'s flat '
+                'fallback_color. The image shown is NOT real WGSL output. See the GPU stderr '
+                'under the render.">'
+                '⚡ shader (GPU fell back)</span>'
+            )
+        if uses_shader and (gpu_error or gpu_gif_error):
+            _notes = []
+            if gpu_error:
+                _notes.append("[rasterize-gpu]\n" + gpu_error)
+            if gpu_gif_error:
+                _notes.append("[animate-gpu]\n" + gpu_gif_error)
+            _note_text = "\n\n".join(_notes).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            rendered_visual += (
+                '<details class="gpu-note" style="margin-top:10px">'
+                '<summary style="cursor:pointer;font-size:12px">GPU stderr</summary>'
+                '<pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;margin:6px 0 0">'
+                f'{_note_text}</pre></details>'
+            )
+
         cards.append(f"""
 <div class="example-card">
   <div class="example-header">
@@ -477,7 +507,7 @@ def svg_gallery_html(examples: list) -> str:
       <div class="divider-arrow">→</div>
     </div>
     <div class="example-pane pane-svg-visual">
-      <div class="pane-label"><span class="pane-dot pane-dot--svg-vis"></span>Rendered Visual — native CPU raster</div>
+      <div class="pane-label"><span class="pane-dot pane-dot--svg-vis"></span>Rendered Visual — {visual_label}</div>
       <div class="svg-preview">{rendered_visual}</div>
     </div>
   </div>
