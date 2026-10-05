@@ -1,7 +1,7 @@
 // core/msx-binary/src/encoder.rs
 //! Low-level binary write helpers. All write_ functions append to a &mut Vec<u8>.
 
-use msx_ast::{Color, FillRule, LineCap, LineJoin, Paint, Style, Transform};
+use msx_ast::{Color, Paint, Style, Transform};
 
 // ── Primitives ───────────────────────────────────────────────────────────────
 
@@ -149,6 +149,11 @@ pub fn write_id_flags(
 
 // ── Style ────────────────────────────────────────────────────────────────────
 
+/// Marks an unset field inside a grouped style block. Real enum bytes are 0 to 2.
+pub const UNSET_BYTE: u8 = 0xFF;
+/// Marks an unset font size. A real size is stored as hundredths of a unit.
+pub const UNSET_U16: u16 = 0xFFFF;
+
 pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
     let flags = style.present_flags();
     write_u8(out, flags);
@@ -166,13 +171,17 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
         write_f32(out, style.stroke_width.unwrap_or(1.0));
     }
     if flags & (1 << 4) != 0 {
-        write_u8(out, style.fill_rule.unwrap_or(FillRule::NonZero).to_byte());
-        write_u8(out, style.stroke_linecap.unwrap_or(LineCap::Butt).to_byte());
-        write_u8(out, style.stroke_linejoin.unwrap_or(LineJoin::Miter).to_byte());
-        write_f32(out, style.stroke_miterlimit.unwrap_or(4.0));
+        // One flag bit covers four fields, so an unset field needs a marker of
+        // its own. Writing the default instead made the decoder return an
+        // explicit value for a field the source never set. Old decoders map the
+        // marker bytes onto the defaults, which is what they always produced.
+        write_u8(out, style.fill_rule.map_or(UNSET_BYTE, |v| v.to_byte()));
+        write_u8(out, style.stroke_linecap.map_or(UNSET_BYTE, |v| v.to_byte()));
+        write_u8(out, style.stroke_linejoin.map_or(UNSET_BYTE, |v| v.to_byte()));
+        write_f32(out, style.stroke_miterlimit.unwrap_or(f64::NAN));
     }
     if flags & (1 << 5) != 0 {
-        let fs = (style.font_size.unwrap_or(12.0) * 100.0).round() as u16;
+        let fs = style.font_size.map_or(UNSET_U16, |v| (v * 100.0).round() as u16);
         write_u16(out, fs);
 
         let ff_idx = intern_string(pool, style.font_family.as_deref().unwrap_or(""));
@@ -195,7 +204,7 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
         for &d in da {
             write_f32(out, d);
         }
-        write_f32(out, style.stroke_dashoffset.unwrap_or(0.0));
+        write_f32(out, style.stroke_dashoffset.unwrap_or(f64::NAN));
     }
     if flags & (1 << 7) != 0 {
         let vd = (style.visibility_hidden as u8) | ((style.display_none as u8) << 1);

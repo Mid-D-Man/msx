@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 build_site.py
-Orchestrates the whole site build: home, docs (from real markdown),
+Orchestrates the whole site build: home, docs (guide pages plus the spec, with real examples embedded),
 samples (from examples.json — the CI pipeline's own existing output,
 unchanged), and the playground shell (the compiled WASM module itself is
 built by a separate step in .github/workflows/cloudflare-pages.yml and
@@ -51,8 +51,16 @@ def main():
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    examples = []
+    if args.examples:
+        examples_path = pathlib.Path(args.examples)
+        if examples_path.exists():
+            examples = json.loads(examples_path.read_text())
+        else:
+            print(f"  note: --examples {examples_path} not found, samples page will be empty", file=sys.stderr)
+
     print("Building docs pages...")
-    for rel_path, html in build_all_docs(repo_root):
+    for rel_path, html in build_all_docs(repo_root, examples):
         _write(out_dir, rel_path, html)
 
     print("Building home page...")
@@ -66,13 +74,6 @@ def main():
     _write(out_dir, "index.html", build_home_page(stats))
 
     print("Building samples page...")
-    examples = []
-    if args.examples:
-        examples_path = pathlib.Path(args.examples)
-        if examples_path.exists():
-            examples = json.loads(examples_path.read_text())
-        else:
-            print(f"  note: --examples {examples_path} not found, samples page will be empty", file=sys.stderr)
     _write(out_dir, "samples/index.html", build_samples_page(examples))
 
     print("Building playground page...")

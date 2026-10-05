@@ -57,6 +57,9 @@ function showFailure(stage, err) {
     await glue.default();
     glue.init_panic_hook();
     window.__msxRenderAndInspect = glue.render_and_inspect;
+    // Playback entry points. A wasm build without them still renders stills.
+    if (typeof glue.render_frame === 'function') window.__msxRenderFrame = glue.render_frame;
+    if (typeof glue.local_time === 'function')   window.__msxLocalTime = glue.local_time;
     if (typeof window.__msxEngineReady === 'function') {
       window.__msxEngineReady();
     }

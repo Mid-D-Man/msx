@@ -2,6 +2,7 @@
 //! Low-level binary read helpers. All read_ functions advance a &mut usize cursor.
 
 use std::io;
+use crate::encoder::{UNSET_BYTE, UNSET_U16};
 use msx_ast::{Color, FillRule, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, Transform};
 use msx_ast::transform::{
     Matrix2D, TRANSFORM_MATRIX, TRANSFORM_MULTIPLE, TRANSFORM_NONE, TRANSFORM_ROTATE,
@@ -177,14 +178,14 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
     if flags & (1 << 2) != 0 { s.opacity      = Some(read_f32(data, cursor)?); }
     if flags & (1 << 3) != 0 { s.stroke_width = Some(read_f32(data, cursor)?); }
     if flags & (1 << 4) != 0 {
-        s.fill_rule         = Some(FillRule::from_byte(read_u8(data, cursor)?));
-        s.stroke_linecap    = Some(LineCap::from_byte(read_u8(data, cursor)?));
-        s.stroke_linejoin   = Some(LineJoin::from_byte(read_u8(data, cursor)?));
-        s.stroke_miterlimit = Some(read_f32(data, cursor)?);
+        s.fill_rule         = Some(read_u8(data, cursor)?).filter(|&b| b != UNSET_BYTE).map(FillRule::from_byte);
+        s.stroke_linecap    = Some(read_u8(data, cursor)?).filter(|&b| b != UNSET_BYTE).map(LineCap::from_byte);
+        s.stroke_linejoin   = Some(read_u8(data, cursor)?).filter(|&b| b != UNSET_BYTE).map(LineJoin::from_byte);
+        s.stroke_miterlimit = Some(read_f32(data, cursor)?).filter(|v| !v.is_nan());
     }
     if flags & (1 << 5) != 0 {
         let fs_x100   = read_u16(data, cursor)?;
-        s.font_size   = Some(fs_x100 as f64 / 100.0);
+        s.font_size   = if fs_x100 == UNSET_U16 { None } else { Some(fs_x100 as f64 / 100.0) };
         let ff_idx    = read_u16(data, cursor)?;
         let ff        = lookup_string(pool, ff_idx)?.to_string();
         s.font_family = if ff.is_empty() { None } else { Some(ff) };
@@ -198,7 +199,7 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         let mut da = Vec::with_capacity(count);
         for _ in 0..count { da.push(read_f32(data, cursor)?); }
         s.stroke_dasharray  = if da.is_empty() { None } else { Some(da) };
-        s.stroke_dashoffset = Some(read_f32(data, cursor)?);
+        s.stroke_dashoffset = Some(read_f32(data, cursor)?).filter(|v| !v.is_nan());
     }
     if flags & (1 << 7) != 0 {
         let vd              = read_u8(data, cursor)?;
@@ -316,5 +317,88 @@ mod tests {
         let back = read_style(&buf, &mut cursor, &pool).unwrap();
         assert_eq!(back.text_anchor, None);
         assert_eq!(back.font_weight, Some(FontWeight::Bold));
+    }
+
+    fn style_through_codec(style: &Style) -> Style {
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+        assert_eq!(cursor, buf.len());
+        back
+    }
+
+    #[test]
+    fn fill_rule_alone_leaves_the_other_stroke_detail_fields_unset() {
+        let mut style = Style::empty();
+        style.fill_rule = Some(FillRule::EvenOdd);
+        let back = style_through_codec(&style);
+        assert_eq!(back.fill_rule, Some(FillRule::EvenOdd));
+        assert_eq!(back.stroke_linecap, None);
+        assert_eq!(back.stroke_linejoin, None);
+        assert_eq!(back.stroke_miterlimit, None);
+    }
+
+    #[test]
+    fn explicit_defaults_in_the_stroke_detail_group_stay_explicit() {
+        let mut style = Style::empty();
+        style.fill_rule         = Some(FillRule::NonZero);
+        style.stroke_linecap    = Some(LineCap::Butt);
+        style.stroke_linejoin   = Some(LineJoin::Miter);
+        style.stroke_miterlimit = Some(4.0);
+        let back = style_through_codec(&style);
+        assert_eq!(back.fill_rule, Some(FillRule::NonZero));
+        assert_eq!(back.stroke_linecap, Some(LineCap::Butt));
+        assert_eq!(back.stroke_linejoin, Some(LineJoin::Miter));
+        assert_eq!(back.stroke_miterlimit, Some(4.0));
+    }
+
+    #[test]
+    fn miterlimit_alone_is_stored() {
+        let mut style = Style::empty();
+        style.stroke_miterlimit = Some(2.5);
+        let back = style_through_codec(&style);
+        assert_eq!(back.stroke_miterlimit, Some(2.5));
+        assert_eq!(back.fill_rule, None);
+        assert_eq!(back.stroke_linecap, None);
+    }
+
+    #[test]
+    fn font_size_unset_roundtrips_as_none() {
+        let mut style = Style::empty();
+        style.text_anchor = Some(TextAnchor::End);
+        let back = style_through_codec(&style);
+        assert_eq!(back.font_size, None);
+        assert_eq!(back.text_anchor, Some(TextAnchor::End));
+    }
+
+    #[test]
+    fn dash_array_and_dash_offset_are_stored_independently() {
+        let mut only_array = Style::empty();
+        only_array.stroke_dasharray = Some(vec![4.0, 2.0]);
+        let back = style_through_codec(&only_array);
+        assert_eq!(back.stroke_dasharray, Some(vec![4.0, 2.0]));
+        assert_eq!(back.stroke_dashoffset, None);
+
+        let mut only_offset = Style::empty();
+        only_offset.stroke_dashoffset = Some(3.0);
+        let back = style_through_codec(&only_offset);
+        assert_eq!(back.stroke_dasharray, None);
+        assert_eq!(back.stroke_dashoffset, Some(3.0));
+    }
+
+    /// Bytes an older encoder wrote for an unset grouped field are plain
+    /// defaults, which must still decode to explicit values as before.
+    #[test]
+    fn style_blocks_written_with_default_bytes_still_decode() {
+        let buf = [1u8 << 4, 0, 0, 0, 0x00, 0x00, 0x80, 0x40]; // fill_rule 0, cap 0, join 0, miterlimit 4.0f32
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &[]).unwrap();
+        assert_eq!(cursor, buf.len());
+        assert_eq!(back.fill_rule, Some(FillRule::NonZero));
+        assert_eq!(back.stroke_linecap, Some(LineCap::Butt));
+        assert_eq!(back.stroke_linejoin, Some(LineJoin::Miter));
+        assert_eq!(back.stroke_miterlimit, Some(4.0));
     }
                                     }

@@ -180,7 +180,7 @@ d = $"M {cx - half} {cy} L {cx + half} {cy} Z"
 
 ### `use`
 
-References a def by id. Used to stamp out gradient-filled or reused shapes.
+Draws a second copy of another element, found by its `id`. The referenced element still draws at its own position. A reference to an id that does not exist draws nothing.
 
 ```dixscript
 {
@@ -198,17 +198,17 @@ References a def by id. Used to stamp out gradient-filled or reused shapes.
 {
   type       = "image"
   source_ref = <string>?     // path, resolved relative to the source file — mutually exclusive with `data`
-  data       = <string>?     // base64-encoded PNG/JPEG/GIF bytes, embedded inline
+  data       = <string>?     // base64-encoded PNG or JPEG bytes, embedded inline
   x          = <float>       // anchor point's canvas position — NOT necessarily the
   y          = <float>       // rendered top-left corner; see `anchor` below
   width      = <float>
   height     = <float>
-  anchor     = "top_left" | "center" | "top_right" | "bottom_left" | "bottom_right"?   // default "top_left"
+  anchor     = "top_left" | "top" | "top_right" | "left" | "center" | "right" | "bottom_left" | "bottom" | "bottom_right"?   // default "top_left"
   id = <string>?  transform = <transform>?  style = <style>
 }
 ```
 
-Embedded `data` is format-sniffed at parse time (PNG/JPEG/GIF magic bytes) — base64 that decodes to anything else is a parse error, unlike `audio`'s def below.
+Embedded `data` is format-sniffed at parse time (PNG and JPEG magic bytes). Base64 that decodes to anything else is a parse error, unlike `audio`'s def below.
 
 ### `sdf`
 
@@ -229,17 +229,17 @@ A signed-distance-field shape tree — `tree` is a recursive node graph (primiti
 
 ```dixscript
 { type = "circle",   cx = <float>, cy = <float>, r = <float> }
-{ type = "box",       cx = <float>, cy = <float>, hx = <float>, hy = <float>, corner_radius = <float>? }
+{ type = "box",       x = <float>, y = <float>, width = <float>, height = <float>, corner_radius = <float>? }   // x, y is the top left corner
 { type = "line",      x1 = <float>, y1 = <float>, x2 = <float>, y2 = <float>, thickness = <float> }
 { type = "ring",      cx = <float>, cy = <float>, r = <float>, thickness = <float> }
-{ type = "arc",       cx = <float>, cy = <float>, r = <float>, thickness = <float>, start_angle = <float>, sweep_angle = <float> }
-{ type = "union",            a = <sdf_node>, b = <sdf_node> }
-{ type = "smooth_union",     a = <sdf_node>, b = <sdf_node>, k = <float> }
+{ type = "arc",       cx = <float>, cy = <float>, r = <float>, thickness = <float>, angle_start = <float>, angle_end = <float> }   // radians; set both
+{ type = "union",            children = [ <sdf_node> ... ] }
+{ type = "smooth_union",     children = [ <sdf_node> ... ], k = <float> }
 { type = "subtract",         a = <sdf_node>, b = <sdf_node> }
 { type = "smooth_subtract",  a = <sdf_node>, b = <sdf_node>, k = <float> }
 { type = "intersect",        a = <sdf_node>, b = <sdf_node> }
 { type = "smooth_intersect", a = <sdf_node>, b = <sdf_node>, k = <float> }
-{ type = "offset",    node = <sdf_node>, amount = <float> }
+{ type = "offset",    child = <sdf_node>, amount = <float> }
 ```
 
 ### `splat`
@@ -303,7 +303,7 @@ Defined in the `defs::` group array. Referenced via `"url(#id)"` in paint values
 {
   type = "linear_gradient"
   id   = <string>
-  x1   = <float>    // 0.0..1.0 in gradient space (or px if gradientUnits = "userSpaceOnUse")
+  x1   = <float>    // 0.0..1.0, a fraction of the bounding box of the element that uses the gradient
   y1   = <float>
   x2   = <float>
   y2   = <float>
@@ -331,7 +331,7 @@ Defined in the `defs::` group array. Referenced via `"url(#id)"` in paint values
 
 ### `conic_gradient`
 
-Sweeps stops around a center point, starting at `angle` (radians).
+Sweeps stops around a center point, starting at `angle` (degrees). The SVG renderer has no conic gradient and draws nothing for a fill that references one.
 
 ```dixscript
 {
@@ -353,10 +353,13 @@ A `Def::Shader` — real WGSL, executed only by `msx-render-gpu` (the `gpu` Carg
   type          = "shader"
   id            = <string>
   source_ref    = <string>          // path to a .wgsl file, resolved relative to the source file
-  entry_point   = <string>          // fragment shader entry point name
+  entry_point   = <string>?         // fragment shader entry point name, default "fs_main"
   fallback_color = <color>          // what CPU/SVG paint instead
   uniforms = [
-    { name = <string>, value = <float> | [<float>,<float>] | [<float>,<float>,<float>] | [<float>,<float>,<float>,<float>] }
+    { name = <string>, type = "float", value = <float> }
+    { name = <string>, type = "vec2",  value = [<float>,<float>] }
+    { name = <string>, type = "vec3",  value = [<float>,<float>,<float>] }
+    { name = <string>, type = "vec4",  value = [<float>,<float>,<float>,<float>] }
     ...
   ]
 }
@@ -381,7 +384,7 @@ Both `source_ref` and `data` go through the same `MediaSource` machinery `Elemen
 
 ## Style Object
 
-All keys are optional. Unset keys inherit from the parent group or fall back to defaults.
+All keys are optional. Unset keys fall back to the defaults below. Style set on a group reaches its children in SVG output only.
 
 ```dixscript
 {
@@ -412,12 +415,13 @@ All keys are optional. Unset keys inherit from the parent group or fall back to 
 | Syntax | Meaning |
 |---|---|
 | `"none"` | Transparent / no paint |
-| `"#rrggbb"` | Opaque hex color |
+| `"#rgb"` or `"#rrggbb"` | Opaque hex color |
 | `"#rrggbbaa"` | Hex color with alpha |
 | `"rgb(r, g, b)"` | Functional RGB |
 | `"rgba(r, g, b, a)"` | Functional RGBA |
-| `"url(#id)"` | Reference to a gradient or pattern def |
+| `"url(#id)"` | Reference to a gradient or shader def |
 | `"currentColor"` | Inherited color value |
+| `black`, `white`, `red`, `green`, `blue` | Five built-in color names |
 
 ---
 
@@ -694,28 +698,32 @@ Only present when header `flags.bit3` (has_animations) is set — gated on wheth
   bit 1 = stroke present
   bit 2 = opacity present
   bit 3 = stroke_width present
-  bit 4 = fill_rule + linecap + linejoin present
+  bit 4 = fill_rule, linecap, linejoin or miterlimit present
   bit 5 = font fields present
-  bit 6 = dash present
+  bit 6 = dash array or dash offset present
   bit 7 = visibility / display present
 
 [paint]                     if bit 0   (fill)
 [paint]                     if bit 1   (stroke)
 [f32]                       if bit 2   (opacity)
 [f32]                       if bit 3   (stroke_width)
-[u8 fill_rule]              if bit 4   (0=nonzero  1=evenodd)
-[u8 linecap]                           (0=butt 1=round 2=square)
-[u8 linejoin]                          (0=miter 1=round 2=bevel)
-[f32 miterlimit]
-[u16 font_size_x100]        if bit 5   (stored as integer × 100)
-[u16 font_family_str_idx]
-[u8  font_weight]                      (0=normal 1=bold 2..=numeric/100)
-[u8  text_anchor]                      (0=start 1=middle 2=end)
-[u16 dash_count]            if bit 6
+[u8 fill_rule]              if bit 4   (0=nonzero  1=evenodd  0xFF=unset)
+[u8 linecap]                           (0=butt 1=round 2=square  0xFF=unset)
+[u8 linejoin]                          (0=miter 1=round 2=bevel  0xFF=unset)
+[f32 miterlimit]                       (NaN=unset)
+[u16 font_size_x100]        if bit 5   (stored as integer × 100, 0xFFFF=unset)
+[u16 font_family_str_idx]              (the empty string=unset)
+[u8  font_weight]                      (0=unset 1=normal 2=bold, numeric weight=weight/100 + 3)
+[u8  text_anchor]                      (0=unset 1=start 2=middle 3=end)
+[u16 dash_count]            if bit 6   (0=no dash array)
 [f32 dash]*
-[f32 dashoffset]
+[f32 dashoffset]                       (NaN=unset)
 [u8  vis_display_flags]     if bit 7   bit0=hidden  bit1=display_none
 ```
+
+One flag bit covers each group of fields, so a field that the source left unset carries its own marker inside the group. A decoder returns `None` for a marker and an explicit value otherwise. Files written before the markers existed hold the default value in those slots and decode to explicit values, which renders identically.
+
+The style block has no slot for `fill_opacity`, `stroke_opacity` or `dominant_baseline`. Those three keys are not stored, so they are lost when a scene is compiled.
 
 Note: `Sdf` and `Layer` don't have a style block at all — `Sdf` has direct `fill`/`stroke` paint fields instead (see its geometry-fields row above), and `Layer` has no fill/stroke concept at all (it's a compositing group, not a drawable shape).
 
@@ -923,15 +931,16 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 |---|---|
 | rect, circle, ellipse, line, polygon, polyline | ✅ all three renderers (SVG/CPU/GPU) |
 | path (all SVG commands) | ✅ all three renderers |
-| text | ✅ all three renderers |
+| text | ✅ SVG only. The CPU and GPU renderers skip it |
 | group + transform | ✅ all three renderers |
-| linear, radial, conic gradient | ✅ all three renderers |
-| use / def referencing | ✅ all three renderers |
-| SDF shape trees (circle/box/line/ring/arc + boolean combinators) | ✅ all three renderers |
-| Gaussian splats | ✅ all three renderers |
-| Image (file-ref or embedded, PNG/JPEG/GIF) | ✅ all three renderers |
+| linear, radial gradient | ✅ SVG interpolates. CPU and GPU paint one flat color, the average of the stops |
+| conic gradient | ⚠️ stored and round-tripped. SVG draws nothing, CPU and GPU paint a flat color |
+| use (reference an element by id) | ✅ all three renderers |
+| SDF shape trees (circle/box/line/ring/arc + boolean combinators) | ✅ CPU, GPU · ❌ SVG (written as a comment) |
+| Gaussian splats | ✅ CPU, GPU · ⚠️ SVG approximates with a radial gradient |
+| Image (file-ref or embedded, PNG/JPEG) | ✅ all three renderers |
 | Audio (file-ref or embedded) as a def | ✅ round-trips losslessly; nothing anywhere plays it — `extract-media` is the only way to pull it back out and verify with a real tool |
-| Layer (isolated compositing group) | ✅ all three renderers agree on nesting/paint-order semantics |
+| Layer (isolated compositing group) | ✅ all three renderers agree on nesting/paint-order semantics. `clip` is not enforced in SVG |
 | Layer blend modes (Multiply/Screen/etc.) | ✅ CPU, SVG, GPU |
 | Layer effects — Blur | ✅ CPU, SVG, GPU |
 | Layer effects — DropShadow/InnerShadow/OuterGlow/InnerGlow | ✅ CPU, SVG · ❌ GPU (flagged, not silent — see `msx-render-gpu`'s `effects.rs`) |

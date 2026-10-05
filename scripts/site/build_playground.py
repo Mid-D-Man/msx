@@ -11,7 +11,11 @@ one.
 `window.__msxRenderAndInspect` is the one JS/WASM contract this page
 depends on: a function taking a DixScript source string and returning a
 JSON string (see web/msx-wasm/src/lib.rs's `render_and_inspect` for the
-exact shape) or throwing/rejecting with an error string. `wasm-loader.js`
+exact shape) or throwing/rejecting with an error string. Animated scenes
+also use `window.__msxRenderFrame(t)` (SVG for elapsed time `t` seconds)
+and `window.__msxLocalTime(t)` (the timeline position that frame shows),
+both optional: without them the page renders a single still frame.
+`wasm-loader.js`
 (a separate, tiny file — see its own header comment) is responsible for
 loading the actual `.wasm` binary and installing that global; this file
 never touches wasm-bindgen's generated JS glue directly, so the loader
@@ -66,7 +70,7 @@ def build_playground_page() -> str:
     ) + "\n}"
 
     body = f'''<h1>Playground</h1>
-<p class="lede">DixScript in, SVG out — rendered live in your browser by a WebAssembly build of the real <code>msx</code> crate. Nothing is sent to a server.</p>
+<p class="lede">DixScript in, SVG out, rendered live in your browser by a WebAssembly build of the real <code>msx</code> crate. Scenes with keyframe tracks get a play bar. Nothing is sent to a server.</p>
 
 <div class="pg-shell">
   <div class="pg-pane">
@@ -82,6 +86,11 @@ def build_playground_page() -> str:
       <span id="pg-inspect" class="pg-status"></span>
     </div>
     <div id="pg-preview" class="pg-preview-body"><span style="color:var(--muted)">Loading render engine…</span></div>
+    <div id="pg-transport" class="pg-transport" hidden>
+      <button id="pg-play" type="button">Pause</button>
+      <input id="pg-scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Animation position">
+      <span id="pg-time" class="pg-time">0.00 / 0.00 s</span>
+    </div>
   </div>
 </div>
 <div class="pg-examples">
@@ -96,12 +105,108 @@ def build_playground_page() -> str:
 const MSX_EXAMPLES = {examples_js};
 const editor  = document.getElementById('pg-editor');
 const preview = document.getElementById('pg-preview');
-const status  = document.getElementById('pg-status');
+// `status` is a window property, so the element is named statusEl.
+const statusEl = document.getElementById('pg-status');
 const inspect = document.getElementById('pg-inspect');
+const transport = document.getElementById('pg-transport');
+const playBtn   = document.getElementById('pg-play');
+const scrub     = document.getElementById('pg-scrub');
+const timeLabel = document.getElementById('pg-time');
+const reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function setStatus(el, text, kind) {{
   el.textContent = text;
   el.className = 'pg-status' + (kind ? ' ' + kind : '');
+}}
+
+// Playback. `pos` is raw elapsed seconds; the engine applies the scene's loop
+// mode itself (see render_frame in web/msx-wasm), so a loop or ping_pong scene
+// keeps counting up here and the frames wrap or mirror on their own.
+const FRAME_MS = 33;
+const player = {{ animated: false, duration: 0, loopMode: 'once', playing: false, pos: 0, startWall: 0, startPos: 0, raf: 0, lastDraw: 0 }};
+
+function atEnd() {{
+  return player.loopMode === 'once' && player.duration > 0 && player.pos >= player.duration;
+}}
+
+function refreshButton() {{
+  playBtn.textContent = player.playing ? 'Pause' : (atEnd() ? 'Replay' : 'Play');
+}}
+
+function drawFrame() {{
+  preview.innerHTML = window.__msxRenderFrame(player.pos);
+  const local = (typeof window.__msxLocalTime === 'function') ? window.__msxLocalTime(player.pos) : player.pos;
+  scrub.value = player.duration > 0 ? Math.round(local / player.duration * 1000) : 0;
+  timeLabel.textContent = local.toFixed(2) + ' / ' + player.duration.toFixed(2) + ' s';
+}}
+
+function showFrameError(err) {{
+  setPlaying(false);
+  const msg = (err && err.message) ? err.message : String(err);
+  preview.innerHTML = `<div class="pg-error-pane">${{msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}}</div>`;
+  setStatus(statusEl, 'error', 'err');
+}}
+
+function setPlaying(on) {{
+  player.playing = on;
+  if (player.raf) {{ cancelAnimationFrame(player.raf); player.raf = 0; }}
+  if (on) {{
+    player.startWall = performance.now();
+    player.startPos = player.pos;
+    player.raf = requestAnimationFrame(tick);
+  }}
+  refreshButton();
+}}
+
+function tick(now) {{
+  if (!player.playing) return;
+  player.pos = player.startPos + (now - player.startWall) / 1000;
+  const finished = player.loopMode === 'once' && player.pos >= player.duration;
+  if (finished) player.pos = player.duration;
+  if (finished || now - player.lastDraw >= FRAME_MS) {{
+    player.lastDraw = now;
+    try {{ drawFrame(); }} catch (err) {{ showFrameError(err); return; }}
+  }}
+  if (finished) {{ setPlaying(false); return; }}
+  player.raf = requestAnimationFrame(tick);
+}}
+
+playBtn.addEventListener('click', () => {{
+  if (!player.animated) return;
+  if (player.playing) {{ setPlaying(false); return; }}
+  if (atEnd()) player.pos = 0;
+  setPlaying(true);
+}});
+
+scrub.addEventListener('input', () => {{
+  if (!player.animated) return;
+  setPlaying(false);
+  player.pos = (Number(scrub.value) / 1000) * player.duration;
+  try {{ drawFrame(); }} catch (err) {{ showFrameError(err); }}
+  refreshButton();
+}});
+
+// Called after every successful render. A scene that just became animated
+// starts playing (unless the visitor asked for reduced motion). Editing a
+// scene that was already playing keeps it playing from the same position.
+function applyInfo(info) {{
+  const wasAnimated = player.animated;
+  const canPlay = !!info.animated && typeof window.__msxRenderFrame === 'function';
+  player.animated = canPlay;
+  player.duration = Number(info.duration) || 0;
+  player.loopMode = info.loop_mode || 'once';
+  transport.hidden = !canPlay;
+  if (!canPlay) {{
+    setPlaying(false);
+    preview.innerHTML = info.svg;
+    return;
+  }}
+  if (!wasAnimated) player.pos = 0;
+  if (player.loopMode === 'once' && player.pos > player.duration) player.pos = player.duration;
+  try {{ drawFrame(); }} catch (err) {{ showFrameError(err); return; }}
+  if (!wasAnimated) {{ setPlaying(!reducedMotion); }}
+  else if (player.playing) {{ setPlaying(true); }}
+  else {{ refreshButton(); }}
 }}
 
 let renderTimer = null;
@@ -118,20 +223,23 @@ function doRender() {{
   try {{
     const json = window.__msxRenderAndInspect(source);
     const info = JSON.parse(json);
-    preview.innerHTML = info.svg;
-    setStatus(status, 'ready', 'ok');
+    applyInfo(info);
+    setStatus(statusEl, 'ready', 'ok');
     setStatus(inspect, `${{info.source_bytes}}B src -> ${{info.binary_bytes}}B bin · ${{info.element_count}} element(s) · roundtrip ${{info.roundtrip_ok ? 'OK' : 'MISMATCH'}}`, info.roundtrip_ok ? 'ok' : 'err');
   }} catch (err) {{
     const msg = (err && err.message) ? err.message : String(err);
+    player.animated = false;
+    transport.hidden = true;
+    setPlaying(false);
     preview.innerHTML = `<div class="pg-error-pane">${{msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}}</div>`;
-    setStatus(status, 'error', 'err');
+    setStatus(statusEl, 'error', 'err');
     setStatus(inspect, '', '');
   }}
 }}
 
 // Called by wasm-loader.js once the module finishes loading.
 window.__msxEngineReady = function() {{
-  setStatus(status, 'ready', 'ok');
+  setStatus(statusEl, 'ready', 'ok');
   doRender();
 }};
 
@@ -140,6 +248,7 @@ editor.addEventListener('input', scheduleRender);
 document.querySelectorAll('.pg-examples button').forEach(btn => {{
   btn.addEventListener('click', () => {{
     editor.value = MSX_EXAMPLES[btn.dataset.example];
+    player.pos = 0;
     scheduleRender();
   }});
 }});

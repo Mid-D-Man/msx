@@ -195,9 +195,9 @@ impl Style {
         if self.stroke.is_some()                                                                                 { f |= 1 << 1; }
         if self.opacity.is_some()                                                                                { f |= 1 << 2; }
         if self.stroke_width.is_some()                                                                           { f |= 1 << 3; }
-        if self.fill_rule.is_some() || self.stroke_linecap.is_some() || self.stroke_linejoin.is_some()          { f |= 1 << 4; }
+        if self.fill_rule.is_some() || self.stroke_linecap.is_some() || self.stroke_linejoin.is_some() || self.stroke_miterlimit.is_some() { f |= 1 << 4; }
         if self.font_size.is_some() || self.font_family.is_some() || self.font_weight.is_some() || self.text_anchor.is_some() { f |= 1 << 5; }
-        if self.stroke_dasharray.is_some()                                                                       { f |= 1 << 6; }
+        if self.stroke_dasharray.is_some() || self.stroke_dashoffset.is_some()                                   { f |= 1 << 6; }
         if self.visibility_hidden || self.display_none                                                           { f |= 1 << 7; }
         f
     }

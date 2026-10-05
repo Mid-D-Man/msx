@@ -109,7 +109,9 @@ impl Transform {
             },
             Transform::SkewX(a) => Matrix2D::skew_x(*a),
             Transform::SkewY(a) => Matrix2D::skew_y(*a),
-            Transform::Multiple(v) => v.iter().rev().fold(Matrix2D::identity(), |acc, t| acc.concat(t.to_matrix())),
+            // SVG order: `[A, B, C]` is the matrix A*B*C, so the LAST entry is applied
+            // to a point first. `to_svg_attr` emits the list in this same order.
+            Transform::Multiple(v) => v.iter().fold(Matrix2D::identity(), |acc, t| acc.concat(t.to_matrix())),
         }
     }
 
@@ -164,4 +166,26 @@ mod tests {
     #[test] fn matrix_bytes()    { let m = Matrix2D { a: 1.0, b: 0.5, c: -0.5, d: 1.0, e: 100.0, f: 200.0 }; let m2 = Matrix2D::from_bytes(&m.to_bytes()); assert!((m.e - m2.e).abs() < 1e-4); }
     #[test] fn parse_translate()  { assert_eq!(Transform::parse_svg("translate(10, 20)"), Transform::Translate { x: 10.0, y: 20.0 }); }
     #[test] fn svg_attr_rt()      { let t = Transform::Translate { x: 10.5, y: -20.0 }; assert_eq!(Transform::parse_svg(&t.to_svg_attr()), t); }
+
+    /// `translate(10,0) rotate(90)` in SVG rotates first, then translates: (1,0) -> (0,1) -> (10,1).
+    #[test]
+    fn chain_applies_last_entry_first_like_svg() {
+        let t = Transform::parse_svg("translate(10,0) rotate(90)");
+        let p = t.to_matrix().transform_point(Point::new(1.0, 0.0));
+        assert!((p.x - 10.0).abs() < 1e-9 && (p.y - 1.0).abs() < 1e-9, "got ({}, {})", p.x, p.y);
+    }
+
+    /// The object-array form shares the same order, and a three-entry chain is not just a swap of two.
+    #[test]
+    fn chain_of_three_matches_nested_application() {
+        let a = Transform::Scale { x: 2.0, y: 2.0 };
+        let b = Transform::Rotate { angle: 90.0, cx: None, cy: None };
+        let c = Transform::Translate { x: 5.0, y: 0.0 };
+        let chain = Transform::Multiple(vec![a.clone(), b.clone(), c.clone()]).to_matrix().transform_point(Point::new(1.0, 0.0));
+        // c first, then b, then a.
+        let step = c.to_matrix().transform_point(Point::new(1.0, 0.0));
+        let step = b.to_matrix().transform_point(step);
+        let step = a.to_matrix().transform_point(step);
+        assert!((chain.x - step.x).abs() < 1e-9 && (chain.y - step.y).abs() < 1e-9);
+    }
 }

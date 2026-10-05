@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
 mdconvert.py
-A small, purpose-built Markdown -> HTML converter for the MSX docs site.
+A small, purpose-built Markdown to HTML converter for the MSX docs site.
 
-Not a general CommonMark implementation — handles exactly the constructs
-README.md and docs/format-spec.md actually use (surveyed directly before
-writing this, not assumed): ATX headers (#..####), fenced code blocks
-(```lang ... ```, language becomes a CSS class for optional
-syntax-highlight hooks), GFM pipe tables, unordered lists, horizontal
-rules (---), inline code (`x`), bold (**x**), and paragraphs. No nested
-lists, no blockquotes, no inline links — none appear in either source
-file. Deliberately no external dependency (no `pip install markdown` in
-CI) since this is small enough to own outright and test directly.
+Not CommonMark. It handles the constructs the docs actually use: ATX
+headings (#..####), fenced code blocks, GFM pipe tables, flat bullet and
+numbered lists (indented continuation lines join the item above), block
+quotes used as callouts, horizontal rules, inline code, bold, italic,
+inline links, and an HTML-comment directive for site-only content.
+No external dependency, so CI needs no `pip install`.
 
-Headers get a stable `id` (slugified text) so docs pages can be deep-
-linked and get an auto-generated in-page table of contents.
+Callouts: a block quote whose first word is bold becomes a styled box,
+for example `> **Note** text`. The bold word picks the style (note, tip,
+warning, limitation).
+
+Directives: a line holding only `<!-- kind: argument -->` is passed to the
+`directive` callback and replaced by whatever HTML it returns. GitHub
+renders such a line as nothing, so the same files read cleanly there.
+
+Links: `[text](target)` goes through the optional `link_rewrite` callback,
+which lets the site map relative `page.md` links onto its own URLs.
+
+Headings get a stable `id` (slugified text, numbered when repeated) for
+deep links and the generated table of contents.
 """
 
 import html
@@ -27,14 +35,11 @@ def _slugify(text: str) -> str:
     return s or "section"
 
 
-def _inline(text: str) -> str:
-    """Inline-level formatting: escape HTML first, then apply inline code,
-    bold, and italic — in that order, so markup characters inside a code
-    span are never reinterpreted as bold/italic markers."""
+def _inline(text: str, link_rewrite=None) -> str:
+    """Escape first, then apply inline code, links, bold and italic in that
+    order, so markup characters inside a code span are never reinterpreted."""
     text = html.escape(text, quote=False)
 
-    # Inline code spans first — protects their content from bold/italic
-    # substitution below by pulling it out and re-inserting after.
     spans = []
 
     def stash_code(m):
@@ -43,41 +48,58 @@ def _inline(text: str) -> str:
 
     text = re.sub(r"`([^`]+)`", stash_code, text)
 
+    def link(m):
+        label, target = m.group(1), m.group(2)
+        if link_rewrite is not None:
+            target = link_rewrite(html.unescape(target))
+        return f'<a href="{html.escape(target, quote=True)}">{label}</a>'
+
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, text)
+
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", text)
 
     def restore_code(m):
-        return f'<code>{spans[int(m.group(1))]}</code>'
+        return f"<code>{spans[int(m.group(1))]}</code>"
 
-    text = re.sub(r"\x00(\d+)\x00", restore_code, text)
-    return text
+    return re.sub(r"\x00(\d+)\x00", restore_code, text)
 
 
-def convert(md: str) -> tuple[str, list[dict]]:
-    """Returns (body_html, toc) where toc is a list of
-    {level, id, text} for every h2/h3 heading (h1 is the page title,
-    left out of its own page's table of contents)."""
+_ORDERED = re.compile(r"^(\d+)\.\s+(.*)$")
+_BULLET = re.compile(r"^[-*]\s+(.*)$")
+_DIRECTIVE = re.compile(r"^<!--\s*(\w+)\s*:\s*(.+?)\s*-->\s*$")
+
+
+def convert(md: str, link_rewrite=None, directive=None) -> tuple[str, list[dict]]:
+    """Returns (body_html, toc); toc lists every h2/h3 as {level, id, text}."""
     lines = md.replace("\r\n", "\n").split("\n")
     out = []
     toc = []
+    seen_slugs: dict[str, int] = {}
     i = 0
     n = len(lines)
 
-    def flush_list(buf):
-        if buf:
-            out.append("<ul>")
-            for item in buf:
-                out.append(f"<li>{_inline(item)}</li>")
-            out.append("</ul>")
-            buf.clear()
-
-    def flush_para(buf):
-        if buf:
-            out.append(f"<p>{_inline(' '.join(buf))}</p>")
-            buf.clear()
+    def inl(t):
+        return _inline(t, link_rewrite)
 
     list_buf: list[str] = []
+    list_kind = [""]
     para_buf: list[str] = []
+
+    def flush_list():
+        if list_buf:
+            tag = "ol" if list_kind[0] == "ol" else "ul"
+            out.append(f"<{tag}>")
+            for item in list_buf:
+                out.append(f"<li>{inl(item)}</li>")
+            out.append(f"</{tag}>")
+            list_buf.clear()
+        list_kind[0] = ""
+
+    def flush_para():
+        if para_buf:
+            out.append(f"<p>{inl(' '.join(para_buf))}</p>")
+            para_buf.clear()
 
     while i < n:
         line = lines[i]
@@ -85,32 +107,42 @@ def convert(md: str) -> tuple[str, list[dict]]:
         # Fenced code block
         m = re.match(r"^```(\w*)\s*$", line)
         if m:
-            flush_list(list_buf)
-            flush_para(para_buf)
+            flush_list()
+            flush_para()
             lang = m.group(1) or "text"
             i += 1
             code_lines = []
             while i < n and not re.match(r"^```\s*$", lines[i]):
                 code_lines.append(lines[i])
                 i += 1
-            i += 1  # skip closing fence
+            i += 1
             code = html.escape("\n".join(code_lines))
             out.append(f'<pre class="code lang-{lang}"><code>{code}</code></pre>')
+            continue
+
+        # Site directive on its own line
+        m = _DIRECTIVE.match(line)
+        if m:
+            flush_list()
+            flush_para()
+            if directive is not None:
+                out.append(directive(m.group(1), m.group(2)))
+            i += 1
             continue
 
         # ATX heading
         m = re.match(r"^(#{1,4})\s+(.*)$", line)
         if m:
-            flush_list(list_buf)
-            flush_para(para_buf)
+            flush_list()
+            flush_para()
             level = len(m.group(1))
             text = m.group(2).strip()
-            # Strip a trailing "`tag`" backtick-quoted anchor some
-            # headings use (e.g. "### `rect`") down to plain text for the
-            # slug, but keep backticks in the rendered heading itself via
-            # _inline.
             slug = _slugify(re.sub(r"`", "", text))
-            out.append(f'<h{level} id="{slug}">{_inline(text)}</h{level}>')
+            count = seen_slugs.get(slug, 0)
+            seen_slugs[slug] = count + 1
+            if count:
+                slug = f"{slug}-{count + 1}"
+            out.append(f'<h{level} id="{slug}">{inl(text)}</h{level}>')
             if level in (2, 3):
                 toc.append({"level": level, "id": slug, "text": text})
             i += 1
@@ -118,55 +150,90 @@ def convert(md: str) -> tuple[str, list[dict]]:
 
         # Horizontal rule
         if re.match(r"^-{3,}\s*$", line):
-            flush_list(list_buf)
-            flush_para(para_buf)
+            flush_list()
+            flush_para()
             out.append("<hr>")
             i += 1
             continue
 
-        # Pipe table (header row, separator row, body rows)
+        # Block quote, used as a callout
+        if line.startswith(">"):
+            flush_list()
+            flush_para()
+            quote: list[str] = []
+            while i < n and lines[i].startswith(">"):
+                quote.append(lines[i][1:].lstrip())
+                i += 1
+            paragraphs, cur = [], []
+            for q in quote:
+                if q.strip() == "":
+                    if cur:
+                        paragraphs.append(" ".join(cur))
+                        cur = []
+                else:
+                    cur.append(q.strip())
+            if cur:
+                paragraphs.append(" ".join(cur))
+            kind = "note"
+            head = re.match(r"^\*\*(\w+)\*\*", paragraphs[0]) if paragraphs else None
+            if head:
+                kind = head.group(1).lower()
+            body = "".join(f"<p>{inl(p)}</p>" for p in paragraphs)
+            out.append(f'<div class="callout callout-{kind}">{body}</div>')
+            continue
+
+        # Pipe table
         if "|" in line and i + 1 < n and re.match(r"^\s*\|?[\s:|-]+\|[\s:|-]*$", lines[i + 1]):
-            flush_list(list_buf)
-            flush_para(para_buf)
+            flush_list()
+            flush_para()
             header_cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            out.append('<table class="doc-table"><thead><tr>')
+            out.append('<div class="table-wrap"><table class="doc-table"><thead><tr>')
             for c in header_cells:
-                out.append(f"<th>{_inline(c)}</th>")
+                out.append(f"<th>{inl(c)}</th>")
             out.append("</tr></thead><tbody>")
             i += 2
             while i < n and "|" in lines[i]:
                 row_cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
                 out.append("<tr>")
                 for c in row_cells:
-                    out.append(f"<td>{_inline(c)}</td>")
+                    out.append(f"<td>{inl(c)}</td>")
                 out.append("</tr>")
                 i += 1
-            out.append("</tbody></table>")
+            out.append("</tbody></table></div>")
             continue
 
-        # Unordered list item
-        m = re.match(r"^[-*]\s+(.*)$", line)
-        if m:
-            flush_para(para_buf)
-            list_buf.append(m.group(1))
+        # List items
+        m_ol = _ORDERED.match(line)
+        m_ul = _BULLET.match(line)
+        if m_ol or m_ul:
+            flush_para()
+            kind = "ol" if m_ol else "ul"
+            if list_buf and list_kind[0] != kind:
+                flush_list()
+            list_kind[0] = kind
+            list_buf.append((m_ol or m_ul).group(2 if m_ol else 1))
             i += 1
             continue
 
-        # Blank line: paragraph/list break
+        # Indented continuation of the previous list item
+        if list_buf and re.match(r"^\s{2,}\S", line):
+            list_buf[-1] += " " + line.strip()
+            i += 1
+            continue
+
+        # Blank line
         if line.strip() == "":
-            flush_list(list_buf)
-            flush_para(para_buf)
+            flush_list()
+            flush_para()
             i += 1
             continue
 
-        # Plain text -> accumulate into current paragraph
-        flush_list(list_buf)
+        flush_list()
         para_buf.append(line.strip())
         i += 1
 
-    flush_list(list_buf)
-    flush_para(para_buf)
-
+    flush_list()
+    flush_para()
     return "\n".join(out), toc
 
 

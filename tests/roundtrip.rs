@@ -156,6 +156,36 @@ fn roundtrip_path_arc() {
 }
 
 #[test]
+fn roundtrip_path_fill_rule_evenodd() {
+    // From the mid-qr-k example, which showed "roundtrip FAIL": setting only
+    // `fill_rule` made the decoder return explicit line cap, line join and
+    // miter limit values, so the decoded SVG gained a stroke-miterlimit
+    // attribute the source never had.
+    check_roundtrip("path_fill_rule_evenodd", r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 400, height = 400, background = #ffffff }
+  elements::
+    { type = "path", d = "M39.024 39.024H107.317V107.317H39.024ZM48.780 48.780H97.561V97.561H48.780Z",
+      style = { fill = #000000, fill_rule = "evenodd" } }
+)
+"#);
+}
+
+#[test]
+fn roundtrip_text_anchor_without_font_size() {
+    check_roundtrip("text_anchor_only", r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 400, height = 100, background = #ffffff }
+  elements::
+    { type = "text", x = 200, y = 60, content = "Hello MSX",
+      style = { fill = #000000, text_anchor = "middle" } }
+)
+"#);
+}
+
+#[test]
 fn roundtrip_text() {
     check_roundtrip("text", r#"
 @CONFIG( version -> "1.0.0" )

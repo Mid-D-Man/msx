@@ -23,6 +23,10 @@ crate-type = ["cdylib", "rlib"]
 # single place that re-exports precisely that surface (see src/lib.rs
 # at the repo root).
 msx = { path = "../.." }
+# The facade does not re-export the animation resolver or LoopMode, so
+# the playground's playback entry points depend on those two crates directly.
+msx-ast  = { workspace = true }
+msx-anim = { workspace = true }
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
 
