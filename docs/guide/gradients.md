@@ -22,6 +22,8 @@ The reference is a quoted string. The `id` of every def must be present, and a r
 
 Gradient coordinates are fractions of the bounding box of the element that uses the gradient, not canvas pixels. A linear gradient from `x1 = 0` to `x2 = 1` runs from the left edge of the element to its right edge, whatever the element's position or size. Reusing one gradient on shapes of different sizes therefore needs no change.
 
+A shape whose bounding box has no width or no height has nothing to map the gradient onto. A perfectly horizontal line is the usual case. A fill or stroke that references a gradient then draws nothing, which is what SVG does. The bounding box covers the geometry without its stroke, and for text it is the text box.
+
 ## Linear gradient
 
 | Field | Meaning | Default |
@@ -43,7 +45,7 @@ The default runs left to right. A vertical gradient uses `x2 = 0.0` and `y2 = 1.
 | `fx`, `fy` | Focal point | the center |
 | `stops` | The color stops | none |
 
-The defaults describe a circle that touches the edges of the bounding box.
+The defaults describe a circle that touches the edges of the bounding box. A focal point outside the circle moves onto the circle edge. A radius of 0 paints the last stop color.
 
 ## Conic gradient
 
@@ -54,9 +56,9 @@ The defaults describe a circle that touches the edges of the bounding box.
 | `angle` | Start angle in degrees | 0 |
 | `stops` | The color stops | none |
 
-A conic gradient sweeps the stops around the center.
+A conic gradient sweeps the stops around the center. The sweep starts at the top and runs clockwise, like CSS `conic-gradient`. `angle` turns the start clockwise from the top, so `angle = 90` starts at the right edge. The angle is measured in the shape's own space, so a wide or tall bounding box does not stretch the sweep. Positions before the first stop take its color and positions after the last stop take that color.
 
-> **Limitation** The SVG format has no conic gradient, so the SVG renderer writes only a comment, and a fill that references one is not drawn. The CPU and GPU rasterizers paint it as a flat color. Conic gradients are stored and round-trip through the binary format.
+> **Limitation** The SVG format has no conic gradient, so the SVG renderer writes only a comment, and a fill that references one is not drawn. The CPU renderer draws it. The GPU renderer paints a flat color for now. Conic gradients are stored and round-trip through the binary format.
 
 ## Stops
 
@@ -70,6 +72,10 @@ The `glow` gradient in the example fades from opaque to fully transparent by set
 
 ## Where it renders
 
-The SVG renderer writes real linear and radial gradients. The CPU and GPU rasterizers paint a gradient reference as one flat color, the average of its stops, and they do not interpolate across the shape. To compare, render the same file with `msx render` and `msx rasterize`.
+The SVG and CPU renderers interpolate linear and radial gradients, on fills and on strokes. The CPU renderer is also the only one that draws conic gradients. The GPU renderer paints a gradient reference as one flat color, the average of its stops, and does not interpolate across the shape yet.
 
-Gradients also work as the `fill` of a splat. A splat reduces the gradient to its average color first. See [Gaussian splats](splats.md).
+Stop colors keep their own alpha, and the `opacity` of the element multiplies into it. To compare renderers, render the same file with `msx render` and `msx rasterize`.
+
+<!-- example: gradient_demo -->
+
+Gradients also work as the `fill` of a splat. A splat reduces the gradient to its average color first, and so does an `sdf` node. See [Gaussian splats](splats.md).

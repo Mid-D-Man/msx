@@ -1,0 +1,66 @@
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 420, background = #14161f }
+  defs::
+    { type = "linear_gradient", id = "warm",
+      x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,
+      stops = [
+        { offset = 0.0, color = #f7971e, opacity = 1.0 },
+        { offset = 1.0, color = #e94560, opacity = 1.0 }
+      ] }
+    { type = "linear_gradient", id = "cool",
+      x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 1.0,
+      stops = [
+        { offset = 0.0, color = #4facfe, opacity = 1.0 },
+        { offset = 1.0, color = #0d47a1, opacity = 1.0 }
+      ] }
+    { type = "linear_gradient", id = "diag",
+      x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 1.0,
+      stops = [
+        { offset = 0.0, color = #43e97b, opacity = 1.0 },
+        { offset = 0.5, color = #38f9d7, opacity = 1.0 },
+        { offset = 1.0, color = #6b46ff, opacity = 1.0 }
+      ] }
+    { type = "radial_gradient", id = "spot",
+      cx = 0.5, cy = 0.5, r = 0.5, fx = 0.3, fy = 0.3,
+      stops = [
+        { offset = 0.0, color = #ffffff, opacity = 1.0 },
+        { offset = 1.0, color = #e94560, opacity = 1.0 }
+      ] }
+    { type = "conic_gradient", id = "wheel",
+      cx = 0.5, cy = 0.5, angle = 0.0,
+      stops = [
+        { offset = 0.0,   color = #ff0000, opacity = 1.0 },
+        { offset = 0.166, color = #ffff00, opacity = 1.0 },
+        { offset = 0.333, color = #00ff00, opacity = 1.0 },
+        { offset = 0.5,   color = #00ffff, opacity = 1.0 },
+        { offset = 0.666, color = #0000ff, opacity = 1.0 },
+        { offset = 0.833, color = #ff00ff, opacity = 1.0 },
+        { offset = 1.0,   color = #ff0000, opacity = 1.0 }
+      ] }
+    { type = "linear_gradient", id = "fade",
+      x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,
+      stops = [
+        { offset = 0.0, color = #ffffff, opacity = 1.0 },
+        { offset = 1.0, color = #ffffff, opacity = 0.0 }
+      ] }
+  elements::
+    { type = "rect", x = 30, y = 30, width = 180, height = 90,
+      style = { fill = "url(#warm)" } }
+    { type = "rect", x = 230, y = 30, width = 180, height = 90, rx = 14,
+      style = { fill = "url(#cool)" } }
+    { type = "rect", x = 430, y = 30, width = 180, height = 90,
+      style = { fill = "url(#diag)" } }
+    { type = "rect", x = 30, y = 140, width = 80, height = 36,
+      style = { fill = "url(#warm)" } }
+    { type = "rect", x = 130, y = 140, width = 280, height = 36,
+      style = { fill = "url(#warm)" } }
+    { type = "circle", cx = 120, cy = 290, r = 80,
+      style = { fill = "url(#spot)" } }
+    { type = "circle", cx = 320, cy = 290, r = 80,
+      style = { fill = "url(#wheel)" } }
+    { type = "rect", x = 440, y = 200, width = 170, height = 150, rx = 20,
+      style = { fill = "none", stroke = "url(#diag)", stroke_width = 10 } }
+    { type = "rect", x = 430, y = 375, width = 180, height = 30,
+      style = { fill = "url(#fade)" } }
+)

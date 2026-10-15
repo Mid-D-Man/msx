@@ -931,10 +931,10 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 |---|---|
 | rect, circle, ellipse, line, polygon, polyline | ✅ all three renderers (SVG/CPU/GPU) |
 | path (all SVG commands) | ✅ all three renderers |
-| text | ✅ SVG only. The CPU and GPU renderers skip it |
+| text | ✅ SVG and CPU. The CPU renderer uses an embedded DejaVu Sans face and ignores `font_family`. The GPU renderer skips it |
 | group + transform | ✅ all three renderers |
-| linear, radial gradient | ✅ SVG interpolates. CPU and GPU paint one flat color, the average of the stops |
-| conic gradient | ⚠️ stored and round-tripped. SVG draws nothing, CPU and GPU paint a flat color |
+| linear, radial gradient | ✅ SVG and CPU interpolate, on fills and strokes. The GPU renderer paints one flat color, the average of the stops |
+| conic gradient | ⚠️ stored and round-tripped. CPU draws it, SVG draws nothing, GPU paints a flat color |
 | use (reference an element by id) | ✅ all three renderers |
 | SDF shape trees (circle/box/line/ring/arc + boolean combinators) | ✅ CPU, GPU · ❌ SVG (written as a comment) |
 | Gaussian splats | ✅ CPU, GPU · ⚠️ SVG approximates with a radial gradient |

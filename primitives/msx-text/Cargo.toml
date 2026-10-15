@@ -1,0 +1,13 @@
+# primitives/msx-text/Cargo.toml
+[package]
+name        = "msx-text"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSX text layout: turns a Text element into outline path commands using an embedded DejaVu Sans subset, shared by the CPU and GPU renderers"
+publish     = false
+
+[dependencies]
+msx-ast    = { workspace = true }
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

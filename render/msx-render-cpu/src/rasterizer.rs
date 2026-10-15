@@ -19,6 +19,7 @@ use tiny_skia::{
 };
 
 use crate::composite::render_layer;
+use crate::gradient::{self, Bbox, ResolvedPaint};
 use crate::sdf_raster::rasterize_sdf;
 use crate::splat_raster::rasterize_splat;
 
@@ -71,17 +72,21 @@ impl<'a> ElementIndex<'a> {
 
 pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
     match element {
-        Element::Rect(e) => fill_and_stroke(pixmap, build_rect_path(e), &e.style, e.transform.as_ref(), transform, defs),
-        Element::Circle(e) => fill_and_stroke(pixmap, build_circle_path(e), &e.style, e.transform.as_ref(), transform, defs),
-        Element::Ellipse(e) => fill_and_stroke(pixmap, build_ellipse_path(e), &e.style, e.transform.as_ref(), transform, defs),
-        Element::Line(e) => stroke_only(pixmap, build_line_path(e), &e.style, e.transform.as_ref(), transform),
+        Element::Rect(e) => fill_and_stroke(pixmap, build_rect_path(e), &e.style, e.transform.as_ref(), transform, defs, None),
+        Element::Circle(e) => fill_and_stroke(pixmap, build_circle_path(e), &e.style, e.transform.as_ref(), transform, defs, None),
+        Element::Ellipse(e) => fill_and_stroke(pixmap, build_ellipse_path(e), &e.style, e.transform.as_ref(), transform, defs, None),
+        Element::Line(e) => stroke_only(pixmap, build_line_path(e), &e.style, e.transform.as_ref(), transform, defs),
         Element::Polyline(e) | Element::Polygon(e) => {
-            fill_and_stroke(pixmap, build_polyline_path(e), &e.style, e.transform.as_ref(), transform, defs)
+            fill_and_stroke(pixmap, build_polyline_path(e), &e.style, e.transform.as_ref(), transform, defs, None)
         }
-        Element::Path(e) => fill_and_stroke(pixmap, build_msx_path(e), &e.style, e.transform.as_ref(), transform, defs),
-        Element::Text(_) => {
-            // No font shaping/rasterization dependency wired in — see
-            // lib.rs docs. Intentionally skipped, not faked.
+        Element::Path(e) => fill_and_stroke(pixmap, build_msx_path(e), &e.style, e.transform.as_ref(), transform, defs, None),
+        Element::Text(t) => {
+            // Glyph outlines from the embedded face, drawn like any path. The
+            // text box (not the outline bounds) is the gradient bounding box.
+            if let Some((path, bounds)) = msx_text::to_path_with_bounds(t) {
+                let text_box = Some(Bbox::from_text_box(bounds));
+                fill_and_stroke(pixmap, build_msx_path(&path), &path.style, path.transform.as_ref(), transform, defs, text_box);
+            }
         }
         Element::Group(g) => render_group(pixmap, g, transform, defs, index, base_dir),
         Element::Use(u) => render_use(pixmap, u, transform, defs, index, base_dir),
@@ -116,39 +121,62 @@ fn render_use(pixmap: &mut Pixmap, u: &Use, parent: Matrix2D, defs: &Defs, index
 
 // ── Fill + stroke ────────────────────────────────────────────────────────────
 
-fn fill_and_stroke(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D, defs: &Defs) {
-    let Some(path) = path else { return };
-    let transform = to_tiny_skia_transform(combine(parent, local_transform));
-    let opacity = style.opacity.unwrap_or(1.0) as f32;
-
-    if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
-        if let Some(paint) = resolve_paint(fill, opacity, defs) {
-            pixmap.fill_path(&path, &paint, sk_fill_rule(style), transform, None);
-        }
-    }
-
-    if let Some(stroke_paint) = style.stroke.as_ref().filter(|p| !p.is_none()) {
-        let width = style.stroke_width.unwrap_or(1.0) as f32;
-        if width > 0.0 {
-            if let Some(paint) = resolve_paint(stroke_paint, opacity, defs) {
-                pixmap.stroke_path(&path, &paint, &build_stroke(style, width), transform, None);
-            }
-        }
-    }
+/// Everything a draw call needs about where and how one element lands.
+struct DrawGeometry {
+    /// Full local-to-device matrix (needed to invert for conic gradients).
+    matrix: Matrix2D,
+    transform: Transform,
+    opacity: f32,
+    /// Gradient bounding box in local space.
+    bbox: Option<Bbox>,
 }
 
-fn stroke_only(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D) {
+/// `text_box` overrides the path bounds as the gradient bounding box; only
+/// text sets it.
+fn fill_and_stroke(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D, defs: &Defs, text_box: Option<Bbox>) {
     let Some(path) = path else { return };
+    let matrix = combine(parent, local_transform);
+    let geo = DrawGeometry {
+        matrix,
+        transform: to_tiny_skia_transform(matrix),
+        opacity: style.opacity.unwrap_or(1.0) as f32,
+        bbox: text_box.or_else(|| Bbox::from_path(&path)),
+    };
+
+    if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
+        match resolve_paint(fill, geo.opacity, defs, geo.bbox) {
+            Some(ResolvedPaint::Shader(paint)) => pixmap.fill_path(&path, &paint, sk_fill_rule(style), geo.transform, None),
+            Some(ResolvedPaint::Conic(conic)) => gradient::conic_fill(pixmap, &path, &conic, sk_fill_rule(style), geo.transform, geo.matrix),
+            Some(ResolvedPaint::Nothing) | None => {}
+        }
+    }
+
+    stroke_with_paint(pixmap, &path, style, &geo, defs);
+}
+
+fn stroke_only(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, local_transform: Option<&msx_ast::Transform>, parent: Matrix2D, defs: &Defs) {
+    let Some(path) = path else { return };
+    let matrix = combine(parent, local_transform);
+    let geo = DrawGeometry {
+        matrix,
+        transform: to_tiny_skia_transform(matrix),
+        opacity: style.opacity.unwrap_or(1.0) as f32,
+        bbox: Bbox::from_path(&path),
+    };
+    stroke_with_paint(pixmap, &path, style, &geo, defs);
+}
+
+fn stroke_with_paint(pixmap: &mut Pixmap, path: &SkPath, style: &Style, geo: &DrawGeometry, defs: &Defs) {
     let Some(stroke_paint) = style.stroke.as_ref().filter(|p| !p.is_none()) else { return };
     let width = style.stroke_width.unwrap_or(1.0) as f32;
     if width <= 0.0 {
         return;
     }
-    let opacity = style.opacity.unwrap_or(1.0) as f32;
-    let transform = to_tiny_skia_transform(combine(parent, local_transform));
-    if let Paint::Color(c) = stroke_paint {
-        let paint = flat_paint(*c, opacity);
-        pixmap.stroke_path(&path, &paint, &build_stroke(style, width), transform, None);
+    let stroke = build_stroke(style, width);
+    match resolve_paint(stroke_paint, geo.opacity, defs, geo.bbox) {
+        Some(ResolvedPaint::Shader(paint)) => pixmap.stroke_path(path, &paint, &stroke, geo.transform, None),
+        Some(ResolvedPaint::Conic(conic)) => gradient::conic_stroke(pixmap, path, &conic, &stroke, geo.transform, geo.matrix),
+        Some(ResolvedPaint::Nothing) | None => {}
     }
 }
 
@@ -159,22 +187,18 @@ fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
     }
 }
 
-fn resolve_paint(paint: &Paint, opacity: f32, defs: &Defs) -> Option<SkPaint<'static>> {
+/// Resolve a fill or stroke paint. A reference to a missing id paints
+/// nothing. A shader def paints its `fallback_color`, since this renderer
+/// cannot run WGSL.
+fn resolve_paint(paint: &Paint, opacity: f32, defs: &Defs, bbox: Option<Bbox>) -> Option<ResolvedPaint> {
     match paint {
         Paint::None => None,
-        Paint::Color(c) => Some(flat_paint(*c, opacity)),
-        Paint::CurrentColor => Some(flat_paint(Color::BLACK, opacity)),
+        Paint::Color(c) => Some(ResolvedPaint::Shader(flat_paint(*c, opacity))),
+        Paint::CurrentColor => Some(ResolvedPaint::Shader(flat_paint(Color::BLACK, opacity))),
         Paint::Ref(reference) => {
             let id = reference.strip_prefix("url(#")?.strip_suffix(')')?;
             let def = defs.get(id)?;
-            // TODO: a real tiny-skia LinearGradient/RadialGradient shader,
-            // mapped through objectBoundingBox using the fill path's
-            // bounds. Skipped for now — the exact gradient-shader
-            // constructor signature is the one part of this module worth
-            // double-checking against whichever tiny-skia 0.11.x patch is
-            // actually pinned. Every gradient-filled shape still renders
-            // the gradient's average color rather than nothing.
-            Some(flat_paint(average_stop_color(def), opacity))
+            Some(gradient::resolve(def, bbox, opacity).unwrap_or_else(|| ResolvedPaint::Shader(flat_paint(average_stop_color(def), opacity))))
         }
     }
 }

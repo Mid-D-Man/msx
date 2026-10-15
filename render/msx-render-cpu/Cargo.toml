@@ -13,6 +13,7 @@ msx-ast         = { workspace = true }
 msx-render-core = { workspace = true }
 msx-sdf         = { workspace = true }
 msx-splat       = { workspace = true }
+msx-text        = { workspace = true }
 tiny-skia       = { workspace = true }
 rayon           = { workspace = true }
 glam            = { workspace = true }

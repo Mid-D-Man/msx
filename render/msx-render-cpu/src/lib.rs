@@ -6,15 +6,19 @@
 //! `Sdf`, `Splat`, and `Layer` (offscreen buffer + blend mode + opacity +
 //! effects, via `composite.rs`/`effects.rs`) are all wired up now.
 //!
-//! `Text` is still a deliberate no-op — no font shaping/rasterization
-//! dependency is wired in (`tiny-skia` doesn't do text at all). Gradient
-//! *refs* (`fill = "url(#id)"`) render as a flat average-of-stops color —
-//! see the `TODO` in `rasterizer.rs::resolve_paint` for why.
+//! `Text` is drawn as glyph outlines from the embedded DejaVu Sans face
+//! (`msx-text`). `font_family` is ignored. Linear, radial and conic
+//! gradient fills and strokes are real gradients mapped through the shape
+//! bounding box (see `gradient.rs`); SDF and splat gradient fills still use
+//! the flat average of the stops.
 
 mod composite;
 mod effects;
 mod geom;
+mod gradient;
 mod image;
+#[cfg(test)]
+mod paint_tests;
 mod pixel;
 mod rasterizer;
 mod sdf_raster;

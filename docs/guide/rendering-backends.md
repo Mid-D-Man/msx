@@ -15,12 +15,12 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Feature | SVG | CPU | GPU |
 |---|---|---|---|
 | Rect, circle, ellipse, line, polyline, polygon, path | yes | yes | yes |
-| Text | yes | not drawn | not drawn |
+| Text | yes | yes, DejaVu Sans only | not drawn |
 | Image | yes | yes | yes |
 | Group, use | yes | yes | yes |
 | Group style reaching its children | yes | no | no |
-| Linear and radial gradients | interpolated | one flat color | one flat color |
-| Conic gradient | not drawn | one flat color | one flat color |
+| Linear and radial gradients | interpolated | interpolated | one flat color |
+| Conic gradient | not drawn | yes | one flat color |
 | Shader fills | `fallback_color` | `fallback_color` | runs the WGSL |
 | Signed distance fields | omitted | yes | yes |
 | Gaussian splats | approximated | yes | yes |
@@ -30,7 +30,7 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Viewbox | yes | no | no |
 | Keyframe animation | static frames | GIF | GIF |
 
-The flat color for a gradient is the average of its stops. The SVG renderer is the only one that interpolates, so a gradient looks right in SVG output and flat in PNG output.
+Where a gradient is not interpolated, the paint is the average of its stops. That applies to every gradient on the GPU renderer, and to gradient fills of `sdf` nodes and splats on the CPU and GPU renderers.
 
 ## Notes on each renderer
 
@@ -45,7 +45,8 @@ The flat color for a gradient is the average of its stops. The SVG renderer is t
 
 - The rasterizer applies stroke width, dashes, caps, joins, the miter limit and the fill rule. It does not read `fill_opacity` or `stroke_opacity`.
 - Compositing for layers uses the shared blend functions in `msx-render-core`, which cover all twelve modes.
-- Text is skipped on purpose, because no font shaping is wired in.
+- Text is drawn as glyph outlines from an embedded DejaVu Sans face, through the same path pipeline as other shapes. `font_family` is ignored and there is no OpenType shaping. See [Text](text.md).
+- Linear and radial gradients are `tiny-skia` shaders mapped through the bounding box. Conic gradients have no `tiny-skia` shader, so the renderer rasterizes the shape coverage and colors each covered pixel itself.
 
 ### GPU
 
@@ -56,8 +57,8 @@ The flat color for a gradient is the average of its stops. The SVG renderer is t
 
 ## Choosing a renderer
 
-- Use **SVG** for scenes that use text, for gradients that must interpolate, and for output that has to stay vector.
-- Use the **CPU** rasterizer for PNG and GIF output that needs no special hardware. It covers SDF shapes, splats, layers and all five effects.
+- Use **SVG** for output that has to stay vector, and for text that should use the viewer's own fonts.
+- Use the **CPU** rasterizer for PNG and GIF output that needs no special hardware. It covers text, gradients including conic, SDF shapes, splats, layers and all five effects.
 - Use the **GPU** renderer when a scene has shader fills, or when blur on large layers needs speed.
 
 The samples page shows the same set of files through these renderers, and the build report lists the result of each CI run.

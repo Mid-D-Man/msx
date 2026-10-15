@@ -12,6 +12,7 @@ members = [
     "render/msx-render-gpu",
     "primitives/msx-sdf",
     "primitives/msx-splat",
+    "primitives/msx-text",
     "apps/msx-cli",
     "apps/msx-viewer",
     "web/msx-wasm",
@@ -35,6 +36,7 @@ msx-render-cpu  = { path = "render/msx-render-cpu" }
 msx-render-gpu  = { path = "render/msx-render-gpu" }
 msx-sdf         = { path = "primitives/msx-sdf" }
 msx-splat       = { path = "primitives/msx-splat" }
+msx-text        = { path = "primitives/msx-text" }
 # External siblings
 mbfa      = { path = "../mbfa" }
 dixscript = "1.0.0"
