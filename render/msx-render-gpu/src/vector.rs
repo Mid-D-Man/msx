@@ -48,18 +48,34 @@ use msx_ast::{
     Scene, Style, Use,
 };
 
+use crate::gradient::{self, Bbox, GradientDesc, NO_GRADIENT};
 use crate::shader::PendingShaderShape;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 2],
+    /// Baked color. Ignored by the fragment stage when `grad` is a real index.
     pub color: [f32; 4],
+    /// Position in `objectBoundingBox` units, used only by gradient vertices.
+    pub uv: [f32; 2],
+    /// Index into `VectorGeometry::gradients`, or `NO_GRADIENT` (`u32::MAX`)
+    /// for a flat vertex.
+    pub grad: u32,
+}
+
+impl Vertex {
+    /// A flat-colored vertex.
+    pub fn flat(position: [f32; 2], color: [f32; 4]) -> Self {
+        Vertex { position, color, uv: [0.0, 0.0], grad: NO_GRADIENT }
+    }
 }
 
 pub struct VectorGeometry {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Gradient records the vertices index into (see `gradient.rs`).
+    pub gradients: Vec<GradientDesc>,
 }
 
 pub(crate) struct Defs<'a> {
@@ -135,6 +151,7 @@ pub fn tessellate_elements(elements: &[Element], base_transform: Matrix2D, canva
 /// do for top-level shapes), and collect any shape whose fill resolves
 /// to a `Def::Shader` separately, exactly like
 /// `tessellate_scene_with_shaders` does for a whole `Scene`.
+#[cfg(test)]
 pub(crate) fn tessellate_elements_with_shaders(
     elements: &[Element],
     base_transform: Matrix2D,
@@ -142,9 +159,36 @@ pub(crate) fn tessellate_elements_with_shaders(
     defs: &Defs,
 ) -> (VectorGeometry, Vec<PendingShaderShape>) {
     let index = ElementIndex::build(elements);
+    tessellate_elements_with_shaders_in(elements, base_transform, canvas, defs, &index)
+}
+
+/// Same as `tessellate_elements_with_shaders`, but resolves `use` targets
+/// through a caller-supplied `index`. `layer.rs` passes one index built
+/// over the whole sibling list, because it draws that list as several
+/// sub-runs and a `use` may point at an element in a neighboring sub-run.
+pub(crate) fn tessellate_elements_with_shaders_in(
+    elements: &[Element],
+    base_transform: Matrix2D,
+    canvas: (f32, f32),
+    defs: &Defs,
+    index: &ElementIndex,
+) -> (VectorGeometry, Vec<PendingShaderShape>) {
     let mut shader_shapes = Vec::new();
-    let geometry = tessellate_elements_with(elements, base_transform, canvas, defs, &index, Some(&mut shader_shapes));
+    let geometry = tessellate_elements_with(elements, base_transform, canvas, defs, index, Some(&mut shader_shapes));
     (geometry, shader_shapes)
+}
+
+/// One run's flat geometry plus the gradient records its vertices index into.
+struct Batch {
+    buffers: VertexBuffers<Vertex, u32>,
+    gradients: Vec<GradientDesc>,
+}
+
+impl Batch {
+    fn push_gradient(&mut self, desc: GradientDesc) -> u32 {
+        self.gradients.push(desc);
+        (self.gradients.len() - 1) as u32
+    }
 }
 
 fn tessellate_elements_with(
@@ -155,11 +199,11 @@ fn tessellate_elements_with(
     index: &ElementIndex,
     mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) -> VectorGeometry {
-    let mut buffers: VertexBuffers<Vertex, u32> = VertexBuffers::new();
+    let mut batch = Batch { buffers: VertexBuffers::new(), gradients: Vec::new() };
     for element in elements {
-        tessellate_element(element, base_transform, canvas, defs, index, &mut buffers, shader_shapes.as_deref_mut());
+        tessellate_element(element, base_transform, canvas, defs, index, &mut batch, shader_shapes.as_deref_mut());
     }
-    VectorGeometry { vertices: buffers.vertices, indices: buffers.indices }
+    VectorGeometry { vertices: batch.buffers.vertices, indices: batch.buffers.indices, gradients: batch.gradients }
 }
 
 fn tessellate_element(
@@ -168,54 +212,57 @@ fn tessellate_element(
     canvas: (f32, f32),
     defs: &Defs,
     index: &ElementIndex,
-    buffers: &mut VertexBuffers<Vertex, u32>,
+    batch: &mut Batch,
     mut shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) {
     match element {
         Element::Rect(r) => {
             let path = rect_path(r);
-            fill_and_stroke(&path, &r.style, combine(transform, r.transform.as_ref()), canvas, defs, buffers, shader_shapes);
+            fill_and_stroke(&path, &r.style, combine(transform, r.transform.as_ref()), canvas, defs, batch, shader_shapes, None);
         }
         Element::Circle(c) => {
             let path = ellipse_path(c.cx, c.cy, c.r, c.r);
-            fill_and_stroke(&path, &c.style, combine(transform, c.transform.as_ref()), canvas, defs, buffers, shader_shapes);
+            fill_and_stroke(&path, &c.style, combine(transform, c.transform.as_ref()), canvas, defs, batch, shader_shapes, None);
         }
         Element::Ellipse(e) => {
             let path = ellipse_path(e.cx, e.cy, e.rx, e.ry);
-            fill_and_stroke(&path, &e.style, combine(transform, e.transform.as_ref()), canvas, defs, buffers, shader_shapes);
+            fill_and_stroke(&path, &e.style, combine(transform, e.transform.as_ref()), canvas, defs, batch, shader_shapes, None);
         }
-        Element::Line(l) => stroke_only_line(l, combine(transform, l.transform.as_ref()), canvas, buffers),
+        Element::Line(l) => stroke_only_line(l, combine(transform, l.transform.as_ref()), canvas, defs, batch),
         Element::Polyline(p) | Element::Polygon(p) => {
             let path = polyline_path(p);
-            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers, shader_shapes);
+            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, batch, shader_shapes, None);
         }
         Element::Path(p) => {
             let path = msx_path_to_lyon(p);
-            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, buffers, shader_shapes);
+            fill_and_stroke(&path, &p.style, combine(transform, p.transform.as_ref()), canvas, defs, batch, shader_shapes, None);
         }
-        Element::Text(_) => {
-            // No font shaping/rasterization here either — same gap as
-            // msx-render-cpu, same reason (no font backend wired in).
+        Element::Text(t) => {
+            // Glyph outlines from the embedded face, tessellated like any
+            // path, so fills, strokes, gradients and shader fills all apply.
+            // The text box is the gradient bounding box.
+            if let Some((path, bounds)) = msx_text::to_path_with_bounds(t) {
+                let lyon_path = msx_path_to_lyon(&path);
+                let text_box = Some(Bbox::from_text_box(bounds));
+                fill_and_stroke(&lyon_path, &path.style, combine(transform, path.transform.as_ref()), canvas, defs, batch, shader_shapes, text_box);
+            }
         }
         Element::Group(g) => {
             let combined = combine(transform, g.transform.as_ref());
             for child in &g.children {
-                tessellate_element(child, combined, canvas, defs, index, buffers, shader_shapes.as_deref_mut());
+                tessellate_element(child, combined, canvas, defs, index, batch, shader_shapes.as_deref_mut());
             }
         }
-        Element::Use(u) => tessellate_use(u, transform, canvas, defs, index, buffers, shader_shapes),
+        Element::Use(u) => tessellate_use(u, transform, canvas, defs, index, batch, shader_shapes),
         Element::Sdf(_) | Element::Splat(_) => {
             // sdf.rs / splat.rs handle these in their own passes.
         }
         Element::Image(_) => {
-            // image.rs's ImagePipeline handles these in its own pass
-            // (called separately by layer.rs's draw_run) — a raster
-            // image has no vector path to tessellate here, same
-            // reasoning as Sdf/Splat/Layer just above.
+            // image.rs's ImagePipeline handles these in its own pass.
         }
         Element::Layer(_) => {
             // layer.rs handles these via its own isolated render +
-            // composite — never flattened into the shared vector pass.
+            // composite, never flattened into the shared vector pass.
         }
     }
 }
@@ -226,14 +273,14 @@ fn tessellate_use(
     canvas: (f32, f32),
     defs: &Defs,
     index: &ElementIndex,
-    buffers: &mut VertexBuffers<Vertex, u32>,
+    batch: &mut Batch,
     shader_shapes: Option<&mut Vec<PendingShaderShape>>,
 ) {
     let id = u.href.strip_prefix('#').unwrap_or(&u.href);
     let Some(target) = index.get(id) else { return };
     let offset = Matrix2D::translate(u.x, u.y);
     let local = u.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
-    tessellate_element(target, parent.concat(offset.concat(local)), canvas, defs, index, buffers, shader_shapes);
+    tessellate_element(target, parent.concat(offset.concat(local)), canvas, defs, index, batch, shader_shapes);
 }
 
 fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {
@@ -256,49 +303,33 @@ fn to_lyon_fill_rule(fr: FillRule) -> LyonFillRule {
 
 // ── Fill + stroke ────────────────────────────────────────────────────────────
 
+/// `text_box` overrides the path bounds as the gradient bounding box; only
+/// text sets it.
+#[allow(clippy::too_many_arguments)]
 fn fill_and_stroke(
     path: &LyonPath,
     style: &Style,
     transform: Matrix2D,
     canvas: (f32, f32),
     defs: &Defs,
-    buffers: &mut VertexBuffers<Vertex, u32>,
+    batch: &mut Batch,
     shader_shapes: Option<&mut Vec<PendingShaderShape>>,
+    text_box: Option<Bbox>,
 ) {
     let opacity = style.opacity.unwrap_or(1.0);
-    // `FillOptions::default()` is lyon's own default, which is `EvenOdd` —
-    // NOT the SVG-spec default (`NonZero`) that msx-ast's own `FillRule`
-    // already defaults to unset as, and that msx-render-cpu already
-    // honors correctly via tiny-skia's fill-rule mapping. Left unwired
-    // here, GPU was the only one of the three renderers silently using
-    // the wrong default — harmless for every path in the current example
-    // corpus (verified: all of them are simple, non-self-intersecting,
-    // non-overlapping-same-direction contours, where EvenOdd and NonZero
-    // agree), but silently wrong the first time a self-intersecting
-    // shape or a deliberately-unioned overlapping-same-direction pair of
-    // contours shows up.
+    // `FillOptions::default()` is lyon's own default, which is `EvenOdd`,
+    // NOT the SVG-spec default (`NonZero`). Wire the rule explicitly so
+    // self-intersecting shapes and overlapping same-direction contours
+    // match the other renderers.
     let fill_rule = to_lyon_fill_rule(style.fill_rule.unwrap_or(FillRule::NonZero));
+    let bbox = text_box.or_else(|| Bbox::from_path(path));
 
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
-        // A fill that resolves to a real Def::Shader gets pulled out into
-        // its own draw, executed for real by shader.rs — but only when a
-        // collector was actually provided. Every real render path (the
-        // top level, via `layer::render_ordered`, and every `Layer`, via
-        // `render_layer` — both ultimately call
-        // `tessellate_elements_with_shaders` per run/per layer) provides
-        // one; only the plain public `tessellate_scene`/
-        // `tessellate_elements` — kept unchanged for any external caller
-        // depending on their existing shape — pass `None`, so shader
-        // fills through *those* two specifically still fall through to
-        // the flat-fallback_color behavior via paint_to_rgba/
-        // average_stop_color below.
-        //
-        // A direct move (not `.as_deref_mut()`) is correct and sufficient
-        // here specifically because `shader_shapes` is used exactly once,
-        // right here, and never again for the rest of this function call —
-        // unlike `tessellate_elements_with`'s loop, which genuinely needs
-        // a fresh reborrow every iteration since it calls into this same
-        // collector repeatedly across multiple sibling elements.
+        // A fill that resolves to a real Def::Shader is pulled out into its
+        // own draw, executed for real by shader.rs, but only when a
+        // collector was provided. The plain public `tessellate_scene` and
+        // `tessellate_elements` pass `None`, so shader fills through those
+        // two still fall back to the flat `fallback_color`.
         let routed_to_shader = if let Some(shapes) = shader_shapes {
             if let Some(shader_def) = resolve_shader_def(fill, defs) {
                 let (vertices, indices) = fill_path_positions(path, fill_rule, transform, canvas);
@@ -312,20 +343,58 @@ fn fill_and_stroke(
         };
 
         if !routed_to_shader {
-            if let Some(rgba) = paint_to_rgba(fill, opacity, defs) {
-                fill_path(path, fill_rule, rgba, transform, canvas, buffers);
+            match resolve_paint(fill, opacity, defs, bbox) {
+                Some(ResolvedPaint::Flat(rgba)) => fill_path(path, fill_rule, rgba, transform, canvas, &mut batch.buffers),
+                Some(ResolvedPaint::Gradient(desc, b)) => {
+                    let grad = batch.push_gradient(*desc);
+                    fill_path_gradient(path, fill_rule, grad, b, transform, canvas, &mut batch.buffers);
+                }
+                None => {}
             }
         }
     }
 
-    if let Some(stroke) = style.stroke.as_ref().filter(|p| !p.is_none()) {
-        let width = style.stroke_width.unwrap_or(1.0) as f32;
-        if width > 0.0 {
-            if let Some(rgba) = paint_to_rgba(stroke, opacity, defs) {
-                stroke_path(path, rgba, width, transform, canvas, buffers);
-            }
+    stroke_with_paint(path, style, transform, canvas, defs, batch, bbox);
+}
+
+fn stroke_with_paint(path: &LyonPath, style: &Style, transform: Matrix2D, canvas: (f32, f32), defs: &Defs, batch: &mut Batch, bbox: Option<Bbox>) {
+    let Some(stroke) = style.stroke.as_ref().filter(|p| !p.is_none()) else { return };
+    let width = style.stroke_width.unwrap_or(1.0) as f32;
+    if width <= 0.0 {
+        return;
+    }
+    let opacity = style.opacity.unwrap_or(1.0);
+    match resolve_paint(stroke, opacity, defs, bbox) {
+        Some(ResolvedPaint::Flat(rgba)) => stroke_path(path, rgba, width, transform, canvas, &mut batch.buffers),
+        Some(ResolvedPaint::Gradient(desc, b)) => {
+            let grad = batch.push_gradient(*desc);
+            stroke_path_gradient(path, width, grad, b, transform, canvas, &mut batch.buffers);
+        }
+        None => {}
+    }
+}
+
+/// A paint ready to tessellate with.
+enum ResolvedPaint {
+    Flat([f32; 4]),
+    /// Boxed gradient record plus the bounding box its `uv` is measured against.
+    Gradient(Box<GradientDesc>, Bbox),
+}
+
+/// Resolve a fill or stroke paint. A gradient reference with an empty
+/// bounding box paints nothing, as in SVG. Shader defs and anything that is
+/// not a gradient resolve to a flat color through `paint_to_rgba`.
+fn resolve_paint(paint: &Paint, opacity: f64, defs: &Defs, bbox: Option<Bbox>) -> Option<ResolvedPaint> {
+    if let Paint::Ref(reference) = paint {
+        let id = reference.strip_prefix("url(#")?.strip_suffix(')')?;
+        let def = defs.get(id)?;
+        match gradient::resolve(def, bbox, opacity as f32) {
+            Some(gradient::Resolved::Gradient(desc)) => return bbox.map(|b| ResolvedPaint::Gradient(desc, b)),
+            Some(gradient::Resolved::Nothing) => return None,
+            None => {}
         }
     }
+    paint_to_rgba(paint, opacity, defs).map(ResolvedPaint::Flat)
 }
 
 /// If `paint` is a `url(#id)` reference that resolves to a real
@@ -344,24 +413,18 @@ pub(crate) fn resolve_shader_def<'a>(paint: &Paint, defs: &Defs<'a>) -> Option<&
     }
 }
 
-fn stroke_only_line(l: &Line, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
-    let Some(stroke) = l.style.stroke.as_ref().filter(|p| !p.is_none()) else { return };
-    let width = l.style.stroke_width.unwrap_or(1.0) as f32;
-    if width <= 0.0 {
-        return;
-    }
-    let Paint::Color(c) = stroke else { return };
-    let opacity = l.style.opacity.unwrap_or(1.0);
-    let a = (c.a as f64 / 255.0) * opacity.clamp(0.0, 1.0);
-    let rgba = [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, a as f32];
-
+fn stroke_only_line(l: &Line, transform: Matrix2D, canvas: (f32, f32), defs: &Defs, batch: &mut Batch) {
     let mut builder = LyonPath::builder();
     builder.begin(point(l.x1 as f32, l.y1 as f32));
     builder.line_to(point(l.x2 as f32, l.y2 as f32));
     builder.end(false);
     let path = builder.build();
 
-    stroke_path(&path, rgba, width, transform, canvas, buffers);
+    // A line has no fill. Its gradient bounding box has no area when the
+    // line is perfectly horizontal or vertical, so a gradient stroke on
+    // one paints nothing, as in SVG.
+    let bbox = Bbox::from_path(&path);
+    stroke_with_paint(&path, &l.style, transform, canvas, defs, batch, bbox);
 }
 
 fn fill_path(
@@ -404,6 +467,32 @@ fn fill_path_positions(
     (buffers.vertices, buffers.indices)
 }
 
+fn fill_path_gradient(path: &LyonPath, fill_rule: LyonFillRule, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
+    let mut tess = FillTessellator::new();
+    let _ = tess.tessellate_path(
+        path,
+        &FillOptions::default().with_fill_rule(fill_rule),
+        &mut BuffersBuilder::new(buffers, |v: FillVertex| gradient_vertex(v.position().x, v.position().y, grad, bbox, transform, canvas)),
+    );
+}
+
+fn stroke_path_gradient(path: &LyonPath, width: f32, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
+    let mut tess = StrokeTessellator::new();
+    let options = StrokeOptions::default().with_line_width(width);
+    let _ = tess.tessellate_path(
+        path,
+        &options,
+        &mut BuffersBuilder::new(buffers, |v: StrokeVertex| gradient_vertex(v.position().x, v.position().y, grad, bbox, transform, canvas)),
+    );
+}
+
+/// A vertex whose color comes from gradient record `grad`. `uv` is measured
+/// from the untransformed local position, so it is exact under any transform.
+fn gradient_vertex(x: f32, y: f32, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32)) -> Vertex {
+    let (tx, ty) = apply_matrix(transform, (x, y));
+    Vertex { position: to_clip_space(tx, ty, canvas.0, canvas.1), color: [1.0, 1.0, 1.0, 1.0], uv: bbox.uv(x, y), grad }
+}
+
 fn stroke_path(path: &LyonPath, rgba: [f32; 4], width: f32, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
     let mut tess = StrokeTessellator::new();
     // BUGFIX: lyon's `StrokeOptions` is `#[non_exhaustive]` (confirmed
@@ -425,7 +514,7 @@ fn stroke_path(path: &LyonPath, rgba: [f32; 4], width: f32, transform: Matrix2D,
 
 fn vertex_from_point(x: f32, y: f32, color: [f32; 4], transform: Matrix2D, canvas: (f32, f32)) -> Vertex {
     let (tx, ty) = apply_matrix(transform, (x, y));
-    Vertex { position: to_clip_space(tx, ty, canvas.0, canvas.1), color }
+    Vertex::flat(to_clip_space(tx, ty, canvas.0, canvas.1), color)
 }
 
 fn apply_matrix(m: Matrix2D, p: (f32, f32)) -> (f32, f32) {

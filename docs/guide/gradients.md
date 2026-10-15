@@ -58,7 +58,7 @@ The defaults describe a circle that touches the edges of the bounding box. A foc
 
 A conic gradient sweeps the stops around the center. The sweep starts at the top and runs clockwise, like CSS `conic-gradient`. `angle` turns the start clockwise from the top, so `angle = 90` starts at the right edge. The angle is measured in the shape's own space, so a wide or tall bounding box does not stretch the sweep. Positions before the first stop take its color and positions after the last stop take that color.
 
-> **Limitation** The SVG format has no conic gradient, so the SVG renderer writes only a comment, and a fill that references one is not drawn. The CPU renderer draws it. The GPU renderer paints a flat color for now. Conic gradients are stored and round-trip through the binary format.
+> **Limitation** The SVG format has no conic gradient, so the SVG renderer writes only a comment, and a fill that references one is not drawn. The CPU and GPU renderers draw it. Conic gradients are stored and round-trip through the binary format.
 
 ## Stops
 
@@ -72,7 +72,7 @@ The `glow` gradient in the example fades from opaque to fully transparent by set
 
 ## Where it renders
 
-The SVG and CPU renderers interpolate linear and radial gradients, on fills and on strokes. The CPU renderer is also the only one that draws conic gradients. The GPU renderer paints a gradient reference as one flat color, the average of its stops, and does not interpolate across the shape yet.
+All three renderers interpolate linear and radial gradients, on fills and on strokes. The CPU and GPU renderers also draw conic gradients. The GPU renderer holds at most 32 stops per gradient and resamples a longer list to 32 evenly spaced stops, which softens any hard stop past that limit.
 
 Stop colors keep their own alpha, and the `opacity` of the element multiplies into it. To compare renderers, render the same file with `msx render` and `msx rasterize`.
 

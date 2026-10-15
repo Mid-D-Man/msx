@@ -13,9 +13,13 @@ msx-ast         = { workspace = true }
 msx-render-core = { workspace = true }
 msx-sdf         = { workspace = true }
 msx-splat       = { workspace = true }
+msx-text        = { workspace = true }
 wgpu            = { workspace = true }
 lyon            = { workspace = true }
 glam            = { workspace = true }
 bytemuck        = { workspace = true }
 pollster        = { workspace = true }
 image           = { workspace = true }
+
+[dev-dependencies]
+msx-render-cpu  = { workspace = true }

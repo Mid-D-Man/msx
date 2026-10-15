@@ -931,10 +931,10 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 |---|---|
 | rect, circle, ellipse, line, polygon, polyline | ✅ all three renderers (SVG/CPU/GPU) |
 | path (all SVG commands) | ✅ all three renderers |
-| text | ✅ SVG and CPU. The CPU renderer uses an embedded DejaVu Sans face and ignores `font_family`. The GPU renderer skips it |
+| text | ✅ SVG, CPU and GPU. The CPU and GPU renderers use an embedded DejaVu Sans face and ignore `font_family` |
 | group + transform | ✅ all three renderers |
-| linear, radial gradient | ✅ SVG and CPU interpolate, on fills and strokes. The GPU renderer paints one flat color, the average of the stops |
-| conic gradient | ⚠️ stored and round-tripped. CPU draws it, SVG draws nothing, GPU paints a flat color |
+| linear, radial gradient | ✅ interpolated on fills and strokes in SVG, CPU and GPU |
+| conic gradient | ⚠️ stored and round-tripped. CPU and GPU draw it, SVG draws nothing |
 | use (reference an element by id) | ✅ all three renderers |
 | SDF shape trees (circle/box/line/ring/arc + boolean combinators) | ✅ CPU, GPU · ❌ SVG (written as a comment) |
 | Gaussian splats | ✅ CPU, GPU · ⚠️ SVG approximates with a radial gradient |
@@ -949,7 +949,7 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 | Live GPU playback (shader `time` uniform driven continuously in the viewer) | ❌ not started — see `apps/msx-viewer/src/window.rs`'s module doc |
 | MBFA binary compression | ✅ |
 | SVG export | ✅ |
-| True per-element paint order within one Run (vector/SDF/splat interleaving) | ❌ still type-batched, not real document order — a real, identified, deliberately deferred gap |
+| Per-element paint order within one run (vector, SDF, splat, image interleaving) | ✅ document order on SVG, CPU and GPU. The GPU starts a new draw where the kind of element changes |
 | Pattern fills | ❌ |
 | clip-path / mask (beyond a Layer's own `clip: bool`, which only clips to the layer's own pixel footprint) | ❌ |
 | Font embedding | ❌ |

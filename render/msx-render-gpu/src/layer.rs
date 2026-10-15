@@ -93,13 +93,15 @@
 //!   own children performs a genuine recursive `render_layer` call at
 //!   that exact point, instead of being silently skipped.
 //!
-//! Ordering WITHIN one contiguous non-`Layer` run — vector shapes vs SDF
-//! nodes vs splats vs each other — is unaffected by any of this and
-//! remains type-batched (all vectors, then all shader fills, then all
-//! SDF, then all splats), not true per-element document order. That's a
-//! separate, pre-existing gap from this crate's very first version,
-//! independent of `Layer`/`z_index` entirely, deliberately not folded
-//! into this fix.
+//! Ordering WITHIN one contiguous non-`Layer` run follows document order
+//! too. `paint_order` ends a `Run` wherever the kind of leaf changes
+//! (vector shape, shader-filled shape, SDF node, splat, image), so every
+//! `Run` holds one kind and the fixed pass order inside `draw_run` can
+//! never reorder overlapping elements. A `Group` holding more than one
+//! kind is split out and walked element by element, the same way a
+//! `Group` holding a `Layer` is. Gradient fills stay in the vector kind,
+//! because the vector pipeline evaluates them per fragment (see
+//! `gradient.rs`).
 //!
 //! ## Shader and gradient fills inside a Layer
 //!
@@ -709,6 +711,57 @@ fn group_contains_layer(elements: &[Element]) -> bool {
     })
 }
 
+/// What kind of pass draws a leaf element. Elements of one kind can share a
+/// batched draw. A change of kind ends the current run, so overlapping
+/// elements of different kinds paint in document order.
+const KIND_VECTOR: u8 = 1;
+const KIND_SHADER_VECTOR: u8 = 2;
+const KIND_SDF: u8 = 4;
+const KIND_SPLAT: u8 = 8;
+const KIND_IMAGE: u8 = 16;
+
+/// Kind bit for a vector shape: a fill that resolves to a `Def::Shader`
+/// draws through the shader pipeline, everything else through the vector
+/// batch (gradient fills included).
+fn shape_kind(style: &msx_ast::Style, defs: &vector::Defs) -> u8 {
+    match style.fill.as_ref() {
+        Some(fill) if vector::resolve_shader_def(fill, defs).is_some() => KIND_SHADER_VECTOR,
+        _ => KIND_VECTOR,
+    }
+}
+
+/// Kind bits present in `elements`, reached through `Group` nesting only
+/// (a `Layer` is never a leaf here, `group_contains_layer` covers it).
+///
+/// A `use` counts as a vector shape. The SDF, splat and image passes do not
+/// follow `use`, so only the vector pass can draw one.
+fn kind_mask(elements: &[Element], defs: &vector::Defs) -> u8 {
+    elements
+        .iter()
+        .map(|el| match el {
+            Element::Rect(e) => shape_kind(&e.style, defs),
+            Element::Circle(e) => shape_kind(&e.style, defs),
+            Element::Ellipse(e) => shape_kind(&e.style, defs),
+            Element::Polyline(e) | Element::Polygon(e) => shape_kind(&e.style, defs),
+            Element::Path(e) => shape_kind(&e.style, defs),
+            Element::Text(e) => shape_kind(&e.style, defs),
+            Element::Line(_) | Element::Use(_) => KIND_VECTOR,
+            Element::Sdf(_) => KIND_SDF,
+            Element::Splat(_) => KIND_SPLAT,
+            Element::Image(_) => KIND_IMAGE,
+            Element::Group(g) => kind_mask(&g.children, defs),
+            Element::Layer(_) => 0,
+        })
+        .fold(0, |acc, bits| acc | bits)
+}
+
+/// A group has to be drawn element by element, through its own recursive
+/// `paint_order`, when it holds a `Layer` or more than one kind of leaf.
+/// Otherwise it stays inside its surrounding run.
+fn group_needs_split(children: &[Element], defs: &vector::Defs) -> bool {
+    group_contains_layer(children) || kind_mask(children, defs).count_ones() > 1
+}
+
 /// One step in a single sibling list's real final paint order — see
 /// `msx_ast::layer::layer_reordered`'s own doc for the reordering rule
 /// this is built directly on top of (a `Layer` only ever trades places
@@ -717,20 +770,20 @@ fn group_contains_layer(elements: &[Element]) -> bool {
 /// `msx-render-cpu` already do via that same function).
 enum PaintOp<'a> {
     /// A genuine slice of the ORIGINAL `elements` array passed to
-    /// `paint_order` — never a copy. Safe because of the invariant
-    /// above: a run of non-`Layer` siblings between two `Layer`-occupied
-    /// slots never moves, regardless of which `Layer` ends up assigned
-    /// to those slots after z_index reordering (confirmed directly
-    /// against `layer_reordered`'s real implementation: it starts as an
-    /// exact identity copy of references and only ever overwrites the
-    /// indices where a `Layer` originally sat).
+    /// `paint_order`, never a copy, holding leaves of ONE kind (see
+    /// `kind_mask`). Safe because of the invariant above: a non-`Layer`
+    /// sibling never moves, regardless of which `Layer` ends up assigned
+    /// to the neighboring slots after z_index reordering (confirmed
+    /// directly against `layer_reordered`'s real implementation: it starts
+    /// as an exact identity copy of references and only ever overwrites
+    /// the indices where a `Layer` originally sat).
     Run(&'a [Element]),
     Composite(&'a Layer),
-    /// A `Group`, at this exact position in the sibling list, whose
-    /// subtree contains a `Layer` somewhere (`group_contains_layer`) and
-    /// therefore can't be folded into a surrounding `Run`'s ordinary
-    /// tessellated batch. Recursed into via `render_ops`'s own
-    /// `paint_order(&group.children)` call, not tessellated here.
+    /// A `Group`, at this exact position in the sibling list, that cannot
+    /// be folded into a surrounding `Run`: it contains a `Layer`
+    /// somewhere, or more than one kind of leaf (`group_needs_split`).
+    /// Recursed into via `render_ops`'s own `paint_order(&group.children)`
+    /// call, not tessellated here.
     GroupSplit(&'a Group),
 }
 
@@ -741,34 +794,52 @@ enum PaintOp<'a> {
 /// resulting `Composite`/`GroupSplit` falls relative to its real
 /// non-`Layer` neighbors in THIS list.
 ///
+/// A `Run` ends wherever the kind of leaf changes, so a vector shape, an
+/// SDF node, a splat, an image and a shader fill each paint in the order
+/// the document lists them. An element with no leaves of its own (an empty
+/// group) joins whichever run it sits in.
+///
 /// `layer_reordered` only ever moves `Layer`-occupied slots (see its own
-/// doc); every `Group` slot — whether or not it needs `GroupSplit` — is
-/// therefore guaranteed to sit at the exact same index in `reordered` as
-/// in `elements`, the same invariant the existing `Run` slicing below
-/// already relies on for non-`Layer` elements generally.
-fn paint_order(elements: &[Element]) -> Vec<PaintOp<'_>> {
+/// doc); every `Group` slot is therefore guaranteed to sit at the exact
+/// same index in `reordered` as in `elements`.
+fn paint_order<'a>(elements: &'a [Element], defs: &vector::Defs) -> Vec<PaintOp<'a>> {
     let reordered = msx_ast::layer::layer_reordered(elements);
     debug_assert_eq!(reordered.len(), elements.len(), "layer_reordered must be a same-length permutation");
 
     let mut ops = Vec::new();
     let mut run_start = 0usize;
+    // Kind bits of the run being collected, 0 while it has no leaf yet.
+    let mut run_kind = 0u8;
     for (i, el) in reordered.iter().enumerate() {
+        let flush = |ops: &mut Vec<PaintOp<'a>>, run_start: usize| {
+            if run_start < i {
+                ops.push(PaintOp::Run(&elements[run_start..i]));
+            }
+        };
         match el {
             Element::Layer(layer) => {
-                if run_start < i {
-                    ops.push(PaintOp::Run(&elements[run_start..i]));
-                }
+                flush(&mut ops, run_start);
                 ops.push(PaintOp::Composite(layer));
                 run_start = i + 1;
+                run_kind = 0;
             }
-            Element::Group(g) if group_contains_layer(&g.children) => {
-                if run_start < i {
-                    ops.push(PaintOp::Run(&elements[run_start..i]));
-                }
+            Element::Group(g) if group_needs_split(&g.children, defs) => {
+                flush(&mut ops, run_start);
                 ops.push(PaintOp::GroupSplit(g));
                 run_start = i + 1;
+                run_kind = 0;
             }
-            _ => {}
+            _ => {
+                let bits = kind_mask(std::slice::from_ref(el), defs);
+                if bits == 0 {
+                    continue;
+                }
+                if run_kind != 0 && run_kind != bits {
+                    flush(&mut ops, run_start);
+                    run_start = i;
+                }
+                run_kind = bits;
+            }
         }
     }
     if run_start < elements.len() {
@@ -777,25 +848,15 @@ fn paint_order(elements: &[Element]) -> Vec<PaintOp<'_>> {
     ops
 }
 
-/// The vector → shader-fill → SDF → splat batch every non-Layer render
-/// path already did, unchanged internally, now scoped to one `Run`
-/// slice instead of a whole scene/layer's worth of elements at once, and
-/// parametrized on whether this batch clears `view` (only the very
-/// first thing painted into a given target should) or loads onto
-/// whatever a previous run or Layer composite already painted there.
+/// Draws one `Run`: its vector shapes, then shader fills, SDF nodes,
+/// splats and images, parametrized on whether this batch clears `view`
+/// (only the very first thing painted into a given target should) or loads
+/// onto whatever a previous run or Layer composite already painted there.
 ///
-/// NOTE on ordering WITHIN a run: this still draws all of this run's
-/// vector shapes, then all its shader fills, then all its SDF nodes,
-/// then all its splats — type-batched, same as before this fix, NOT
-/// true per-element document order between those types. That's a
-/// separate, pre-existing gap from day one of this crate (independent
-/// of Layers/z_index entirely — e.g. `sdf_splat_mixed.msx` orders its
-/// elements deliberately for z-order reasons per its own header comment,
-/// and this crate doesn't actually respect that ordering today). Fixing
-/// it would mean turning SDF/splat from "collect everything in this
-/// scope, one batched/instanced draw" into "draw one at a time,
-/// interleaved with vector" — a bigger, separate change with its own
-/// performance question, deliberately not folded into this fix.
+/// `paint_order` hands this a run holding leaves of one kind, so the fixed
+/// pass order here never reorders overlapping elements: only one of the
+/// passes has anything to draw. `index` resolves `use` targets across the
+/// whole sibling list, not just this run.
 #[allow(clippy::too_many_arguments)]
 fn draw_run(
     device: &wgpu::Device,
@@ -812,10 +873,11 @@ fn draw_run(
     masked_shader_composite: &MaskedShaderComposite,
     image_pipeline: &crate::image::ImagePipeline,
     defs: &vector::Defs,
+    index: &vector::ElementIndex,
     shader_base_dir: &std::path::Path,
     time: f32,
 ) {
-    let (geometry, shader_shapes) = vector::tessellate_elements_with_shaders(run, transform, canvas, defs);
+    let (geometry, shader_shapes) = vector::tessellate_elements_with_shaders_in(run, transform, canvas, defs, index);
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("msx render-ordered run encoder"),
@@ -885,7 +947,7 @@ pub(crate) fn render_ordered(
     // Unconditional up-front clear — see doc comment above for why this
     // can't just be "the first Run clears."
     {
-        let empty = vector::VectorGeometry { vertices: Vec::new(), indices: Vec::new() };
+        let empty = vector::VectorGeometry { vertices: Vec::new(), indices: Vec::new(), gradients: Vec::new() };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("msx render-ordered initial clear"),
         });
@@ -893,11 +955,15 @@ pub(crate) fn render_ordered(
         queue.submit(std::iter::once(encoder.finish()));
     }
 
+    // One index over the whole sibling list (and everything nested in it),
+    // so a `use` resolves even when its target ended up in another run.
+    let index = vector::ElementIndex::build(elements);
+
     render_ops(
         device, queue, target, elements, transform, canvas,
         layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
         shader_pipeline, masked_shader_composite, image_pipeline,
-        gpu_effects, defs, scene_defs, shader_base_dir, time,
+        gpu_effects, defs, &index, scene_defs, shader_base_dir, time,
     );
 }
 
@@ -939,13 +1005,14 @@ fn render_ops(
     image_pipeline: &crate::image::ImagePipeline,
     gpu_effects: &GpuEffects,
     defs: &vector::Defs,
+    index: &vector::ElementIndex,
     scene_defs: &[Def],
     shader_base_dir: &std::path::Path,
     time: f32,
 ) {
     let view = &target.view;
     let canvas_u32 = (canvas.0.round().max(1.0) as u32, canvas.1.round().max(1.0) as u32);
-    let ops = paint_order(elements);
+    let ops = paint_order(elements, defs);
 
     for op in &ops {
         match op {
@@ -953,7 +1020,7 @@ fn render_ops(
                 draw_run(
                     device, queue, view, run, transform, canvas, None,
                     vector_pipeline, sdf_pipeline, splat_pipeline, shader_pipeline,
-                    masked_shader_composite, image_pipeline, defs, shader_base_dir, time,
+                    masked_shader_composite, image_pipeline, defs, index, shader_base_dir, time,
                 );
             }
             PaintOp::Composite(layer) => {
@@ -970,7 +1037,7 @@ fn render_ops(
                     device, queue, target, &group.children, combined, canvas,
                     layer_compositor, vector_pipeline, sdf_pipeline, splat_pipeline,
                     shader_pipeline, masked_shader_composite, image_pipeline,
-                    gpu_effects, defs, scene_defs, shader_base_dir, time,
+                    gpu_effects, defs, index, scene_defs, shader_base_dir, time,
                 );
             }
         }
@@ -981,6 +1048,10 @@ fn render_ops(
 mod tests {
     use super::*;
     use msx_ast::{Element as MsxElement, Group, Rect, Style};
+
+    fn no_defs() -> vector::Defs<'static> {
+        vector::Defs::build(&[])
+    }
 
     fn rect() -> Element {
         MsxElement::Rect(Rect::new(0.0, 0.0, 1.0, 1.0, Style::default()))
@@ -1224,7 +1295,7 @@ mod tests {
         // tessellated inline by vector.rs's own Group-recursion).
         let group = Group::new(vec![rect(), rect()]);
         let elements = vec![rect(), MsxElement::Group(group), rect()];
-        let ops = paint_order(&elements);
+        let ops = paint_order(&elements, &no_defs());
         assert_eq!(ops.len(), 1, "a Layer-free Group must not be split out of its Run");
         assert_eq!(id_of_run(&ops[0]).len(), 3);
     }
@@ -1233,7 +1304,7 @@ mod tests {
     fn paint_order_splits_a_layer_containing_group_out_of_its_run() {
         let group = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
         let elements = vec![rect(), MsxElement::Group(group), rect()];
-        let ops = paint_order(&elements);
+        let ops = paint_order(&elements, &no_defs());
         assert_eq!(ops.len(), 3, "expected Run, GroupSplit, Run");
         assert_eq!(id_of_run(&ops[0]).len(), 1, "leading rect stays its own Run");
         assert!(matches!(ops[1], PaintOp::GroupSplit(_)));
@@ -1249,10 +1320,10 @@ mod tests {
         // no surrounding Run (nothing else in there to run).
         let group = Group::new(vec![MsxElement::Layer(Layer::new(vec![]))]);
         let elements = vec![MsxElement::Group(group)];
-        let ops = paint_order(&elements);
+        let ops = paint_order(&elements, &no_defs());
         assert_eq!(ops.len(), 1);
         let PaintOp::GroupSplit(g) = &ops[0] else { panic!("expected GroupSplit") };
-        let inner_ops = paint_order(&g.children);
+        let inner_ops = paint_order(&g.children, &no_defs());
         assert_eq!(inner_ops.len(), 1);
         assert!(matches!(inner_ops[0], PaintOp::Composite(_)));
     }
@@ -1275,12 +1346,110 @@ mod tests {
         // among the top-level Layers, exactly as layer_reordered dictates,
         // regardless of the GroupSplit sitting between them.
         let elements = vec![MsxElement::Layer(front), MsxElement::Group(group), MsxElement::Layer(back)];
-        let ops = paint_order(&elements);
+        let ops = paint_order(&elements, &no_defs());
         assert_eq!(ops.len(), 3);
         let PaintOp::Composite(first) = &ops[0] else { panic!("expected Composite first") };
         assert_eq!(first.id.as_deref(), Some("back"), "lower z_index must composite first");
         assert!(matches!(ops[1], PaintOp::GroupSplit(_)));
         let PaintOp::Composite(third) = &ops[2] else { panic!("expected Composite third") };
         assert_eq!(third.id.as_deref(), Some("front"));
+    }
+
+    // ── Document order across kinds of draw ─────────────────────────────
+
+    fn sdf() -> Element {
+        MsxElement::Sdf(msx_ast::SdfNode::new(
+            msx_ast::SdfTree::Circle { cx: 0.0, cy: 0.0, r: 1.0 },
+            msx_ast::Paint::Color(msx_ast::Color::WHITE),
+        ))
+    }
+
+    fn splat() -> Element {
+        MsxElement::Splat(msx_ast::GaussianSplat::circle(0.0, 0.0, 1.0, msx_ast::Color::WHITE, 1.0))
+    }
+
+    fn rect_filled_with(reference: &str) -> Element {
+        let style = Style { fill: Some(msx_ast::Paint::Ref(format!("url(#{reference})"))), ..Style::default() };
+        MsxElement::Rect(Rect::new(0.0, 0.0, 1.0, 1.0, style))
+    }
+
+    fn run_lens(ops: &[PaintOp]) -> Vec<usize> {
+        ops.iter().map(|op| id_of_run(op).len()).collect()
+    }
+
+    #[test]
+    fn paint_order_starts_a_new_run_where_the_kind_of_leaf_changes() {
+        let elements = vec![rect(), sdf(), rect()];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(run_lens(&ops), vec![1, 1, 1], "vector, SDF, vector must stay three separate runs");
+    }
+
+    #[test]
+    fn paint_order_keeps_neighbours_of_one_kind_in_one_run() {
+        let elements = vec![rect(), rect(), sdf(), sdf(), splat()];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(run_lens(&ops), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn paint_order_gives_a_shader_filled_shape_its_own_run() {
+        let defs_vec = vec![msx_ast::Def::Shader(msx_ast::ShaderDef::new("sh", "x.wgsl", msx_ast::Color::WHITE))];
+        let defs = vector::Defs::build(&defs_vec);
+        let elements = vec![rect(), rect_filled_with("sh"), rect()];
+        let ops = paint_order(&elements, &defs);
+        assert_eq!(run_lens(&ops), vec![1, 1, 1], "a shader fill draws in its own pass, so it ends the plain run");
+    }
+
+    #[test]
+    fn paint_order_treats_a_gradient_fill_as_a_plain_vector_shape() {
+        let defs_vec = vec![msx_ast::Def::LinearGradient(msx_ast::LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.0, vec![]))];
+        let defs = vector::Defs::build(&defs_vec);
+        let elements = vec![rect(), rect_filled_with("g"), rect()];
+        let ops = paint_order(&elements, &defs);
+        assert_eq!(run_lens(&ops), vec![3], "gradients share the vector batch, so they never split a run");
+    }
+
+    #[test]
+    fn paint_order_counts_use_and_text_as_vector_shapes() {
+        let u = MsxElement::Use(msx_ast::Use { href: "#a".into(), x: 0.0, y: 0.0, id: None, transform: None });
+        let t = MsxElement::Text(msx_ast::Text::new(0.0, 0.0, "x".into(), Style::default()));
+        let elements = vec![rect(), u, t, rect()];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(run_lens(&ops), vec![4]);
+    }
+
+    #[test]
+    fn paint_order_splits_a_group_that_mixes_kinds() {
+        let group = Group::new(vec![rect(), sdf(), rect()]);
+        let elements = vec![MsxElement::Group(group)];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(ops.len(), 1);
+        let PaintOp::GroupSplit(g) = &ops[0] else { panic!("a mixed-kind group must be split out") };
+        let inner = paint_order(&g.children, &no_defs());
+        assert_eq!(run_lens(&inner), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn paint_order_keeps_a_single_kind_group_inside_its_run() {
+        let group = Group::new(vec![sdf(), sdf()]);
+        let elements = vec![sdf(), MsxElement::Group(group), sdf()];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(run_lens(&ops), vec![3], "a group of one kind is just more of that kind");
+    }
+
+    #[test]
+    fn paint_order_lets_an_empty_group_join_the_surrounding_run() {
+        let elements = vec![rect(), MsxElement::Group(Group::new(vec![])), rect()];
+        let ops = paint_order(&elements, &no_defs());
+        assert_eq!(run_lens(&ops), vec![3]);
+    }
+
+    #[test]
+    fn paint_order_runs_are_slices_of_the_original_list_in_order() {
+        let elements = vec![rect(), sdf(), splat(), rect()];
+        let ops = paint_order(&elements, &no_defs());
+        let total: usize = run_lens(&ops).iter().sum();
+        assert_eq!(total, elements.len(), "no element is dropped or repeated");
+        assert_eq!(ops.len(), 4);
     }
 }

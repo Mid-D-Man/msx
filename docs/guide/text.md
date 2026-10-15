@@ -16,9 +16,9 @@ Text takes the usual `id` and `transform` fields and a `style`. The keys that sh
 
 ## Where text renders
 
-The SVG and CPU renderers draw text. The GPU renderer skips `text` elements for now.
+All three renderers draw text.
 
-The CPU renderer draws text as glyph outlines from one embedded face, DejaVu Sans, in regular and bold. The outlines go through the same path pipeline as any other shape, so fills, strokes and gradients all apply.
+The CPU and GPU renderers draw text as glyph outlines from one embedded face, DejaVu Sans, in regular and bold. The outlines go through the same path pipeline as any other shape, so fills, strokes and gradients all apply. The GPU renderer does not antialias, so its text edges are harder than the CPU renderer's.
 
 - `font_family` is ignored. Every text element uses DejaVu Sans.
 - Bold applies when `font_weight` is `bold` or a number of 600 or more.
@@ -30,7 +30,7 @@ A gradient on text maps onto the text box, which is the advance width of the str
 
 ## Baselines
 
-`y` is the alphabetic baseline unless `dominant_baseline` says otherwise. The CPU renderer reads these values: `middle`, `central`, `hanging`, `text-before-edge`, `text-top`, `text-after-edge`, `text-bottom` and `ideographic`. Any other value keeps the alphabetic baseline.
+`y` is the alphabetic baseline unless `dominant_baseline` says otherwise. The CPU and GPU renderers read these values: `middle`, `central`, `hanging`, `text-before-edge`, `text-top`, `text-after-edge`, `text-bottom` and `ideographic`. Any other value keeps the alphabetic baseline.
 
 > **Limitation** The binary format has no slot for `dominant_baseline`, so a compiled file loses it and its text sits on the alphabetic baseline.
 

@@ -41,10 +41,11 @@
 //! `layer::render_ordered` — see `layer.rs`'s module doc for the full
 //! reasoning and the two deliberate remaining scope boundaries
 //! (Group-nested Layers, nested Layers). Ordering WITHIN one contiguous
-//! non-`Layer` run is still type-batched (vector → shader fills → SDF →
-//! splat), not true per-element document order — a separate,
-//! pre-existing gap, also detailed in `layer.rs`'s module doc. `Text` is
-//! a deliberate no-op everywhere in this project.
+//! non-`Layer` run follows document order as well: the walk starts a new
+//! draw whenever the kind of element changes (see `layer::paint_order`).
+//! `Text` is drawn as glyph outlines from `msx-text` through the vector
+//! pipeline, and gradients are evaluated per fragment (see
+//! `gradient.rs`).
 //!
 //! `shader.rs` executes real WGSL for `Def::Shader` fills — on both
 //! top-level shapes and shapes inside a `Layer` now (`layer.rs` is given
@@ -57,9 +58,12 @@
 
 mod context;
 mod effects;
+mod gradient;
 mod image;
 mod layer;
 mod masked_shader_composite;
+#[cfg(test)]
+mod paint_tests;
 mod pipeline;
 mod sdf;
 mod sdf_shader;
@@ -76,6 +80,7 @@ pub use pipeline::VectorPipeline;
 pub use sdf::SdfPipeline;
 pub use splat::SplatPipeline;
 pub use target::OffscreenTarget;
+pub use gradient::GradientDesc;
 pub use vector::{tessellate_elements, tessellate_scene, Vertex, VectorGeometry};
 
 use std::path::Path;
@@ -158,10 +163,10 @@ impl GpuRenderer {
         // locally at their own nesting level before the level containing
         // them does, matching `msx-render-svg`/`msx-render-cpu`'s own
         // recursive-dispatch behavior. See `layer.rs`'s module doc and
-        // `render_ordered`'s own doc comment for the full reasoning, and
-        // the separate, pre-existing, NOT-fixed-here gap in ordering
-        // between vector/SDF/splat content within one contiguous
-        // non-Layer run.
+        // `render_ordered`'s own doc comment for the full reasoning.
+        // Elements of different kinds inside one non-Layer run also keep
+        // document order, because `paint_order` starts a new run where
+        // the kind changes.
         layer::render_ordered(
             &self.context.device,
             &self.context.queue,

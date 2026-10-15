@@ -15,12 +15,12 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Feature | SVG | CPU | GPU |
 |---|---|---|---|
 | Rect, circle, ellipse, line, polyline, polygon, path | yes | yes | yes |
-| Text | yes | yes, DejaVu Sans only | not drawn |
+| Text | yes | yes, DejaVu Sans only | yes, DejaVu Sans only |
 | Image | yes | yes | yes |
-| Group, use | yes | yes | yes |
+| Group, use | yes | yes | yes, but a `use` of an `sdf` node, splat or image draws nothing |
 | Group style reaching its children | yes | no | no |
-| Linear and radial gradients | interpolated | interpolated | one flat color |
-| Conic gradient | not drawn | yes | one flat color |
+| Linear and radial gradients | interpolated | interpolated | interpolated |
+| Conic gradient | not drawn | yes | yes |
 | Shader fills | `fallback_color` | `fallback_color` | runs the WGSL |
 | Signed distance fields | omitted | yes | yes |
 | Gaussian splats | approximated | yes | yes |
@@ -30,7 +30,7 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Viewbox | yes | no | no |
 | Keyframe animation | static frames | GIF | GIF |
 
-Where a gradient is not interpolated, the paint is the average of its stops. That applies to every gradient on the GPU renderer, and to gradient fills of `sdf` nodes and splats on the CPU and GPU renderers.
+Where a gradient is not interpolated, the paint is the average of its stops. That applies to gradient fills of `sdf` nodes and splats on the CPU and GPU renderers.
 
 ## Notes on each renderer
 
@@ -50,6 +50,9 @@ Where a gradient is not interpolated, the paint is the average of its stops. Tha
 
 ### GPU
 
+- Elements draw in document order. Neighboring elements of one kind (vector shape, shader fill, `sdf` node, splat, image) share one draw, and a new draw starts when the kind changes.
+- Shapes, text and gradients share one vertex batch. A gradient is evaluated per fragment from its bounding box, so it interpolates on fills and strokes, and a gradient holds at most 32 stops. A longer list is resampled to 32 evenly spaced stops, which softens any hard stop past that limit.
+- Text is drawn from the same embedded DejaVu Sans outlines as on the CPU renderer. Shape and text edges are not antialiased.
 - A shader fill runs for real on shapes, SDF nodes, splats and shapes inside layers. Shader strokes fall back to the flat color, and a shape's `opacity` is not multiplied into the shader output.
 - When the shader file cannot be read, the GPU renderer paints `fallback_color` and prints a line on the standard error stream.
 - Layers composite in an isolated buffer with all twelve blend modes, and `blur` is the one effect implemented.
