@@ -1,0 +1,17 @@
+# core/msx-svg-import/Cargo.toml
+[package]
+name        = "msx-svg-import"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SVG importer: reads an .svg file into an MSX scene"
+publish     = false
+
+[dependencies]
+msx-ast    = { workspace = true }
+msx-text   = { workspace = true }
+roxmltree  = "0.20"
+
+[dev-dependencies]
+msx-parser = { workspace = true }

@@ -349,8 +349,14 @@ fn build_msx_path(p: &msx_ast::Path) -> Option<SkPath> {
     let mut pb = PathBuilder::new();
     let mut current = (0.0f32, 0.0f32);
     let mut start = (0.0f32, 0.0f32);
+    // Control points of the previous curve, for the reflection that S and T
+    // use. They only carry over to the very next command.
+    let mut prev_c: Option<(f32, f32)> = None;
+    let mut prev_q: Option<(f32, f32)> = None;
+    let reflect = |ctl: Option<(f32, f32)>, cur: (f32, f32)| ctl.map_or(cur, |c| (2.0 * cur.0 - c.0, 2.0 * cur.1 - c.1));
 
     for cmd in &p.commands {
+        let (pc, pq) = (prev_c.take(), prev_q.take());
         match cmd {
             PathCommand::MoveTo(pt) => {
                 current = (pt.x as f32, pt.y as f32);
@@ -371,18 +377,24 @@ fn build_msx_path(p: &msx_ast::Path) -> Option<SkPath> {
             }
             PathCommand::CubicBezier { c1, c2, to } => {
                 pb.cubic_to(c1.x as f32, c1.y as f32, c2.x as f32, c2.y as f32, to.x as f32, to.y as f32);
+                prev_c = Some((c2.x as f32, c2.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::QuadBezier { c, to } => {
                 pb.quad_to(c.x as f32, c.y as f32, to.x as f32, to.y as f32);
+                prev_q = Some((c.x as f32, c.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::SmoothCubic { c2, to } => {
-                pb.cubic_to(current.0, current.1, c2.x as f32, c2.y as f32, to.x as f32, to.y as f32);
+                let c1 = reflect(pc, current);
+                pb.cubic_to(c1.0, c1.1, c2.x as f32, c2.y as f32, to.x as f32, to.y as f32);
+                prev_c = Some((c2.x as f32, c2.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::SmoothQuad { to } => {
-                pb.quad_to(current.0, current.1, to.x as f32, to.y as f32);
+                let c = reflect(pq, current);
+                pb.quad_to(c.0, c.1, to.x as f32, to.y as f32);
+                prev_q = Some(c);
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::Arc { rx, ry, x_rotation, large_arc, sweep, to } => {
@@ -416,23 +428,29 @@ fn build_msx_path(p: &msx_ast::Path) -> Option<SkPath> {
                 let c2p = (current.0 + c2.x as f32, current.1 + c2.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
                 pb.cubic_to(c1p.0, c1p.1, c2p.0, c2p.1, to_pt.0, to_pt.1);
+                prev_c = Some(c2p);
                 current = to_pt;
             }
             PathCommand::RelQuadBezier { c, to } => {
                 let cp = (current.0 + c.x as f32, current.1 + c.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
                 pb.quad_to(cp.0, cp.1, to_pt.0, to_pt.1);
+                prev_q = Some(cp);
                 current = to_pt;
             }
             PathCommand::RelSmoothCubic { c2, to } => {
                 let c2p = (current.0 + c2.x as f32, current.1 + c2.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
-                pb.cubic_to(current.0, current.1, c2p.0, c2p.1, to_pt.0, to_pt.1);
+                let c1 = reflect(pc, current);
+                pb.cubic_to(c1.0, c1.1, c2p.0, c2p.1, to_pt.0, to_pt.1);
+                prev_c = Some(c2p);
                 current = to_pt;
             }
             PathCommand::RelSmoothQuad { to } => {
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
-                pb.quad_to(current.0, current.1, to_pt.0, to_pt.1);
+                let c = reflect(pq, current);
+                pb.quad_to(c.0, c.1, to_pt.0, to_pt.1);
+                prev_q = Some(c);
                 current = to_pt;
             }
             PathCommand::RelArc { rx, ry, x_rotation, large_arc, sweep, to } => {

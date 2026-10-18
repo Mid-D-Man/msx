@@ -54,6 +54,8 @@ PAGES = [
      "Style keys, defaults, paint values and which renderer honors what."),
     ("author", "transforms", "Transforms",
      "The three accepted transform shapes and the order a chain applies in."),
+    ("author", "svg-import", "Importing SVG",
+     "Reading an SVG file into MSX source, what the importer resolves and what it reports."),
     ("elements", "elements-overview", "Element overview",
      "All fourteen element types at a glance, with required fields and renderer support."),
     ("elements", "shapes", "Basic shapes",

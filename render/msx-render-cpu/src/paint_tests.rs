@@ -252,3 +252,45 @@ fn document_order_sdf_after_rect_wins_the_overlap() {
     let p = render_to_pixmap(&scene(100.0, 100.0, vec![], vec![red_cover(), green_sdf_circle()]));
     assert_eq!(px(&p, 50, 50), [0, 255, 0, 255]);
 }
+
+// ── Smooth curves ────────────────────────────────────────────────────────────
+
+fn path_el(d: &str, style: Style) -> Element {
+    Element::Path(msx_ast::Path { commands: msx_ast::path::parse_d(d).unwrap(), d_raw: d.to_string(), id: None, transform: None, style })
+}
+
+#[test]
+fn smooth_quad_reflects_the_previous_control_point() {
+    // The second T reflects the first one's control point (30, 30) about
+    // (40, 140), which is (50, 250). Its curve passes (77.5, 167.5). With the
+    // control left at the current point it would be a straight line, which
+    // stays near y = 108 at that x.
+    let style = Style { stroke_width: Some(4.0), ..stroke_style(Paint::Color(Color::rgb(0, 128, 0)), 4.0) };
+    let p = render_to_pixmap(&scene(200.0, 200.0, vec![], vec![path_el("M 30 30 T 40 140 T 170 30", style)]));
+    assert!(px(&p, 77, 167)[3] > 100, "the curved segment must pass through (77, 167)");
+    assert_eq!(px(&p, 77, 108)[3], 0, "a straight segment would pass here");
+}
+
+#[test]
+fn smooth_cubic_reflects_the_previous_control_point() {
+    // After C ... 100 20 100 100, the S reflects (100, 20) about (100, 100)
+    // to (100, 180), so the second curve bulges down through (140, 160).
+    let style = Style { stroke_width: Some(4.0), ..stroke_style(Paint::Color(Color::rgb(0, 128, 0)), 4.0) };
+    let d = "M 20 100 C 20 20 100 20 100 100 S 180 180 180 100";
+    let p = render_to_pixmap(&scene(200.0, 200.0, vec![], vec![path_el(d, style.clone())]));
+    assert!(px(&p, 140, 160)[3] > 100, "the reflected control point bulges the curve down");
+    assert_eq!(px(&p, 140, 130)[3], 0);
+    let rel = "m 20 100 c 0 -80 80 -80 80 0 s 80 80 80 0";
+    let q = render_to_pixmap(&scene(200.0, 200.0, vec![], vec![path_el(rel, style)]));
+    assert!(px(&q, 140, 160)[3] > 100, "relative commands reflect too");
+}
+
+#[test]
+fn a_smooth_command_after_a_non_curve_uses_the_current_point() {
+    // S after L has no control point to reflect, so the first control is the
+    // current point and the segment starts straight along the line.
+    let style = Style { stroke_width: Some(2.0), ..stroke_style(Paint::Color(Color::rgb(0, 128, 0)), 2.0) };
+    let p = render_to_pixmap(&scene(100.0, 100.0, vec![], vec![path_el("M 10 50 L 50 50 S 90 50 90 10", style)]));
+    assert!(px(&p, 30, 50)[3] > 100);
+    assert!(px(&p, 70, 49)[3] > 0 || px(&p, 70, 45)[3] > 0 || px(&p, 70, 40)[3] > 0, "the curve then rises toward (90, 10)");
+}

@@ -28,6 +28,7 @@ pub mod sdf;
 pub mod splat;
 pub mod style;
 pub mod transform;
+pub mod writer;
 
 pub use animation::{parse_animations, parse_duration, parse_loop_mode};
 pub use canvas::parse_canvas;
@@ -38,6 +39,7 @@ pub use sdf::parse_sdf_node;
 pub use splat::parse_splat;
 pub use style::parse_style;
 pub use transform::parse_transform;
+pub use writer::{scene_to_msx, WriteError};
 
 use dixscript::Runtime::{DixData, DixLoadOptions, DixLoader};
 use msx_ast::Scene;

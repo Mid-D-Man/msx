@@ -1,6 +1,6 @@
 # Command line reference
 
-The `msx` tool is built from `apps/msx-cli`. Every command that takes an input accepts a DixScript source file or a compiled binary. The tool detects the form from the magic bytes at the start of the file.
+The `msx` tool is built from `apps/msx-cli`. Every command that takes an input accepts a DixScript source file, a compiled binary or an SVG file. The tool detects the form from the start of the file, and imports an SVG as described in [Importing SVG](svg-import.md).
 
 ```bash
 cargo run --release -- <command> [arguments]
@@ -19,6 +19,7 @@ Two commands, `rasterize-gpu` and `animate-gpu`, exist only in a build made with
 | `rasterize-gpu` | Writes a PNG with the GPU renderer |
 | `animate` | Writes an animated GIF with the CPU renderer |
 | `animate-gpu` | Writes an animated GIF with the GPU renderer |
+| `import` | Reads an SVG file and writes `.msx` source |
 | `info` | Prints statistics for a file |
 | `validate` | Parses and checks a source file |
 | `roundtrip` | Checks source to binary to decoded output |
@@ -80,6 +81,14 @@ msx info <input>
 ```
 
 Prints the canvas size, background, element counts and def count. For a binary file it also prints the version, whether it is compressed, and the size.
+
+## import
+
+```bash
+msx import <input.svg> [-o <output.msx>]
+```
+
+Reads an SVG file and writes it as editable source. The output defaults to the input path with a `.msx` extension, and the command refuses to overwrite its own input. Features of the SVG that MSX cannot express are listed as warnings on stderr.
 
 ## validate
 

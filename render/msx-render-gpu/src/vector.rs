@@ -633,6 +633,11 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
     let mut current = (0.0f32, 0.0f32);
     let mut start = (0.0f32, 0.0f32);
     let mut open = false;
+    // Control points of the previous curve, for the reflection that S and T
+    // use. They only carry over to the very next command.
+    let mut prev_c: Option<(f32, f32)> = None;
+    let mut prev_q: Option<(f32, f32)> = None;
+    let reflect = |ctl: Option<(f32, f32)>, cur: (f32, f32)| ctl.map_or(cur, |c| (2.0 * cur.0 - c.0, 2.0 * cur.1 - c.1));
 
     macro_rules! ensure_open {
         () => {
@@ -644,6 +649,7 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
     }
 
     for cmd in &p.commands {
+        let (pc, pq) = (prev_c.take(), prev_q.take());
         match cmd {
             PathCommand::MoveTo(pt) => {
                 if open { b.end(false); }
@@ -670,21 +676,27 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
             PathCommand::CubicBezier { c1, c2, to } => {
                 ensure_open!();
                 b.cubic_bezier_to(point(c1.x as f32, c1.y as f32), point(c2.x as f32, c2.y as f32), point(to.x as f32, to.y as f32));
+                prev_c = Some((c2.x as f32, c2.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::QuadBezier { c, to } => {
                 ensure_open!();
                 b.quadratic_bezier_to(point(c.x as f32, c.y as f32), point(to.x as f32, to.y as f32));
+                prev_q = Some((c.x as f32, c.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::SmoothCubic { c2, to } => {
                 ensure_open!();
-                b.cubic_bezier_to(point(current.0, current.1), point(c2.x as f32, c2.y as f32), point(to.x as f32, to.y as f32));
+                let c1 = reflect(pc, current);
+                b.cubic_bezier_to(point(c1.0, c1.1), point(c2.x as f32, c2.y as f32), point(to.x as f32, to.y as f32));
+                prev_c = Some((c2.x as f32, c2.y as f32));
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::SmoothQuad { to } => {
                 ensure_open!();
-                b.quadratic_bezier_to(point(current.0, current.1), point(to.x as f32, to.y as f32));
+                let c = reflect(pq, current);
+                b.quadratic_bezier_to(point(c.0, c.1), point(to.x as f32, to.y as f32));
+                prev_q = Some(c);
                 current = (to.x as f32, to.y as f32);
             }
             PathCommand::Arc { rx, ry, x_rotation, large_arc, sweep, to } => {
@@ -725,6 +737,7 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
                 let c2p = point(current.0 + c2.x as f32, current.1 + c2.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
                 b.cubic_bezier_to(c1p, c2p, point(to_pt.0, to_pt.1));
+                prev_c = Some((c2p.x, c2p.y));
                 current = to_pt;
             }
             PathCommand::RelQuadBezier { c, to } => {
@@ -732,19 +745,24 @@ fn msx_path_to_lyon(p: &msx_ast::Path) -> LyonPath {
                 let cp = point(current.0 + c.x as f32, current.1 + c.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
                 b.quadratic_bezier_to(cp, point(to_pt.0, to_pt.1));
+                prev_q = Some((cp.x, cp.y));
                 current = to_pt;
             }
             PathCommand::RelSmoothCubic { c2, to } => {
                 ensure_open!();
                 let c2p = point(current.0 + c2.x as f32, current.1 + c2.y as f32);
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
-                b.cubic_bezier_to(point(current.0, current.1), c2p, point(to_pt.0, to_pt.1));
+                let c1 = reflect(pc, current);
+                b.cubic_bezier_to(point(c1.0, c1.1), c2p, point(to_pt.0, to_pt.1));
+                prev_c = Some((c2p.x, c2p.y));
                 current = to_pt;
             }
             PathCommand::RelSmoothQuad { to } => {
                 ensure_open!();
                 let to_pt = (current.0 + to.x as f32, current.1 + to.y as f32);
-                b.quadratic_bezier_to(point(current.0, current.1), point(to_pt.0, to_pt.1));
+                let c = reflect(pq, current);
+                b.quadratic_bezier_to(point(c.0, c.1), point(to_pt.0, to_pt.1));
+                prev_q = Some(c);
                 current = to_pt;
             }
             PathCommand::RelArc { rx, ry, x_rotation, large_arc, sweep, to } => {
@@ -974,4 +992,21 @@ mod shader_routing_tests {
         assert!(geometry.vertices.is_empty(), "a shader-ref shape must NOT land in the flat batch once a collector is available");
         assert_eq!(shader_shapes.len(), 1, "the shader-ref shape must be diverted into shader_shapes instead");
     }
-                }
+                
+
+    #[test]
+    fn smooth_curves_reflect_the_previous_control_point() {
+        use lyon::algorithms::aabb::bounding_box;
+        let lyon_bottom = |d: &str| {
+            let path = msx_ast::Path { commands: msx_ast::path::parse_d(d).unwrap(), d_raw: d.to_string(), id: None, transform: None, style: Style::default() };
+            bounding_box(msx_path_to_lyon(&path).iter()).max.y
+        };
+        // The reflected quad control (50, 250) pulls the second T segment down
+        // to about y = 167. Left at the current point it would stay a line.
+        assert!(lyon_bottom("M 30 30 T 40 140 T 170 30") > 160.0);
+        // S reflects (100, 20) about (100, 100) to (100, 180).
+        assert!(lyon_bottom("M 20 100 C 20 20 100 20 100 100 S 180 180 180 100") > 155.0);
+        assert!(lyon_bottom("m 20 100 c 0 -80 80 -80 80 0 s 80 80 80 0") > 155.0);
+        assert!(lyon_bottom("m 20 100 q 40 -80 80 0 t 80 0") > 100.0 - 1.0);
+    }
+}

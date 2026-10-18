@@ -68,13 +68,38 @@ pub fn commands_to_d(cmds: &[PathCommand]) -> String {
 
 /// Parse SVG `d` string into path commands.
 pub fn parse_d(d: &str) -> Result<Vec<PathCommand>, String> {
+    let (cmds, err) = parse_d_partial(d);
+    match err {
+        Some(e) => Err(e),
+        None => Ok(cmds),
+    }
+}
+
+/// Lenient form of [`parse_d`]: returns every command parsed before the
+/// first error, plus that error. SVG renders a path up to its first
+/// error, so an importer wants the commands that did parse.
+pub fn parse_d_partial(d: &str) -> (Vec<PathCommand>, Option<String>) {
     let mut cmds = Vec::new();
+    let err = parse_into(d, &mut cmds).err();
+    (cmds, err)
+}
+
+fn parse_into(d: &str, cmds: &mut Vec<PathCommand>) -> Result<(), String> {
     let mut tok = Tokenizer::new(d);
 
     while let Some(letter) = tok.next_letter() {
         match letter {
-            'M' => loop { let (x,y) = tok.xy()?; cmds.push(PathCommand::MoveTo(Point::new(x,y))); if !tok.has_number() { break; } },
-            'm' => loop { let (x,y) = tok.xy()?; cmds.push(PathCommand::RelMoveTo(Point::new(x,y))); if !tok.has_number() { break; } },
+            // Extra coordinate pairs after a moveto are implicit linetos.
+            'M' => {
+                let (x, y) = tok.xy()?;
+                cmds.push(PathCommand::MoveTo(Point::new(x, y)));
+                while tok.has_number() { let (x, y) = tok.xy()?; cmds.push(PathCommand::LineTo(Point::new(x, y))); }
+            }
+            'm' => {
+                let (x, y) = tok.xy()?;
+                cmds.push(PathCommand::RelMoveTo(Point::new(x, y)));
+                while tok.has_number() { let (x, y) = tok.xy()?; cmds.push(PathCommand::RelLineTo(Point::new(x, y))); }
+            }
             'L' => loop { let (x,y) = tok.xy()?; cmds.push(PathCommand::LineTo(Point::new(x,y))); if !tok.has_number() { break; } },
             'l' => loop { let (x,y) = tok.xy()?; cmds.push(PathCommand::RelLineTo(Point::new(x,y))); if !tok.has_number() { break; } },
             'H' => loop { cmds.push(PathCommand::HLineTo(tok.f()?)); if !tok.has_number() { break; } },
@@ -101,7 +126,7 @@ pub fn parse_d(d: &str) -> Result<Vec<PathCommand>, String> {
             other => return Err(format!("unknown path command '{}'", other)),
         }
     }
-    Ok(cmds)
+    Ok(())
 }
 
 fn parse_arc(tok: &mut Tokenizer, relative: bool) -> Result<PathCommand, String> {
@@ -132,17 +157,32 @@ impl<'a> Tokenizer<'a> {
         if b.is_ascii_alphabetic() { self.cur += 1; Some(b) } else { None }
     }
 
+    /// One number: optional sign, digits with at most one decimal point,
+    /// optional exponent. A second `.` starts the next number, so `0.5.5`
+    /// is two numbers, as the SVG grammar requires.
     fn f(&mut self) -> Result<f64, String> {
         self.skip();
         let start = self.cur;
-        if self.cur < self.src.len() && matches!(self.src[self.cur], b'-' | b'+') { self.cur += 1; }
-        while self.cur < self.src.len() && (self.src[self.cur].is_ascii_digit() || self.src[self.cur] == b'.') { self.cur += 1; }
-        if self.cur < self.src.len() && matches!(self.src[self.cur], b'e' | b'E') {
-            self.cur += 1;
-            if self.cur < self.src.len() && matches!(self.src[self.cur], b'-' | b'+') { self.cur += 1; }
-            while self.cur < self.src.len() && self.src[self.cur].is_ascii_digit() { self.cur += 1; }
+        let at = |i: usize| self.src.get(i).copied();
+        let mut i = self.cur;
+        if matches!(at(i), Some(b'-') | Some(b'+')) { i += 1; }
+        let mut digits = 0;
+        while matches!(at(i), Some(b'0'..=b'9')) { i += 1; digits += 1; }
+        if at(i) == Some(b'.') {
+            i += 1;
+            while matches!(at(i), Some(b'0'..=b'9')) { i += 1; digits += 1; }
         }
-        std::str::from_utf8(&self.src[start..self.cur]).ok()
+        if digits == 0 { return Err(format!("expected number at byte {}", start)); }
+        if matches!(at(i), Some(b'e') | Some(b'E')) {
+            let mut j = i + 1;
+            if matches!(at(j), Some(b'-') | Some(b'+')) { j += 1; }
+            if matches!(at(j), Some(b'0'..=b'9')) {
+                while matches!(at(j), Some(b'0'..=b'9')) { j += 1; }
+                i = j;
+            }
+        }
+        self.cur = i;
+        std::str::from_utf8(&self.src[start..i]).ok()
             .and_then(|s| s.parse::<f64>().ok())
             .ok_or_else(|| format!("expected number at byte {}", start))
     }
@@ -184,6 +224,59 @@ mod tests {
             assert!(!large_arc);
             assert!(*sweep);
         }
+    }
+
+    #[test]
+    fn second_decimal_point_starts_a_new_number() {
+        let cmds = parse_d("M0.5.5 L.5.25").unwrap();
+        assert_eq!(cmds, vec![
+            PathCommand::MoveTo(Point::new(0.5, 0.5)),
+            PathCommand::LineTo(Point::new(0.5, 0.25)),
+        ]);
+    }
+
+    #[test]
+    fn signs_and_exponents_separate_numbers() {
+        assert_eq!(parse_d("M1-1").unwrap(), vec![PathCommand::MoveTo(Point::new(1.0, -1.0))]);
+        assert_eq!(parse_d("M1e2 3E-1").unwrap(), vec![PathCommand::MoveTo(Point::new(100.0, 0.3))]);
+        assert_eq!(parse_d("M+5 +6").unwrap(), vec![PathCommand::MoveTo(Point::new(5.0, 6.0))]);
+    }
+
+    #[test]
+    fn extra_pairs_after_a_moveto_are_implicit_linetos() {
+        let abs = parse_d("M 10 10 20 20 30 30").unwrap();
+        assert_eq!(abs, vec![
+            PathCommand::MoveTo(Point::new(10.0, 10.0)),
+            PathCommand::LineTo(Point::new(20.0, 20.0)),
+            PathCommand::LineTo(Point::new(30.0, 30.0)),
+        ]);
+        let rel = parse_d("m 1 1 2 2").unwrap();
+        assert_eq!(rel, vec![
+            PathCommand::RelMoveTo(Point::new(1.0, 1.0)),
+            PathCommand::RelLineTo(Point::new(2.0, 2.0)),
+        ]);
+    }
+
+    #[test]
+    fn compact_arc_flags_are_single_characters() {
+        let cmds = parse_d("M0 0A2 2 0 012 3").unwrap();
+        assert_eq!(cmds[1], PathCommand::Arc { rx: 2.0, ry: 2.0, x_rotation: 0.0, large_arc: false, sweep: true, to: Point::new(2.0, 3.0) });
+    }
+
+    #[test]
+    fn partial_parse_keeps_the_commands_before_the_error() {
+        let (cmds, err) = parse_d_partial("M 0 0 L 10 10 L 5");
+        assert_eq!(cmds.len(), 2);
+        assert!(err.is_some());
+        assert!(parse_d("M 0 0 L 10 10 L 5").is_err());
+
+        let (cmds, err) = parse_d_partial("M 0 0 x");
+        assert_eq!(cmds.len(), 1);
+        assert!(err.unwrap().contains("unknown path command"));
+
+        let (cmds, err) = parse_d_partial("M 0 0 L 1 1");
+        assert_eq!(cmds.len(), 2);
+        assert!(err.is_none());
     }
 
     #[test]

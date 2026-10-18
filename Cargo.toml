@@ -6,6 +6,7 @@ members = [
     "core/msx-anim",
     "core/msx-binary",
     "core/msx-parser",
+    "core/msx-svg-import",
     "render/msx-render-core",
     "render/msx-render-svg",
     "render/msx-render-cpu",
@@ -30,6 +31,7 @@ msx-ast         = { path = "core/msx-ast" }
 msx-anim        = { path = "core/msx-anim" }
 msx-binary      = { path = "core/msx-binary" }
 msx-parser      = { path = "core/msx-parser" }
+msx-svg-import = { path = "core/msx-svg-import" }
 msx-render-core = { path = "render/msx-render-core" }
 msx-render-svg  = { path = "render/msx-render-svg" }
 msx-render-cpu  = { path = "render/msx-render-cpu" }

@@ -96,6 +96,15 @@ enum Command {
         #[arg(long)]
         no_loop: bool,
     },
+    /// Import an SVG file and write it as editable .msx source. Anything in
+    /// the SVG that MSX cannot express yet is listed as a warning on stderr.
+    /// The other commands also accept an .svg file directly.
+    Import {
+        input: PathBuf,
+        /// Defaults to the input path with a .msx extension.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Print canvas/element/def stats for an .msx file (source or binary).
     Info { input: PathBuf },
     /// Parse + schema-validate DixScript source only; exit code reflects success.
@@ -140,6 +149,7 @@ fn main() {
         #[cfg(feature = "gpu")]
         Command::AnimateGpu { input, output, fps, duration, no_loop } =>
             cmd_animate_gpu(input, output.as_deref(), *fps, *duration, *no_loop),
+        Command::Import { input, output } => cmd_import(input, output.as_deref()),
         Command::Info { input } => cmd_info(input),
         Command::Validate { input } => cmd_validate(input),
         Command::Roundtrip { input } => cmd_roundtrip(input),
@@ -460,6 +470,32 @@ fn cmd_info(input: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_import(input: &Path, output: Option<&Path>) -> Result<(), String> {
+    let source = std::fs::read_to_string(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
+    let imported = msx_svg_import::import_svg(&source).map_err(|e| format!("{}: {}", input.display(), e))?;
+    let text = msx_parser::scene_to_msx(&imported.scene).map_err(|e| e.to_string())?;
+
+    let out = output.map(Path::to_path_buf).unwrap_or_else(|| input.with_extension("msx"));
+    if out == input {
+        return Err(format!("refusing to overwrite the input file {}", input.display()));
+    }
+    std::fs::write(&out, text).map_err(|e| format!("failed to write {}: {}", out.display(), e))?;
+
+    for w in &imported.warnings {
+        eprintln!("warning: {w}");
+    }
+    println!(
+        "Wrote {} ({}x{}, {} element(s), {} def(s), {} warning(s))",
+        out.display(),
+        imported.scene.canvas.width,
+        imported.scene.canvas.height,
+        imported.scene.elements.len(),
+        imported.scene.defs.len(),
+        imported.warnings.len()
+    );
+    Ok(())
+}
+
 fn cmd_validate(input: &Path) -> Result<(), String> {
     let source = std::fs::read_to_string(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
     let scene = msx_parser::parse_scene(&source)?;
@@ -644,6 +680,15 @@ fn load_scene_bytes(bytes: &[u8]) -> Result<Scene, String> {
         msx_binary::decode(bytes).map_err(|e| format!("binary decode failed: {}", e))
     } else {
         let source = std::str::from_utf8(bytes).map_err(|_| "input is not valid UTF-8 DixScript source".to_string())?;
+        // DixScript starts with `@CONFIG` or a `//` comment, never with `<`,
+        // so a leading `<` (XML declaration or root element) means SVG.
+        if source.trim_start_matches('\u{feff}').trim_start().starts_with('<') {
+            let imported = msx_svg_import::import_svg(source).map_err(|e| e.to_string())?;
+            for w in &imported.warnings {
+                eprintln!("warning: {w}");
+            }
+            return Ok(imported.scene);
+        }
         msx_parser::parse_scene(source)
     }
 }
@@ -700,6 +745,32 @@ mod tests {
 "#;
         let scene = load_scene_bytes(src.as_bytes()).expect("source should parse");
         assert!((scene.canvas.width - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_scene_bytes_imports_svg() {
+        let svg = r##"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="5" height="5" fill="#ff0000"/></svg>"##;
+        let scene = load_scene_bytes(svg.as_bytes()).expect("svg should import");
+        assert_eq!((scene.canvas.width, scene.canvas.height, scene.elements.len()), (20.0, 10.0, 1));
+        let with_bom = format!("\u{feff}\n  {svg}");
+        assert!(load_scene_bytes(with_bom.as_bytes()).is_ok(), "a BOM and leading whitespace are fine");
+        assert!(load_scene_bytes(b"<html/>").is_err(), "XML that is not an SVG is rejected");
+    }
+
+    #[test]
+    fn cmd_import_writes_source_that_parses_back() {
+        let dir = std::env::temp_dir().join(format!("msx-import-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg = dir.join("icon.svg");
+        std::fs::write(&svg, r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#000" stroke-width="2"/></svg>"##).unwrap();
+
+        cmd_import(&svg, None).expect("import should succeed");
+        let written = std::fs::read_to_string(dir.join("icon.msx")).expect("default output is next to the input");
+        let scene = msx_parser::parse_scene(&written).expect("written source parses");
+        assert_eq!(scene.elements.len(), 1);
+
+        assert!(cmd_import(&svg, Some(&svg)).is_err(), "refuses to overwrite its input");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
