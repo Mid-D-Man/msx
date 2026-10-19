@@ -37,7 +37,7 @@ thread_local! {
     /// The scene `render_and_inspect` parsed last. `render_frame` and
     /// `local_time` read it, so playback re-renders a frame without
     /// parsing the source again. WASM here is single threaded.
-    static LOADED: RefCell<Option<Scene>> = RefCell::new(None);
+    static LOADED: RefCell<Option<Scene>> = const { RefCell::new(None) };
 }
 
 /// Parses `source` and renders it straight to SVG — the minimal single-
@@ -93,10 +93,7 @@ pub fn render_and_inspect(source: &str) -> Result<String, JsValue> {
     let roundtrip_svg = msx::render(&decoded);
     let roundtrip_ok = svg == roundtrip_svg;
 
-    let svg_escaped = svg
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
+    let svg_escaped = json_escape(&svg);
 
     let animated = !scene.animations.is_empty();
     let duration = scene.effective_duration();
@@ -116,6 +113,76 @@ pub fn render_and_inspect(source: &str) -> Result<String, JsValue> {
 
     LOADED.with(|cell| *cell.borrow_mut() = Some(scene));
     Ok(json)
+}
+
+/// Escapes `s` for use inside a JSON string literal: backslash, double
+/// quote and every control character below U+0020.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Imports an SVG document and returns one JSON string for the converter
+/// page: the `.msx` source the writer produced, an SVG render of that
+/// source parsed back (what the file will really look like), the importer
+/// warnings, and a few sizes.
+///
+/// Fields:
+/// - `msx`: the scene as `.msx` source text, from `msx_parser::scene_to_msx`
+/// - `svg`: the render of `msx` after parsing it again, so the preview shows
+///   the written file and not the in-memory scene
+/// - `warnings`: every importer warning, in order
+/// - `svg_bytes` / `msx_bytes`: input size and output source size
+/// - `element_count`: top level elements of the imported scene
+/// - `reparse_matches`: whether rendering the in-memory scene gives the same
+///   SVG as rendering the reparsed source (a writer or parser gap shows here)
+///
+/// Errors are plain strings: invalid XML, not an SVG, content the writer
+/// cannot express yet, or a written file that does not parse.
+#[wasm_bindgen]
+pub fn import_svg(svg: &str) -> Result<String, JsValue> {
+    let imported = msx_svg_import::import_svg(svg).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let source = msx_parser::scene_to_msx(&imported.scene).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let reparsed = msx::parse_scene(&source).map_err(|e| JsValue::from_str(&format!("the converted source does not parse: {e}")))?;
+    let rendered = msx::render(&reparsed);
+    let reparse_matches = rendered == msx::render(&imported.scene);
+
+    let warnings = imported
+        .warnings
+        .iter()
+        .map(|w| format!("\"{}\"", json_escape(w)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    Ok(format!(
+        r#"{{"msx":"{msx}","svg":"{svg}","warnings":[{warnings}],"svg_bytes":{svg_bytes},"msx_bytes":{msx_bytes},"element_count":{element_count},"reparse_matches":{reparse_matches}}}"#,
+        msx = json_escape(&source),
+        svg = json_escape(&rendered),
+        warnings = warnings,
+        svg_bytes = svg.len(),
+        msx_bytes = source.len(),
+        element_count = imported.scene.elements.len(),
+        reparse_matches = reparse_matches,
+    ))
+}
+
+/// Compiles `.msx` source to the compressed binary form, the same call
+/// `msx compile` makes (`compress = true`). Returns the bytes for download.
+#[wasm_bindgen]
+pub fn compile_source(source: &str) -> Result<Vec<u8>, JsValue> {
+    let scene = msx::parse_scene(source).map_err(|e| JsValue::from_str(&e))?;
+    msx::compile(&scene, true).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Renders the loaded scene at `t` seconds of elapsed playback time and
@@ -162,4 +229,51 @@ pub fn local_time(t: f64) -> f64 {
 #[wasm_bindgen]
 pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BADGE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a9eff"/><stop offset="1" stop-color="#f2545b"/></linearGradient></defs>
+  <rect x="5" y="5" width="110" height="70" rx="8" fill="url(#g)"/>
+  <circle cx="40" cy="40" r="15" fill="#ffffff" fill-opacity=".8"/>
+</svg>"##;
+
+    #[test]
+    fn json_escape_covers_quotes_backslashes_and_control_characters() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("x\ny\r\tz"), "x\\ny\\r\\tz");
+        assert_eq!(json_escape("\u{1}"), "\\u0001");
+        assert_eq!(json_escape("plain text"), "plain text");
+    }
+
+    #[test]
+    fn import_svg_returns_source_render_and_clean_warnings() {
+        let json = import_svg(BADGE).expect("the badge imports");
+        assert!(json.starts_with("{\"msx\":\""), "{json}");
+        assert!(json.contains("\"warnings\":[]"), "{json}");
+        assert!(json.contains("\"reparse_matches\":true"), "{json}");
+        assert!(json.contains("\"element_count\":2"), "{json}");
+        assert!(!json.contains('\n'), "a raw newline would break JSON.parse");
+    }
+
+    #[test]
+    fn import_svg_reports_warnings_as_escaped_strings() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect id="r" width="40" height="40" clip-path="url(#c)"/></svg>"##;
+        let json = import_svg(svg).expect("the clip-path file imports");
+        assert!(json.contains("clip-path"), "{json}");
+        assert!(json.contains("\\\"r\\\""), "the quotes in the warning label are escaped: {json}");
+    }
+
+    #[test]
+    fn compile_source_accepts_what_import_svg_wrote() {
+        let json = import_svg(BADGE).expect("the badge imports");
+        let imported = msx_svg_import::import_svg(BADGE).expect("import");
+        let source = msx_parser::scene_to_msx(&imported.scene).expect("write");
+        assert!(json.contains(&json_escape(&source)));
+        let bytes = compile_source(&source).expect("compiles");
+        assert!(bytes.len() > 8);
+    }
 }

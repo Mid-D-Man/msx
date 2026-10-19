@@ -60,6 +60,9 @@ function showFailure(stage, err) {
     // Playback entry points. A wasm build without them still renders stills.
     if (typeof glue.render_frame === 'function') window.__msxRenderFrame = glue.render_frame;
     if (typeof glue.local_time === 'function')   window.__msxLocalTime = glue.local_time;
+    // Converter page entry points (see build_convert.py).
+    if (typeof glue.import_svg === 'function')      window.__msxImportSvg = glue.import_svg;
+    if (typeof glue.compile_source === 'function')  window.__msxCompile = glue.compile_source;
     if (typeof window.__msxEngineReady === 'function') {
       window.__msxEngineReady();
     }

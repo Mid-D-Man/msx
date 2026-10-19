@@ -791,6 +791,44 @@ fn markers_and_context_paint_are_reported() {
 }
 
 #[test]
+fn symbol_content_outside_its_default_viewport_is_reported() {
+    let i = imp(&doc(r##"<symbol id="s"><rect x="-20" y="-10" width="120" height="120"/></symbol><use href="#s"/>"##));
+    assert!(has_warning(&i, "symbol viewport clipping"));
+    let fits = imp(&doc(r##"<symbol id="s"><rect x="10" y="10" width="50" height="50"/></symbol><use href="#s"/>"##));
+    assert!(!has_warning(&fits, "symbol viewport clipping"), "{:?}", fits.warnings);
+}
+
+#[test]
+fn use_size_on_a_nested_svg_is_reported() {
+    let i = imp(&doc(r##"<defs><svg id="s"><circle cx="10" cy="10" r="5"/></svg></defs><use href="#s" width="20" height="20"/>"##));
+    assert!(has_warning(&i, "nested svg viewport clipping"));
+    let plain = imp(&doc(r##"<svg x="5" y="5"><circle cx="10" cy="10" r="5"/></svg>"##));
+    assert!(!has_warning(&plain, "nested svg viewport clipping"), "{:?}", plain.warnings);
+}
+
+#[test]
+fn root_transform_origin_percentages_use_the_viewport() {
+    // 200 by 200 canvas over a 100 by 100 viewBox: 25% 75% is (50, 150) in
+    // the canvas, so scale(0.5) about that point sends user (20, 20) to (45, 95).
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 100 100" transform="scale(0.5)" transform-origin="25% 75%"><rect x="20" y="20" width="60" height="60"/></svg>"#;
+    let i = imp(svg);
+    let Element::Group(g) = &i.scene.elements[0] else { panic!("the root wrapper group") };
+    let m = g.transform.as_ref().expect("root transform").to_matrix();
+    let (x, y) = geom::apply(m, 20.0, 20.0);
+    assert!(close(x, 45.0) && close(y, 95.0), "got ({x}, {y})");
+}
+
+#[test]
+fn ignored_text_and_stroke_properties_are_reported() {
+    let i = imp(&doc(r#"<text x="0" y="10" style="text-decoration: underline; letter-spacing: 2px" font-style="italic">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
+    for key in ["text-decoration", "letter-spacing", "font-style", "vector-effect"] {
+        assert!(has_warning(&i, key), "no warning for {key}: {:?}", i.warnings);
+    }
+    let plain = imp(&doc(r#"<text x="0" y="10" style="text-decoration: none; letter-spacing: normal" font-style="normal">hi</text>"#));
+    assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
+}
+
+#[test]
 fn symbol_viewport_clipping_is_reported() {
     let i = imp(&doc(r##"<symbol id="s"><rect width="10" height="10"/></symbol><use href="#s" width="5" height="5"/>"##));
     assert!(has_warning(&i, "symbol viewport clipping"));

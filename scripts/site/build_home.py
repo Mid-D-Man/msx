@@ -26,6 +26,7 @@ def build_home_page(stats: dict) -> str:
   <p class="lede">A vector graphics format with a DixScript source layer and a compact binary interchange layer — three independent renderers (SVG, CPU, GPU), a keyframe animation system, and image/audio embedding.</p>
   <div class="actions">
     <a class="btn btn-primary" href="/playground/">Try the Playground</a>
+    <a class="btn btn-ghost" href="/convert/">Convert an SVG</a>
     <a class="btn btn-ghost" href="/docs/">Read the Docs</a>
     <a class="btn btn-ghost" href="/samples/">Browse Samples</a>
   </div>

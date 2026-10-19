@@ -23,7 +23,7 @@ pub const PRESENTATION: &[&str] = &[
     "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity", "display", "visibility", "color", "font-size",
     "font-family", "font-weight", "text-anchor", "dominant-baseline", "stop-color", "stop-opacity", "clip-path", "mask",
     "filter", "paint-order", "transform-origin", "transform-box", "marker", "marker-start", "marker-mid",
-    "marker-end",
+    "marker-end", "text-decoration", "letter-spacing", "word-spacing", "font-style", "writing-mode", "vector-effect",
 ];
 
 #[derive(Debug, Clone, PartialEq)]

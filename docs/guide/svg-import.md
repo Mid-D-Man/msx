@@ -36,14 +36,21 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 | `textPath` | Its text is skipped |
 | `spreadMethod` of `reflect` or `repeat` | Imported as `pad` |
 | `fr` on a radial gradient, a focal point outside the circle | `fr` ignored, focal point moved onto the circle |
-| Viewport clipping of a `symbol` or nested `svg` | Content is not clipped |
+| Viewport clipping of a `symbol` or nested `svg` | Content is not clipped. A warning appears when the element has a size or `viewBox`, a `use` gives it a size, or its content draws outside the viewport |
 | `context-fill`, `context-stroke` | Painted as none |
 | Blend modes beyond the nine above | Drawn normally |
 | CSS selectors with combinators, attributes or pseudo-classes | The rule is skipped |
 | Spans with different styles on one text line | The style of the line start is used |
+| `text-decoration`, `letter-spacing`, `word-spacing`, `font-style`, `writing-mode`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
 | A user-space gradient on a shape with no bounding box area | The average color of its stops |
 
 Files that are not UTF-8 are rejected with an error. Elements are capped at 200,000 shapes, so an exponentially nested `use` chain cannot run away. A `use` that refers back to itself is skipped.
+
+## In the browser
+
+The site has a [converter page](/convert/) that runs the importer in a WebAssembly build. An SVG is pasted, dropped on the editor or opened from disk. The page shows the `.msx` source the importer wrote, the original drawn by the browser next to the converted scene, and every warning. The source can be copied or downloaded, and the compiled binary can be downloaded too. The conversion is the same code as `msx import`, and the preview is drawn from the written source parsed back, so the preview shows the file as saved.
+
+The status of each SVG feature is on the [SVG parity](svg-parity.md) page.
 
 ## Checking an import
 

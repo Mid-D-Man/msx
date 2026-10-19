@@ -86,6 +86,8 @@ PAGES = [
      "The compiled layer: header, string pool, tags, compression and versioning."),
     ("reference", "cli", "Command line reference",
      "Every msx subcommand with its flags."),
+    ("reference", "svg-parity", "SVG parity",
+     "Which SVG features an import keeps, which are rewritten, and the order the remaining gaps close in."),
     ("reference", "format-spec", "Full specification",
      "The complete format reference, rendered from docs/format-spec.md."),
 ]

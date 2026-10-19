@@ -2,7 +2,7 @@
 //! Geometry the importer needs to convert gradients: matrix inversion and
 //! the exact bounding box of a path, including arcs and curve extrema.
 
-use msx_ast::{Matrix2D, PathCommand, Point};
+use msx_ast::{Element, Matrix2D, PathCommand, Point, Transform};
 
 /// Axis-aligned box, `x`/`y` is the top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -167,6 +167,82 @@ pub fn arc_to_cubics(x1: f64, y1: f64, rx: f64, ry: f64, x_rot_deg: f64, large: 
 }
 
 /// Exact bounding box of a path, or `None` for an empty one.
+/// Bounding box of the geometry of `els` under `m`, ignoring stroke width.
+/// Text, images, sdf and splat elements have no simple geometry and are
+/// skipped, so `None` also means "nothing measurable".
+pub fn elements_bbox(els: &[Element], m: Matrix2D) -> Option<BBox> {
+    let mut ext = Extent::default();
+    collect_extent(els, m, &mut ext);
+    let (mn, mx) = (ext.min?, ext.max?);
+    Some(BBox::from_corners(mn.0, mn.1, mx.0, mx.1))
+}
+
+fn local_matrix(outer: Matrix2D, t: &Option<Transform>) -> Matrix2D {
+    match t {
+        Some(t) => mul(outer, t.to_matrix()),
+        None => outer,
+    }
+}
+
+/// Adds the four corners of the box `(x0, y0, x1, y1)` mapped through `m`.
+fn add_corners(ext: &mut Extent, m: Matrix2D, (x0, y0, x1, y1): (f64, f64, f64, f64)) {
+    for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+        let (px, py) = apply(m, x, y);
+        ext.add(px, py);
+    }
+}
+
+/// An ellipse maps to an ellipse, whose extent along each axis is exact.
+fn add_ellipse(ext: &mut Extent, m: Matrix2D, cx: f64, cy: f64, rx: f64, ry: f64) {
+    let (px, py) = apply(m, cx, cy);
+    let hx = ((m.a * rx).powi(2) + (m.c * ry).powi(2)).sqrt();
+    let hy = ((m.b * rx).powi(2) + (m.d * ry).powi(2)).sqrt();
+    ext.add(px - hx, py - hy);
+    ext.add(px + hx, py + hy);
+}
+
+fn collect_extent(els: &[Element], outer: Matrix2D, ext: &mut Extent) {
+    for el in els {
+        match el {
+            Element::Rect(r) => {
+                let m = local_matrix(outer, &r.transform);
+                add_corners(ext, m, (r.x, r.y, r.x + r.width, r.y + r.height));
+            }
+            Element::Circle(c) => {
+                let m = local_matrix(outer, &c.transform);
+                add_ellipse(ext, m, c.cx, c.cy, c.r, c.r);
+            }
+            Element::Ellipse(e) => {
+                let m = local_matrix(outer, &e.transform);
+                add_ellipse(ext, m, e.cx, e.cy, e.rx, e.ry);
+            }
+            Element::Line(l) => {
+                let m = local_matrix(outer, &l.transform);
+                for (x, y) in [(l.x1, l.y1), (l.x2, l.y2)] {
+                    let (px, py) = apply(m, x, y);
+                    ext.add(px, py);
+                }
+            }
+            Element::Polyline(p) | Element::Polygon(p) => {
+                let m = local_matrix(outer, &p.transform);
+                for pt in &p.points {
+                    let (px, py) = apply(m, pt.x, pt.y);
+                    ext.add(px, py);
+                }
+            }
+            Element::Path(p) => {
+                if let Some(b) = path_bbox(&p.commands) {
+                    let m = local_matrix(outer, &p.transform);
+                    add_corners(ext, m, (b.x, b.y, b.x + b.w, b.y + b.h));
+                }
+            }
+            Element::Group(g) => collect_extent(&g.children, local_matrix(outer, &g.transform), ext),
+            Element::Layer(l) => collect_extent(&l.children, local_matrix(outer, &l.transform), ext),
+            _ => {}
+        }
+    }
+}
+
 pub fn path_bbox(cmds: &[PathCommand]) -> Option<BBox> {
     let mut ext = Extent::default();
     let (mut cur, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));

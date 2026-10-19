@@ -34,7 +34,7 @@ use msx_ast::{
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
-use geom::{path_bbox, BBox};
+use geom::{elements_bbox, path_bbox, BBox};
 use parse::{number_list, parse_css_transform, parse_length, parse_origin, parse_stylesheet, parse_transform, Decl, Stylesheet, Unit};
 use style::{apply, diagonal, element_opacity, with_alpha, Inh, PaintSpec, Props, PRESENTATION};
 
@@ -222,6 +222,15 @@ fn view_box(node: &Node) -> Option<Vec<f64>> {
     node.attribute("viewBox").map(number_list).filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0)
 }
 
+/// True when `kids` draw outside the `w` by `h` viewport that starts at the
+/// origin. Stroke width is ignored, so a stroke that only touches the edge
+/// does not count.
+fn overflows(kids: &[Element], w: f64, h: f64) -> bool {
+    const SLACK: f64 = 1e-3;
+    elements_bbox(kids, msx_ast::Matrix2D::identity())
+        .is_some_and(|b| b.x < -SLACK || b.y < -SLACK || b.x + b.w > w + SLACK || b.y + b.h > h + SLACK)
+}
+
 /// The transform that maps a `viewBox` onto a `w` by `h` viewport.
 fn viewbox_transform(vb: Option<&[f64]>, par: &str, w: f64, h: f64) -> Option<Transform> {
     let v = vb?;
@@ -387,6 +396,23 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
         }
+        // Text and stroke properties the renderers have no slot for. Each is
+        // reported only when it differs from the initial value.
+        let ignored: [(&str, &[&str]); 6] = [
+            ("text-decoration", &["none", ""]),
+            ("letter-spacing", &["normal", "0", "0px", ""]),
+            ("word-spacing", &["normal", "0", "0px", ""]),
+            ("font-style", &["normal", ""]),
+            ("writing-mode", &["horizontal-tb", "lr", "lr-tb", ""]),
+            ("vector-effect", &["none", ""]),
+        ];
+        for (key, initial) in ignored {
+            if let Some(v) = props.get(key) {
+                if !initial.contains(&v.trim()) {
+                    self.warn(format!("{} uses {key}: {}, which is not supported; ignored", Self::label(node), v.trim()));
+                }
+            }
+        }
         if let Some(b) = props.get("transform-box") {
             if !matches!(b.trim(), "view-box" | "") {
                 self.warn(format!("{} uses transform-box: {}, which is not supported; view-box is used", Self::label(node), b.trim()));
@@ -523,7 +549,12 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.walk(child, &inh, &mut kids, false);
         }
         let view = viewbox_transform(vb.as_deref(), root.attribute("preserveAspectRatio").unwrap_or(""), width, height);
-        let transform = compose(vec![self.node_transform(root), view]);
+        // The root transform sits outside the viewBox mapping, so a percentage
+        // in transform-origin is a share of the viewport, not of the viewBox.
+        let user_vp = std::mem::replace(&mut self.vp, (width, height));
+        let root_transform = self.node_transform(root);
+        self.vp = user_vp;
+        let transform = compose(vec![root_transform, view]);
         let mut out = Vec::new();
         let comp = self.composite(&root, &props);
         self.emit(kids, comp, transform, None, &mut out);
@@ -601,9 +632,6 @@ impl<'a, 'i> Importer<'a, 'i> {
         let y = self.length(node, "y", fs, vp.1).unwrap_or(0.0);
         let (w, h) = size.unwrap_or_else(|| (self.length(node, "width", fs, vp.0).unwrap_or(vp.0), self.length(node, "height", fs, vp.1).unwrap_or(vp.1)));
         let vb = view_box(&node);
-        if vb.is_some() || node.has_attribute("width") || node.has_attribute("height") {
-            self.warn(format!("{}: nested svg viewport clipping is not applied", Self::label(&node)));
-        }
         let inner_vp = vb.as_ref().map_or((w, h), |v| (v[2], v[3]));
         let saved = std::mem::replace(&mut self.vp, inner_vp);
         let mut kids = Vec::new();
@@ -611,6 +639,10 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.walk(child, &inh, &mut kids, true);
         }
         self.vp = saved;
+        let sized = vb.is_some() || size.is_some() || node.has_attribute("width") || node.has_attribute("height");
+        if sized || overflows(&kids, w, h) {
+            self.warn(format!("{}: nested svg viewport clipping is not applied", Self::label(&node)));
+        }
         let view = viewbox_transform(vb.as_deref(), node.attribute("preserveAspectRatio").unwrap_or(""), w, h);
         let transform = compose(vec![self.node_transform(node), translate(x, y), view]);
         let comp = self.composite(&node, &props);
@@ -664,9 +696,6 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn walk_symbol(&mut self, symbol: Node<'a, 'i>, parent: &Inh, size: Option<(f64, f64)>, out: &mut Vec<Element>) {
         let Some((inh, _)) = self.begin(symbol, parent) else { return };
         let vb = view_box(&symbol);
-        if size.is_some() || vb.is_some() {
-            self.warn(format!("{}: symbol viewport clipping is not applied", Self::label(&symbol)));
-        }
         let (w, h) = size.unwrap_or(self.vp);
         let inner_vp = vb.as_ref().map_or((w, h), |v| (v[2], v[3]));
         let saved = std::mem::replace(&mut self.vp, inner_vp);
@@ -675,6 +704,9 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.walk(child, &inh, &mut kids, true);
         }
         self.vp = saved;
+        if size.is_some() || vb.is_some() || overflows(&kids, w, h) {
+            self.warn(format!("{}: symbol viewport clipping is not applied", Self::label(&symbol)));
+        }
         let view = viewbox_transform(vb.as_deref(), symbol.attribute("preserveAspectRatio").unwrap_or(""), w, h);
         self.emit(kids, Comp::NONE, view, None, out);
     }

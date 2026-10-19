@@ -227,6 +227,7 @@ def nav(active: str) -> str:
         ("docs", "/docs/", "Docs"),
         ("samples", "/samples/", "Samples"),
         ("playground", "/playground/", "Playground"),
+        ("convert", "/convert/", "Convert"),
         ("report", "/report/", "Build Report"),
     ]
     links = []
