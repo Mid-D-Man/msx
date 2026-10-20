@@ -27,6 +27,7 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Layer opacity and blend modes | yes, see below | yes | yes |
 | Layer effects | all five | all five | `blur` only |
 | Layer `clip` | not enforced | not documented | not documented |
+| Layer `clip_path` | `clipPath` element | antialiased mask | mask texture, hard edges |
 | Viewbox | yes | no | no |
 | Keyframe animation | static frames | GIF | GIF |
 

@@ -7,8 +7,10 @@ use crate::{render_element, write_attr, write_id, write_transform, Ctx};
 /// equivalent and fall back to Normal here; `msx-render-cpu`/`-gpu`
 /// implement the signed-buffer math those actually need). `effects` → a
 /// generated `<filter>` chaining one SVG filter primitive per effect.
-/// `clip` has no cheap SVG 1.1 fallback without a matching
-/// `clipPath`/bbox computation, so it's left unenforced here.
+/// `clip_path` → a generated `<clipPath>` of the same shapes, referenced
+/// from the layer's `<g>`. `clip` (the pixel footprint flag) has no cheap
+/// SVG 1.1 fallback without a bbox computation, so it's left unenforced
+/// here.
 pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer, defs: &[Def]) {
     ctx.push("<g");
 
@@ -28,11 +30,32 @@ pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer, defs: &[Def]) {
         write_attr(ctx, "filter", format!("url(#{})", filter_id));
     }
 
+    if let Some(shapes) = &layer.clip_path {
+        let clip_id = render_clip_path(ctx, shapes, defs);
+        write_attr(ctx, "clip-path", format!("url(#{})", clip_id));
+    }
+
     ctx.push(">");
     for child in msx_ast::layer_reordered(&layer.children) {
         render_element(ctx, child, defs);
     }
     ctx.push("</g>");
+}
+
+/// Renders `shapes` into a `<clipPath>` in the synthesized defs and returns
+/// its id. The shapes are drawn by the normal element renderer into a side
+/// buffer, then `fill-rule` is renamed to `clip-rule`, the property SVG reads
+/// inside a clip path. Fill, stroke and opacity attributes are ignored there.
+/// An empty list gives an empty `<clipPath>`, which clips everything away.
+fn render_clip_path(ctx: &mut Ctx, shapes: &[msx_ast::Element], defs: &[Def]) -> String {
+    let id = ctx.fresh_id("layer-clip-");
+    let outer = std::mem::take(&mut ctx.out);
+    for shape in shapes {
+        render_element(ctx, shape, defs);
+    }
+    let body = std::mem::replace(&mut ctx.out, outer).replace(" fill-rule=\"", " clip-rule=\"");
+    ctx.extra_defs.push_str(&format!("<clipPath id=\"{id}\">{body}</clipPath>"));
+    id
 }
 
 fn render_effects_filter(ctx: &mut Ctx, effects: &[Effect]) -> String {

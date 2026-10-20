@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use msx_ast::{path::PathCommand, Color, Def, Element, FillRule, Group, LineCap, LineJoin, Matrix2D, Paint, Style, Use};
 use tiny_skia::{
     Color as SkColor, FillRule as SkFillRule, LineCap as SkLineCap, LineJoin as SkLineJoin,
-    Paint as SkPaint, Path as SkPath, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
+    Mask, Paint as SkPaint, Path as SkPath, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
 use crate::composite::render_layer;
@@ -95,6 +95,55 @@ pub fn render_element(pixmap: &mut Pixmap, element: &Element, transform: Matrix2
         Element::Layer(l) => render_layer(pixmap, l, transform, defs, index, base_dir),
         Element::Image(img) => crate::image::render_image(pixmap, img, transform, base_dir),
     }
+}
+
+// ── Clip masks ──────────────────────────────────────────────────────────────
+
+/// Coverage of the union of `shapes` as an 8 bit mask, in device space.
+/// Only geometry and `fill_rule` count: fill, stroke and opacity are
+/// ignored, a `Line` has no area and so adds nothing, and elements that are
+/// not simple shapes (layers, images, sdf, splats) are skipped. `parent` maps
+/// the shapes' coordinate space to the device, the same matrix the layer's
+/// own children are drawn with. Returns `None` for a zero sized pixmap.
+pub fn clip_mask(width: u32, height: u32, shapes: &[Element], parent: Matrix2D, index: &ElementIndex) -> Option<Mask> {
+    let mut mask = Mask::new(width, height)?;
+    add_clip_shapes(&mut mask, shapes, parent, index, 0);
+    Some(mask)
+}
+
+/// How deep `use` references inside a clip path are followed.
+const CLIP_USE_DEPTH: u32 = 16;
+
+fn add_clip_shapes(mask: &mut Mask, shapes: &[Element], parent: Matrix2D, index: &ElementIndex, depth: u32) {
+    for el in shapes {
+        match el {
+            Element::Rect(e) => fill_clip(mask, build_rect_path(e), &e.style, e.transform.as_ref(), parent),
+            Element::Circle(e) => fill_clip(mask, build_circle_path(e), &e.style, e.transform.as_ref(), parent),
+            Element::Ellipse(e) => fill_clip(mask, build_ellipse_path(e), &e.style, e.transform.as_ref(), parent),
+            Element::Polyline(e) | Element::Polygon(e) => fill_clip(mask, build_polyline_path(e), &e.style, e.transform.as_ref(), parent),
+            Element::Path(e) => fill_clip(mask, build_msx_path(e), &e.style, e.transform.as_ref(), parent),
+            Element::Text(t) => {
+                if let Some((path, _)) = msx_text::to_path_with_bounds(t) {
+                    fill_clip(mask, build_msx_path(&path), &path.style, path.transform.as_ref(), parent);
+                }
+            }
+            Element::Group(g) => add_clip_shapes(mask, &g.children, combine(parent, g.transform.as_ref()), index, depth),
+            Element::Use(u) if depth < CLIP_USE_DEPTH => {
+                let id = u.href.strip_prefix('#').unwrap_or(&u.href);
+                if let Some(target) = index.get(id) {
+                    let offset = Matrix2D::translate(u.x, u.y);
+                    let local = u.transform.as_ref().map(|t| t.to_matrix()).unwrap_or_else(Matrix2D::identity);
+                    add_clip_shapes(mask, std::slice::from_ref(target), parent.concat(offset.concat(local)), index, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn fill_clip(mask: &mut Mask, path: Option<SkPath>, style: &Style, local: Option<&msx_ast::Transform>, parent: Matrix2D) {
+    let Some(path) = path else { return };
+    mask.fill_path(&path, sk_fill_rule(style), true, to_tiny_skia_transform(combine(parent, local)));
 }
 
 fn render_group(pixmap: &mut Pixmap, g: &Group, parent: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {

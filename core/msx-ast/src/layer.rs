@@ -93,6 +93,13 @@ pub struct Layer {
     pub opacity:    f64,
     /// Clip children to this layer's pixel footprint.
     pub clip:       bool,
+    /// Shapes whose union is the visible area of this layer. `None` means no
+    /// clipping. `Some` with no shapes clips everything away, as an empty
+    /// SVG `clipPath` does. Shapes live in the layer's own coordinate space
+    /// (the layer transform applies to them too), only their geometry and
+    /// `fill_rule` count, and a `Line`, stroke, fill color or opacity does
+    /// not. Applied after the effects, before the layer composites.
+    pub clip_path:  Option<Vec<Element>>,
     /// Post-processing effects (blur, shadow, glow) applied in order.
     pub effects:    Vec<Effect>,
     pub id:         Option<String>,
@@ -117,6 +124,7 @@ impl Layer {
             blend_mode: BlendMode::Normal,
             opacity:    1.0,
             clip:       false,
+            clip_path:  None,
             effects:    Vec::new(),
             id:         None,
             transform:  None,
@@ -128,7 +136,8 @@ impl Layer {
     pub fn with_opacity(mut self, op: f64)          -> Self { self.opacity = op; self }
     pub fn with_effect(mut self, fx: Effect)        -> Self { self.effects.push(fx); self }
     pub fn with_z_index(mut self, z: f64)           -> Self { self.z_index = z; self }
-  }
+    pub fn with_clip_path(mut self, shapes: Vec<Element>) -> Self { self.clip_path = Some(shapes); self }
+}
 
 /// Returns `elements` in the order a renderer should actually draw them:
 /// every non-`Layer` element stays in its original slot, but the *set*
@@ -239,5 +248,21 @@ mod layer_reorder_tests {
         // and vice versa.
         assert_eq!(id_of(out[1]), "back");
         assert_eq!(id_of(out[3]), "front");
+    }
+}
+
+#[cfg(test)]
+mod clip_path_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_layer_has_no_clip_path() {
+        assert!(Layer::new(vec![]).clip_path.is_none());
+    }
+
+    #[test]
+    fn with_clip_path_keeps_an_empty_list_as_clip_everything() {
+        let l = Layer::new(vec![]).with_clip_path(vec![]);
+        assert_eq!(l.clip_path.as_ref().map(Vec::len), Some(0));
     }
 }

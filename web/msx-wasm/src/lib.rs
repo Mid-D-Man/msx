@@ -261,9 +261,9 @@ mod tests {
 
     #[test]
     fn import_svg_reports_warnings_as_escaped_strings() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect id="r" width="40" height="40" clip-path="url(#c)"/></svg>"##;
-        let json = import_svg(svg).expect("the clip-path file imports");
-        assert!(json.contains("clip-path"), "{json}");
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect id="r" width="40" height="40" mask="url(#c)"/></svg>"##;
+        let json = import_svg(svg).expect("the masked file imports");
+        assert!(json.contains("mask"), "{json}");
         assert!(json.contains("\\\"r\\\""), "the quotes in the warning label are escaped: {json}");
     }
 

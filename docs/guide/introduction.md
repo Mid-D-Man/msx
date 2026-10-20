@@ -58,6 +58,6 @@ MSX is a multi-crate Rust workspace.
 
 ## Scope
 
-MSX is a source format for parametric vector graphics, a compact interchange format that includes animation data, and a compression target for MBFA. It is not a raster format. SVG is an export target, not the runtime format. Pattern fills, clip paths and masks (beyond a layer's own `clip` flag) and font embedding do not exist yet.
+MSX is a source format for parametric vector graphics, a compact interchange format that includes animation data, and a compression target for MBFA. It is not a raster format. SVG is an export target, not the runtime format. Pattern fills, masks and font embedding do not exist yet. A layer can carry a clip path.
 
 The [Quick start](quick-start.md) builds the tools and renders a first scene. [How a scene fits together](scene-anatomy.md) explains the structure that every other page builds on.

@@ -375,7 +375,9 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         TAG_LAYER => {
             let blend_mode = msx_ast::BlendMode::from_byte(read_u8(data, cursor)?);
             let opacity    = read_f32(data, cursor)?;
-            let clip       = read_u8(data, cursor)? != 0;
+            let flags      = read_u8(data, cursor)?;
+            let clip       = flags & 1 != 0;
+            let has_clip_path = flags & 2 != 0;
             let effect_count = read_u16(data, cursor)? as usize;
             let mut effects = Vec::with_capacity(effect_count);
             for _ in 0..effect_count {
@@ -389,7 +391,17 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             // z_index: see encode_layer's own comment — added after
             // every pre-existing field, same convention as `fill`.
             let z_index = read_f32(data, cursor)?;
-            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, effects, id, transform, z_index }))
+            let clip_path = if has_clip_path {
+                let count = read_u32(data, cursor)? as usize;
+                let mut shapes = Vec::with_capacity(count.min(1024));
+                for _ in 0..count {
+                    shapes.push(decode_element(data, cursor, pool)?);
+                }
+                Some(shapes)
+            } else {
+                None
+            };
+            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, clip_path, effects, id, transform, z_index }))
         }
         TAG_IMAGE => {
             let source = decode_media_source(data, cursor, pool)?;

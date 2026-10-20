@@ -32,11 +32,11 @@ A missing required field stops the parse with a message such as `elements[3].r: 
 | Element | SVG | CPU raster | GPU raster |
 |---|---|---|---|
 | `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path` | yes | yes | yes |
-| `text` | yes | not drawn | not drawn |
+| `text` | yes | yes | yes |
 | `group` | yes, including its style | yes, without its style | yes, without its style |
 | `use` | yes | yes | yes |
 | `image` | yes | yes | yes |
-| `layer` | yes, `clip` not enforced | yes | yes |
+| `layer` | yes, `clip` not enforced, `clip_path` enforced | yes | yes |
 | `sdf` | a comment only | yes | yes |
 | `splat` | approximated with a radial gradient | yes | yes |
 

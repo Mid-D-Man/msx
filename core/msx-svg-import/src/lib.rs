@@ -34,7 +34,7 @@ use msx_ast::{
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
-use geom::{elements_bbox, path_bbox, BBox};
+use geom::{path_bbox, reaches_outside, BBox};
 use parse::{number_list, parse_css_transform, parse_length, parse_origin, parse_stylesheet, parse_transform, Decl, Stylesheet, Unit};
 use style::{apply, diagonal, element_opacity, with_alpha, Inh, PaintSpec, Props, PRESENTATION};
 
@@ -104,6 +104,14 @@ pub(crate) struct Importer<'a, 'i> {
     use_stack: Vec<String>,
     /// Shapes and text written so far.
     emitted: usize,
+    /// True while the children of a `clipPath` are walked: only geometry and
+    /// `clip-rule` matter, so paint is not resolved and effects are ignored.
+    clip_mode: bool,
+    /// True when some `clipPath` uses `objectBoundingBox`: a hidden shape still
+    /// counts toward the box, so it is kept as an invisible element.
+    keep_hidden: bool,
+    /// Ids of the clip paths being resolved right now, to stop cycles.
+    clip_stack: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -131,19 +139,97 @@ struct Run {
 }
 
 /// How an element composites against what is already drawn.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Comp {
     opacity: f64,
     blend: BlendMode,
     isolate: bool,
+    /// Clip paths that all apply, in the element's own coordinate space. The
+    /// first is the outermost layer, so the visible area is their intersection.
+    clips: Vec<Vec<Element>>,
 }
 
 impl Comp {
-    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false };
+    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false, clips: Vec::new() };
 
     fn needs_layer(&self) -> bool {
-        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate
+        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate || !self.clips.is_empty()
     }
+}
+
+/// The transform slot of `el`, for the elements that have one.
+fn transform_mut(el: &mut Element) -> Option<&mut Option<Transform>> {
+    match el {
+        Element::Rect(e) => Some(&mut e.transform),
+        Element::Circle(e) => Some(&mut e.transform),
+        Element::Ellipse(e) => Some(&mut e.transform),
+        Element::Line(e) => Some(&mut e.transform),
+        Element::Polyline(e) | Element::Polygon(e) => Some(&mut e.transform),
+        Element::Path(e) => Some(&mut e.transform),
+        Element::Text(e) => Some(&mut e.transform),
+        _ => None,
+    }
+}
+
+/// `url(#id)` with optional quotes and a trailing fallback; anything else is `None`.
+fn parse_url_id(v: &str) -> Option<String> {
+    let v = v.trim();
+    if !v.get(..4)?.eq_ignore_ascii_case("url(") {
+        return None;
+    }
+    let inner = v[4..].split(')').next()?.trim().trim_matches(|c| c == '\'' || c == '"').trim();
+    inner.strip_prefix('#').filter(|id| !id.is_empty()).map(String::from)
+}
+
+/// The `w` by `h` viewport as `(x0, y0, x1, y1)` in the space the content is
+/// drawn in, which a `viewBox` moves and scales away from `(0, 0, w, h)`.
+fn viewport_bounds(view: &Option<Transform>, w: f64, h: f64) -> (f64, f64, f64, f64) {
+    match view.as_ref().and_then(|t| geom::invert(t.to_matrix())) {
+        Some(inv) => {
+            let (ax, ay) = geom::apply(inv, 0.0, 0.0);
+            let (bx, by) = geom::apply(inv, w, h);
+            (ax.min(bx), ay.min(by), ax.max(bx), ay.max(by))
+        }
+        None => (0.0, 0.0, w, h),
+    }
+}
+
+/// `overflow` decides whether a `symbol` or nested `svg` clips to its viewport.
+/// Both clip by default, and only `visible` and `auto` switch it off.
+fn viewport_clips(props: &Props) -> bool {
+    !matches!(props.get("overflow").map(|v| v.trim()), Some("visible") | Some("auto"))
+}
+
+/// Bounding box of the geometry of freshly built `kids`, for
+/// `objectBoundingBox` units.
+fn elements_bbox(kids: &[Element]) -> Option<BBox> {
+    geom::elements_bbox(kids, msx_ast::Matrix2D::identity())
+}
+
+/// The visible area of a `w` by `h` viewport as a rectangle in the space that
+/// `view` maps content into, found by mapping the viewport back through `view`.
+fn viewport_rect(view: &Option<Transform>, w: f64, h: f64) -> Element {
+    let (x0, y0, x1, y1) = viewport_bounds(view, w, h);
+    let style = Style { fill: Some(Paint::Color(Color::BLACK)), stroke: Some(Paint::None), ..Style::default() };
+    Element::Rect(Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: None, ry: None, id: None, transform: None, style })
+}
+
+/// Layers for one clipped element, outermost first: the first clip, opacity,
+/// blend mode and transform go on the outer layer, each further clip on its own
+/// layer inside it.
+fn layered(kids: Vec<Element>, opacity: f64, blend: BlendMode, mut clips: Vec<Vec<Element>>, transform: Option<Transform>, id: Option<String>) -> Element {
+    let outer_clip = (!clips.is_empty()).then(|| clips.remove(0));
+    let mut inner = kids;
+    for shapes in clips.into_iter().rev() {
+        inner = vec![Element::Layer(Layer::new(inner).with_clip_path(shapes))];
+    }
+    let mut layer = Layer::new(inner);
+    layer.clip_path = outer_clip;
+    layer.opacity = opacity;
+    layer.blend_mode = blend;
+    layer.transform = transform;
+    layer.id = id;
+    Element::Layer(layer)
 }
 
 fn style_mut(el: &mut Element) -> Option<&mut Style> {
@@ -222,15 +308,6 @@ fn view_box(node: &Node) -> Option<Vec<f64>> {
     node.attribute("viewBox").map(number_list).filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0)
 }
 
-/// True when `kids` draw outside the `w` by `h` viewport that starts at the
-/// origin. Stroke width is ignored, so a stroke that only touches the edge
-/// does not count.
-fn overflows(kids: &[Element], w: f64, h: f64) -> bool {
-    const SLACK: f64 = 1e-3;
-    elements_bbox(kids, msx_ast::Matrix2D::identity())
-        .is_some_and(|b| b.x < -SLACK || b.y < -SLACK || b.x + b.w > w + SLACK || b.y + b.h > h + SLACK)
-}
-
 /// The transform that maps a `viewBox` onto a `w` by `h` viewport.
 fn viewbox_transform(vb: Option<&[f64]>, par: &str, w: f64, h: f64) -> Option<Transform> {
     let v = vb?;
@@ -303,12 +380,16 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn new(doc: &'a Document<'i>) -> Self {
         let mut ids = HashMap::new();
         let mut sheet = Stylesheet::default();
+        let mut keyframes = false;
+        let mut keep_hidden = false;
         for n in doc.descendants().filter(|n| n.is_element()) {
             if let Some(id) = n.attribute("id") {
                 ids.entry(id).or_insert(n);
             }
+            keep_hidden |= n.tag_name().name() == "clipPath" && n.attribute("clipPathUnits").is_some_and(|u| u.trim() == "objectBoundingBox");
             if n.tag_name().name() == "style" && n.attribute("type").is_none_or(|t| t.is_empty() || t == "text/css") {
                 let css: String = n.descendants().filter(|c| c.is_text()).filter_map(|c| c.text()).collect();
+                keyframes |= css.contains("@keyframes");
                 parse_stylesheet(&css, &mut sheet);
             }
         }
@@ -324,8 +405,14 @@ impl<'a, 'i> Importer<'a, 'i> {
             vp: (300.0, 150.0),
             depth: 0,
             use_stack: Vec::new(),
+            clip_mode: false,
+            keep_hidden,
+            clip_stack: Vec::new(),
             emitted: 0,
         };
+        if keyframes {
+            imp.warn("CSS @keyframes animations are not supported; the static frame is drawn".to_string());
+        }
         let skipped = std::mem::take(&mut imp.sheet.unsupported);
         for s in skipped {
             imp.warn(format!("CSS selector \"{s}\" is not supported and its rule was skipped"));
@@ -375,7 +462,21 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     fn check_unsupported(&mut self, node: &Node, props: &Props) {
-        for key in ["clip-path", "mask", "filter"] {
+        if self.clip_mode {
+            return;
+        }
+        for child in node.children().filter(|c| c.is_element()) {
+            let tag = child.tag_name().name();
+            if matches!(tag, "animate" | "animateTransform" | "animateMotion" | "animateColor" | "set") {
+                self.warn(format!("{} has a <{tag}> animation, which is not supported; the static frame is drawn", Self::label(node)));
+            }
+        }
+        for key in ["animation", "animation-name"] {
+            if props.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
+                self.warn(format!("{} uses a CSS {key}, which is not supported; the static frame is drawn", Self::label(node)));
+            }
+        }
+        for key in ["mask", "filter"] {
             if let Some(v) = props.get(key) {
                 if !v.is_empty() && v != "none" {
                     self.warn(format!("{} uses {key}, which is not supported; drawn without it", Self::label(node)));
@@ -432,7 +533,13 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     /// Opacity, blend mode and isolation of one element.
-    fn composite(&mut self, node: &Node, props: &Props) -> Comp {
+    fn composite(&mut self, node: &Node, props: &Props, bbox: Option<BBox>) -> Comp {
+        if self.clip_mode {
+            if props.get("clip-path").is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
+                self.warn(format!("{} uses clip-path inside a clip path, which is not supported; ignored", Self::label(node)));
+            }
+            return Comp::NONE;
+        }
         let blend = match props.get("mix-blend-mode").map(|v| v.trim()) {
             None | Some("normal") | Some("") => BlendMode::Normal,
             Some("multiply") => BlendMode::Multiply,
@@ -449,7 +556,107 @@ impl<'a, 'i> Importer<'a, 'i> {
                 BlendMode::Normal
             }
         };
-        Comp { opacity: element_opacity(props), blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate") }
+        let clips = self.resolve_clips(node, props, bbox);
+        Comp { opacity: element_opacity(props), blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips }
+    }
+
+    // ── Clip paths ────────────────────────────────────────────────────────────
+
+    /// The clip paths that apply to `node`, from its `clip-path` property. An
+    /// unusable reference is reported and the element is drawn unclipped.
+    fn resolve_clips(&mut self, node: &Node, props: &Props, bbox: Option<BBox>) -> Vec<Vec<Element>> {
+        let Some(v) = props.get("clip-path").map(|v| v.trim().to_string()) else { return Vec::new() };
+        if v.is_empty() || v == "none" {
+            return Vec::new();
+        }
+        let label = Self::label(node);
+        let mut out = Vec::new();
+        match parse_url_id(&v) {
+            Some(id) => self.clip_chain(&label, &id, bbox, &mut out),
+            None => self.warn(format!("{label} uses clip-path: {v}, which is not supported (only url(#id)); drawn without it")),
+        }
+        out
+    }
+
+    /// Resolves one `clipPath`, then the `clip-path` set on that `clipPath`
+    /// itself, which narrows it further.
+    fn clip_chain(&mut self, label: &str, id: &str, bbox: Option<BBox>, out: &mut Vec<Vec<Element>>) {
+        if self.clip_stack.iter().any(|s| s == id) {
+            self.warn(format!("{label} refers to the clip path #{id}, which refers back to itself; drawn without it"));
+            return;
+        }
+        let Some(cp) = self.ids.get(id).copied() else {
+            self.warn(format!("{label} uses the clip path #{id}, which does not exist; drawn without it"));
+            return;
+        };
+        if cp.tag_name().name() != "clipPath" {
+            self.warn(format!("{label} uses #{id} as a clip path, but it is a <{}>; drawn without it", cp.tag_name().name()));
+            return;
+        }
+        self.clip_stack.push(id.to_string());
+        let shapes = self.clip_shapes(cp, bbox);
+        out.push(shapes);
+        let nested = self.props_for(cp).get("clip-path").map(|v| v.trim().to_string());
+        if let Some(v) = nested.filter(|v| !v.is_empty() && v != "none") {
+            match parse_url_id(&v) {
+                Some(next) => self.clip_chain(label, &next, bbox, out),
+                None => self.warn(format!("<clipPath id=\"{id}\"> uses clip-path: {v}, which is not supported (only url(#id)); ignored")),
+            }
+        }
+        self.clip_stack.pop();
+    }
+
+    /// The shapes of one `clipPath` in the coordinate space of the clipped
+    /// element. Only shapes, text and `use` of a shape count; a `line` has no
+    /// area. `clipPathUnits="objectBoundingBox"` maps the unit square onto
+    /// `bbox`, and an empty box leaves nothing visible.
+    fn clip_shapes(&mut self, cp: Node<'a, 'i>, bbox: Option<BBox>) -> Vec<Element> {
+        let mut parts = vec![self.node_transform(cp)];
+        if cp.attribute("clipPathUnits").is_some_and(|u| u.trim() == "objectBoundingBox") {
+            match bbox.filter(|b| b.w > 0.0 && b.h > 0.0) {
+                Some(b) => parts.push(Some(Transform::Multiple(vec![Transform::Translate { x: b.x, y: b.y }, Transform::Scale { x: b.w, y: b.h }]))),
+                None => return Vec::new(),
+            }
+        }
+        let inh = self.inh_chain(cp);
+        let saved = std::mem::replace(&mut self.clip_mode, true);
+        let mut kids = Vec::new();
+        for child in cp.children().filter(|c| c.is_element() && !is_foreign(c)) {
+            if self.is_clip_child(child) {
+                self.walk(child, &inh, &mut kids, true);
+            }
+        }
+        self.clip_mode = saved;
+        match compose(parts) {
+            Some(t) if !kids.is_empty() => vec![Element::Group(Group { children: kids, id: None, transform: Some(t), style: None })],
+            _ => kids,
+        }
+    }
+
+    /// Children that may contribute to a clip path: shapes with an area, text,
+    /// and a `use` that points at one of those.
+    fn is_clip_child(&self, child: Node<'a, 'i>) -> bool {
+        const SHAPES: [&str; 7] = ["rect", "circle", "ellipse", "polyline", "polygon", "path", "text"];
+        match child.tag_name().name() {
+            t if SHAPES.contains(&t) => true,
+            "use" => {
+                let href = child.attribute("href").or_else(|| child.attribute((XLINK_NS, "href")));
+                href.map(|h| h.trim().trim_start_matches('#')).and_then(|id| self.ids.get(id)).is_some_and(|t| SHAPES.contains(&t.tag_name().name()))
+            }
+            _ => false,
+        }
+    }
+
+    /// Inherited style in effect on `node`, folded down from the root.
+    fn inh_chain(&mut self, node: Node<'a, 'i>) -> Inh {
+        let mut chain: Vec<Node> = node.ancestors().filter(|n| n.is_element()).collect();
+        chain.reverse();
+        let mut inh = Inh::default();
+        for n in chain {
+            let props = self.props_for(n);
+            apply(&mut inh, &props, self.vp);
+        }
+        inh
     }
 
     /// The `color` property in effect on `node`, from its ancestors.
@@ -556,7 +763,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.vp = user_vp;
         let transform = compose(vec![root_transform, view]);
         let mut out = Vec::new();
-        let comp = self.composite(&root, &props);
+        let bbox = elements_bbox(&kids);
+        let comp = self.composite(&root, &props, bbox);
         self.emit(kids, comp, transform, None, &mut out);
 
         scene.defs = std::mem::take(&mut self.defs);
@@ -571,12 +779,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         if comp.needs_layer() {
-            let mut layer = Layer::new(kids);
-            layer.opacity = comp.opacity;
-            layer.blend_mode = comp.blend;
-            layer.transform = transform;
-            layer.id = id;
-            out.push(Element::Layer(layer));
+            out.push(layered(kids, comp.opacity, comp.blend, comp.clips, transform, id));
         } else if transform.is_some() || id.is_some() {
             out.push(Element::Group(Group { children: kids, id, transform, style: None }));
         } else {
@@ -593,7 +796,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         match node.tag_name().name() {
             "g" | "a" => self.walk_group(node, parent, out, expanded, false),
             "switch" => self.walk_group(node, parent, out, expanded, true),
-            "svg" => self.walk_nested_svg(node, parent, None, out),
+            "svg" => self.walk_nested_svg(node, parent, (None, None), out),
             "use" => self.walk_use(node, parent, out),
             tag @ ("rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path") => self.walk_shape(node, tag, parent, out, expanded),
             "text" => self.walk_text(node, parent, out, expanded),
@@ -621,16 +824,20 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         let id = if expanded { None } else { node.attribute("id").map(String::from) };
         let transform = self.node_transform(node);
-        let comp = self.composite(&node, &props);
+        let bbox = elements_bbox(&kids);
+        let comp = self.composite(&node, &props, bbox);
         self.emit(kids, comp, transform, id, out);
     }
 
-    fn walk_nested_svg(&mut self, node: Node<'a, 'i>, parent: &Inh, size: Option<(f64, f64)>, out: &mut Vec<Element>) {
+    /// `size` is the width and height a `use` gives, each separately, since a
+    /// `use` that sets only one leaves the other to the `svg` itself.
+    fn walk_nested_svg(&mut self, node: Node<'a, 'i>, parent: &Inh, size: (Option<f64>, Option<f64>), out: &mut Vec<Element>) {
         let Some((inh, props)) = self.begin(node, parent) else { return };
         let (fs, vp) = (inh.font_size, self.vp);
         let x = self.length(node, "x", fs, vp.0).unwrap_or(0.0);
         let y = self.length(node, "y", fs, vp.1).unwrap_or(0.0);
-        let (w, h) = size.unwrap_or_else(|| (self.length(node, "width", fs, vp.0).unwrap_or(vp.0), self.length(node, "height", fs, vp.1).unwrap_or(vp.1)));
+        let w = size.0.unwrap_or_else(|| self.length(node, "width", fs, vp.0).unwrap_or(vp.0));
+        let h = size.1.unwrap_or_else(|| self.length(node, "height", fs, vp.1).unwrap_or(vp.1));
         let vb = view_box(&node);
         let inner_vp = vb.as_ref().map_or((w, h), |v| (v[2], v[3]));
         let saved = std::mem::replace(&mut self.vp, inner_vp);
@@ -639,13 +846,13 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.walk(child, &inh, &mut kids, true);
         }
         self.vp = saved;
-        let sized = vb.is_some() || size.is_some() || node.has_attribute("width") || node.has_attribute("height");
-        if sized || overflows(&kids, w, h) {
-            self.warn(format!("{}: nested svg viewport clipping is not applied", Self::label(&node)));
-        }
         let view = viewbox_transform(vb.as_deref(), node.attribute("preserveAspectRatio").unwrap_or(""), w, h);
-        let transform = compose(vec![self.node_transform(node), translate(x, y), view]);
-        let comp = self.composite(&node, &props);
+        let transform = compose(vec![self.node_transform(node), translate(x, y), view.clone()]);
+        let bbox = elements_bbox(&kids);
+        let mut comp = self.composite(&node, &props, bbox);
+        if viewport_clips(&props) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
+            comp.clips.push(vec![viewport_rect(&view, w, h)]);
+        }
         self.emit(kids, comp, transform, None, out);
     }
 
@@ -672,7 +879,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         let (fs, vp) = (inh.font_size, self.vp);
         let x = self.length(node, "x", fs, vp.0).unwrap_or(0.0);
         let y = self.length(node, "y", fs, vp.1).unwrap_or(0.0);
-        let size = match (self.length(node, "width", fs, vp.0), self.length(node, "height", fs, vp.1)) {
+        let (use_w, use_h) = (self.length(node, "width", fs, vp.0), self.length(node, "height", fs, vp.1));
+        let size = match (use_w, use_h) {
             (None, None) => None,
             (w, h) => Some((w.unwrap_or(vp.0), h.unwrap_or(vp.1))),
         };
@@ -682,19 +890,20 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.use_stack.push(target_id.to_string());
         match target.tag_name().name() {
             "symbol" => self.walk_symbol(target, &inh, size, &mut kids),
-            "svg" => self.walk_nested_svg(target, &inh, size, &mut kids),
+            "svg" => self.walk_nested_svg(target, &inh, (use_w, use_h), &mut kids),
             _ => self.walk(target, &inh, &mut kids, true),
         }
         self.use_stack.pop();
         self.depth -= 1;
 
         let transform = compose(vec![self.node_transform(node), translate(x, y)]);
-        let comp = self.composite(&node, &props);
+        let bbox = elements_bbox(&kids);
+        let comp = self.composite(&node, &props, bbox);
         self.emit(kids, comp, transform, None, out);
     }
 
     fn walk_symbol(&mut self, symbol: Node<'a, 'i>, parent: &Inh, size: Option<(f64, f64)>, out: &mut Vec<Element>) {
-        let Some((inh, _)) = self.begin(symbol, parent) else { return };
+        let Some((inh, props)) = self.begin(symbol, parent) else { return };
         let vb = view_box(&symbol);
         let (w, h) = size.unwrap_or(self.vp);
         let inner_vp = vb.as_ref().map_or((w, h), |v| (v[2], v[3]));
@@ -704,18 +913,19 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.walk(child, &inh, &mut kids, true);
         }
         self.vp = saved;
-        if size.is_some() || vb.is_some() || overflows(&kids, w, h) {
-            self.warn(format!("{}: symbol viewport clipping is not applied", Self::label(&symbol)));
-        }
         let view = viewbox_transform(vb.as_deref(), symbol.attribute("preserveAspectRatio").unwrap_or(""), w, h);
-        self.emit(kids, Comp::NONE, view, None, out);
+        let mut comp = Comp::NONE;
+        if viewport_clips(&props) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
+            comp.clips.push(vec![viewport_rect(&view, w, h)]);
+        }
+        self.emit(kids, comp, view, None, out);
     }
 
     // ── Shapes ────────────────────────────────────────────────────────────────
 
     fn walk_shape(&mut self, node: Node<'a, 'i>, tag: &str, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
         let Some((inh, props)) = self.begin(node, parent) else { return };
-        if inh.hidden {
+        if inh.hidden && (!self.keep_hidden || self.clip_mode) {
             return;
         }
         let (fs, vp) = (inh.font_size, self.vp);
@@ -800,8 +1010,12 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
         };
 
-        let comp = self.composite(&node, &props);
-        let style = self.leaf_style(&inh, &props, bbox, kind);
+        let comp = self.composite(&node, &props, bbox);
+        let mut style = self.leaf_style(&inh, &props, bbox, kind);
+        if inh.hidden {
+            style.fill = Some(Paint::None);
+            style.stroke = Some(Paint::None);
+        }
         let id = if expanded { None } else { node.attribute("id").map(String::from) };
         let transform = self.node_transform(node);
         let element = match shape {
@@ -829,11 +1043,20 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         self.emitted += 1;
-        let parts = if inh.stroke_first { split_paint_order(el) } else { vec![el] };
-        if comp.blend != BlendMode::Normal {
-            let mut layer = Layer::new(parts);
-            layer.blend_mode = comp.blend;
-            out.push(Element::Layer(layer));
+        let mut parts = if inh.stroke_first { split_paint_order(el) } else { vec![el] };
+        if comp.blend != BlendMode::Normal || !comp.clips.is_empty() {
+            // A clip lives in the element's own space, so the element's
+            // transform moves from the shape to the layer that clips it.
+            let mut transform = None;
+            if !comp.clips.is_empty() {
+                for part in parts.iter_mut() {
+                    if let Some(slot) = transform_mut(part) {
+                        let t = slot.take();
+                        transform = transform.or(t);
+                    }
+                }
+            }
+            out.push(layered(parts, 1.0, comp.blend, comp.clips, transform, None));
         } else {
             out.extend(parts);
         }
@@ -842,13 +1065,23 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// Fully resolved style for one shape.
     fn leaf_style(&mut self, inh: &Inh, props: &Props, bbox: Option<BBox>, kind: Kind) -> Style {
         let mut st = Style::default();
-        let fill = if kind == Kind::Line { Paint::None } else { self.resolve_paint(&inh.fill, inh, inh.fill_opacity, bbox) };
-        let stroke = self.resolve_paint(&inh.stroke, inh, inh.stroke_opacity, bbox);
+        // Inside a clip path only geometry counts: opaque black, no stroke,
+        // and `clip-rule` in the place of `fill-rule`.
+        let clip = self.clip_mode;
+        let fill = if clip {
+            Paint::Color(Color::BLACK)
+        } else if kind == Kind::Line {
+            Paint::None
+        } else {
+            self.resolve_paint(&inh.fill, inh, inh.fill_opacity, bbox)
+        };
+        let stroke = if clip { Paint::None } else { self.resolve_paint(&inh.stroke, inh, inh.stroke_opacity, bbox) };
+        let rule = if clip { inh.clip_rule } else { inh.fill_rule };
         st.fill = Some(fill);
         st.stroke = Some(stroke);
-        st.stroke_width = Some(inh.stroke_width);
-        st.opacity = Some(element_opacity(props));
-        st.fill_rule = (inh.fill_rule == msx_ast::FillRule::EvenOdd).then_some(inh.fill_rule);
+        st.stroke_width = Some(if clip { 0.0 } else { inh.stroke_width });
+        st.opacity = Some(if clip { 1.0 } else { element_opacity(props) });
+        st.fill_rule = (rule == msx_ast::FillRule::EvenOdd).then_some(rule);
         st.stroke_linecap = (inh.linecap != msx_ast::LineCap::Butt).then_some(inh.linecap);
         st.stroke_linejoin = (inh.linejoin != msx_ast::LineJoin::Miter).then_some(inh.linejoin);
         st.stroke_miterlimit = (inh.miterlimit != 4.0).then_some(inh.miterlimit);
@@ -969,7 +1202,6 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.collect_runs(node, &inh, (x, y), &mut runs, &mut new_run);
 
         let transform = self.node_transform(node);
-        let comp = self.composite(&node, &props);
         let mut first = true;
         for run in runs {
             let content = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -977,6 +1209,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 continue;
             }
             let bbox = Self::text_bbox(run.x, run.y, &content, &run.inh);
+            let comp = self.composite(&node, &props, bbox);
             let style = self.leaf_style(&run.inh, &props, bbox, Kind::Text);
             let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
             first = false;

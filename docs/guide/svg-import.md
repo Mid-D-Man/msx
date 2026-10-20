@@ -20,6 +20,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Size.** The canvas takes its size from `width`, `height` and `viewBox`. The mapping, including `preserveAspectRatio`, becomes one wrapper transform, so no `viewbox` block is written. The background is transparent.
 - **Gradients.** MSX gradients live in the bounding box of the shape and have no transform. The importer converts `userSpaceOnUse` coordinates and `gradientTransform` into that space for each shape. A linear gradient converts exactly under any transform. A radial gradient converts exactly under uniform scale, rotation and translation. Under a stretch or skew it is approximated by a circle of the same area, and a warning says so.
 - **Compositing.** `opacity` on a group becomes an isolated layer. `mix-blend-mode` becomes the blend mode of a layer for multiply, screen, overlay, darken, lighten, hard-light, soft-light, difference and exclusion. `isolation: isolate` becomes a layer. `paint-order: stroke` becomes two shapes, the stroke first.
+- **Clipping.** `clip-path: url(#id)` on any element becomes a layer with a `clip_path`. `clipPathUnits` of `userSpaceOnUse` and `objectBoundingBox`, the `transform` of the `clipPath`, `clip-rule` and a `clip-path` on the `clipPath` itself (the clips nest, so both apply) are honored. Only shapes with an area, text and a `use` of one of those count, and fill, stroke and opacity inside the clip path are ignored, as in SVG. A `symbol` and a nested `svg` clip to their viewport the same way, unless `overflow` is `visible` or `auto`. The clip is added only when the content can reach past the viewport, so a symbol that fits costs no extra layer.
 - **Transforms.** The `transform` attribute and the CSS `transform` property, with angle and length units, and `transform-origin`.
 - **Conditions.** `switch` draws its first child that passes, and `systemLanguage` and `requiredExtensions` apply to any element. The language is English.
 - **Text.** Whitespace collapses. A `tspan` with its own position becomes its own text element, which gives multi-line text.
@@ -29,14 +30,17 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 
 | SVG feature | Result |
 |---|---|
-| `clip-path`, `mask`, `filter` | Drawn without them |
+| `mask`, `filter` | Drawn without them |
+| `clip-path` that is not `url(#id)`, such as `circle()` | Drawn without it |
+| `clip-path` on a child inside a `clipPath` | Ignored |
+| A `clip-path` that points at a missing element, at something that is not a `clipPath`, or in a cycle | Drawn without it |
+| `<animate>`, `<animateTransform>`, `<animateMotion>`, `<set>`, CSS `animation` and `@keyframes` | The static frame is drawn |
 | `pattern` paint | Fallback color if given, otherwise none |
 | `marker`, `marker-start`, `marker-mid`, `marker-end` | Drawn without markers |
 | `image`, `foreignObject` | Skipped |
 | `textPath` | Its text is skipped |
 | `spreadMethod` of `reflect` or `repeat` | Imported as `pad` |
 | `fr` on a radial gradient, a focal point outside the circle | `fr` ignored, focal point moved onto the circle |
-| Viewport clipping of a `symbol` or nested `svg` | Content is not clipped. A warning appears when the element has a size or `viewBox`, a `use` gives it a size, or its content draws outside the viewport |
 | `context-fill`, `context-stroke` | Painted as none |
 | Blend modes beyond the nine above | Drawn normally |
 | CSS selectors with combinators, attributes or pseudo-classes | The rule is skipped |

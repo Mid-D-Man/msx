@@ -19,7 +19,7 @@ pub type Props = HashMap<String, String>;
 
 /// Attribute names that are presentation properties.
 pub const PRESENTATION: &[&str] = &[
-    "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
+    "fill", "fill-opacity", "fill-rule", "clip-rule", "overflow", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
     "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity", "display", "visibility", "color", "font-size",
     "font-family", "font-weight", "text-anchor", "dominant-baseline", "stop-color", "stop-opacity", "clip-path", "mask",
     "filter", "paint-order", "transform-origin", "transform-box", "marker", "marker-start", "marker-mid",
@@ -43,6 +43,8 @@ pub struct Inh {
     pub fill: PaintSpec,
     pub fill_opacity: f64,
     pub fill_rule: FillRule,
+    /// `clip-rule`, read instead of `fill-rule` inside a clip path.
+    pub clip_rule: FillRule,
     pub stroke: PaintSpec,
     pub stroke_opacity: f64,
     pub stroke_width: f64,
@@ -69,6 +71,7 @@ impl Default for Inh {
             fill: PaintSpec::Color(Color::BLACK),
             fill_opacity: 1.0,
             fill_rule: FillRule::NonZero,
+            clip_rule: FillRule::NonZero,
             stroke: PaintSpec::None,
             stroke_opacity: 1.0,
             stroke_width: 1.0,
@@ -235,6 +238,11 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
     match get("fill-rule") {
         Some("evenodd") => inh.fill_rule = FillRule::EvenOdd,
         Some("nonzero") => inh.fill_rule = FillRule::NonZero,
+        _ => {}
+    }
+    match get("clip-rule") {
+        Some("evenodd") => inh.clip_rule = FillRule::EvenOdd,
+        Some("nonzero") => inh.clip_rule = FillRule::NonZero,
         _ => {}
     }
 

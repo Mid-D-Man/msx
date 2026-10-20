@@ -19,8 +19,26 @@ A `layer` is a container that draws its children into a separate buffer and then
 | `opacity` | Opacity of the whole buffer, 0 to 1 | 1 |
 | `z_index` | Paint order among sibling layers | 0 |
 | `clip` | Clip the children to the layer's own pixel footprint | false |
+| `clip_path` | A list of shapes. Only the area they cover stays visible | none |
 | `effects` | Effects applied to the buffer, in order | none |
 | `id`, `transform` | As for every element | |
+
+## Clip paths
+
+`clip_path` is a list of shapes whose union is the visible area of the layer. Leaving it out clips nothing. An empty list clips everything away, as an empty SVG `clipPath` does.
+
+```
+{ type = "layer", clip_path = [
+    { type = "circle", cx = 50, cy = 50, r = 40 }
+  ],
+  elements = [
+    { type = "rect", x = 0, y = 0, width = 100, height = 100, style = { fill = #f2545b } }
+  ] }
+```
+
+The shapes live in the coordinate space of the layer, so the layer `transform` moves them together with the children. Only geometry and `fill_rule` count: fill, stroke and opacity are ignored, and a `line` has no area. Rectangles, circles, ellipses, polylines, polygons, paths and text are used. The clip is applied after the effects and before the layer blends, so a blurred edge is cut by the clip. Two clips that must both apply are written as one layer inside another.
+
+The SVG renderer writes a `clipPath` element. The CPU renderer builds an antialiased coverage mask. The GPU renderer draws the shapes into a mask texture and multiplies the layer with it, and its edges are not antialiased, as for every GPU shape.
 
 ## Blend modes
 

@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 667 of the 858 files in the resvg test suite. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 739 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -41,7 +41,9 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | Group `opacity` | Expanded | An isolated layer |
 | `mix-blend-mode` | Expanded | Nine modes, others draw normally |
 | `isolation` | Expanded | A layer |
-| `clip-path` | Gap | The format has no clip primitive |
+| `clip-path` with `url(#id)` | Expanded | A layer with a clip path. Both units, `clip-rule`, `transform` and nested clip paths work on all three renderers |
+| `clip-path` as a basic shape such as `circle()` | Gap | Reported |
+| `clip-path` on a child inside a `clipPath` | Gap | Reported, the child is not clipped |
 | `mask` | Gap | |
 | `filter` | Gap | Layers carry blur and shadow effects natively, but the importer does not map filter primitives to them yet |
 | `marker` properties | Gap | |
@@ -50,12 +52,13 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 
 | SVG feature | State | Notes |
 |---|---|---|
-| `g`, `defs`, `use`, `symbol`, nested `svg` | Expanded | Placement and `viewBox` are kept. Viewport clipping is a gap and is reported |
+| `g`, `defs`, `use`, `symbol`, nested `svg` | Expanded | Placement, `viewBox` and viewport clipping are kept, and `overflow` is honored |
 | `viewBox`, `preserveAspectRatio` | Expanded | One wrapper transform |
 | `transform`, CSS `transform`, `transform-origin` | Expanded | `transform-box` other than `view-box` is a gap |
 | `switch`, `systemLanguage`, `requiredExtensions` | Expanded | The language is English |
 | `<style>` rules | Partial | Type, id and class selectors and their compounds. Combinators, attributes and pseudo-classes are skipped |
 | `image`, `foreignObject` | Gap | The format has an image element, the writer and importer do not use it yet |
+| `animate`, `animateTransform`, `animateMotion`, `set`, CSS `animation` | Gap | Reported, the static frame is drawn. MSX has animation tracks, but the importer does not map to them yet and the writer refuses animated scenes |
 
 ## Text
 
@@ -83,7 +86,7 @@ Imported files do not depend on the rows marked No, because the importer writes 
 
 The remaining gaps share a few causes, so they are closed in this order.
 
-1. A clip primitive on groups and layers. It closes `clip-path`, `symbol` and nested `svg` viewport clipping and is the base for masks.
+1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks build on the same layer machinery and come next.
 2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
 3. Patterns, as a tiled group with its own transform.
 4. Markers, expanded by the importer into shapes along the path.

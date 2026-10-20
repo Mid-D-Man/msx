@@ -132,7 +132,7 @@
 
 use wgpu::util::DeviceExt;
 
-use msx_ast::{Def, Element, Group, Layer, Matrix2D};
+use msx_ast::{Color, Def, Element, Group, Layer, Matrix2D, Paint, Style};
 
 use crate::effects::GpuEffects;
 use crate::masked_shader_composite::MaskedShaderComposite;
@@ -212,6 +212,11 @@ pub struct LayerCompositor {
     // case.
     blend_pipeline: wgpu::RenderPipeline,
     blend_bind_group_layout: wgpu::BindGroupLayout,
+    // `Layer::clip_path`: same shader and bind group layout as `pipeline`,
+    // but the blend state multiplies the destination by the mask's alpha
+    // (`dst * src.a`, source term dropped), so drawing the mask texture over
+    // a layer buffer keeps only the covered part. See `apply_clip_path`.
+    mask_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
 }
 
@@ -412,7 +417,38 @@ impl LayerCompositor {
             cache: None,
         });
 
-        LayerCompositor { pipeline, bind_group_layout, blend_pipeline, blend_bind_group_layout, sampler }
+        let multiply_by_alpha = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::SrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("msx layer clip mask pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState { color: multiply_by_alpha, alpha: multiply_by_alpha }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        LayerCompositor { pipeline, bind_group_layout, blend_pipeline, blend_bind_group_layout, mask_pipeline, sampler }
     }
 
     /// Renders `layer`'s children into a fresh offscreen buffer (vector +
@@ -523,9 +559,80 @@ impl LayerCompositor {
         // itself, unblurred, is what gets composited; see `GpuEffects::apply`'s
         // own doc for why that's cheap rather than a wasted allocation.
         let blurred = gpu_effects.apply(device, queue, &buffer, &layer.effects);
+
+        // The clip path comes after the effects (SVG order: filter, then
+        // clip) and before the layer composites, so a blurred edge is cut
+        // by the clip rather than blurring the cut.
+        if let Some(shapes) = &layer.clip_path {
+            let masked = blurred.as_ref().unwrap_or(&buffer);
+            let mask = OffscreenTarget::new(device, canvas.0, canvas.1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            render_ordered(
+                device,
+                queue,
+                &mask,
+                &clip_shapes_as_mask(shapes),
+                combined,
+                canvas_f,
+                wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+                self,
+                vector_pipeline,
+                sdf_pipeline,
+                splat_pipeline,
+                shader_pipeline,
+                masked_shader_composite,
+                image_pipeline,
+                gpu_effects,
+                &defs,
+                scene_defs,
+                shader_base_dir,
+                time,
+            );
+            self.apply_clip_path(device, queue, &masked.view, &mask.view);
+        }
+
         let composite_src = blurred.as_ref().map(|b| &b.view).unwrap_or(&buffer.view);
 
         self.composite(device, queue, target, composite_src, layer.opacity as f32, layer.blend_mode);
+    }
+
+    /// Multiplies `dst_view` by the alpha of `mask_view` in place. `mask_view`
+    /// holds the clip shapes drawn opaque white on transparent, so its alpha is
+    /// the clip coverage, and the pipeline's blend state is `dst * mask.a`.
+    fn apply_clip_path(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, mask_view: &wgpu::TextureView) {
+        let params = CompositeParams { opacity: 1.0, _pad: [0.0; 7] };
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("msx clip mask params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("msx clip mask bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(mask_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("msx clip mask encoder") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("msx clip mask pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.mask_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Blends `src_view` (a fully-rendered layer buffer — see this
@@ -703,6 +810,41 @@ impl LayerCompositor {
 /// composite semantics at all, since tessellation only ever produces
 /// vertices for the shared vertex/index buffers those crates draw in one
 /// batch.
+/// The clip shapes as plain opaque white geometry, so the normal vector pass
+/// draws them into a mask whose alpha is the clip coverage. Only geometry and
+/// `fill_rule` survive: fill, stroke and opacity are replaced, a `Line` has no
+/// area and is dropped, and a `Use` is dropped because its target is not in
+/// the mask's own element list (the importer never writes one into a clip
+/// path). Anything that is not a simple shape is dropped too.
+fn clip_shapes_as_mask(shapes: &[Element]) -> Vec<Element> {
+    fn white(style: &Style) -> Style {
+        Style {
+            fill: Some(Paint::Color(Color::WHITE)),
+            stroke: Some(Paint::None),
+            stroke_width: Some(0.0),
+            opacity: Some(1.0),
+            fill_rule: style.fill_rule,
+            ..Default::default()
+        }
+    }
+    shapes
+        .iter()
+        .filter_map(|el| {
+            Some(match el {
+                Element::Rect(e) => Element::Rect(msx_ast::Rect { style: white(&e.style), ..e.clone() }),
+                Element::Circle(e) => Element::Circle(msx_ast::Circle { style: white(&e.style), ..e.clone() }),
+                Element::Ellipse(e) => Element::Ellipse(msx_ast::Ellipse { style: white(&e.style), ..e.clone() }),
+                Element::Polyline(e) => Element::Polyline(msx_ast::Polyline { style: white(&e.style), ..e.clone() }),
+                Element::Polygon(e) => Element::Polygon(msx_ast::Polyline { style: white(&e.style), ..e.clone() }),
+                Element::Path(e) => Element::Path(msx_ast::Path { style: white(&e.style), ..e.clone() }),
+                Element::Text(e) => Element::Text(msx_ast::Text { style: white(&e.style), ..e.clone() }),
+                Element::Group(g) => Element::Group(Group { children: clip_shapes_as_mask(&g.children), style: None, ..g.clone() }),
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
 fn group_contains_layer(elements: &[Element]) -> bool {
     elements.iter().any(|el| match el {
         Element::Layer(_) => true,

@@ -2,7 +2,7 @@
 //! Geometry the importer needs to convert gradients: matrix inversion and
 //! the exact bounding box of a path, including arcs and curve extrema.
 
-use msx_ast::{Element, Matrix2D, PathCommand, Point, Transform};
+use msx_ast::{Element, Matrix2D, Paint, PathCommand, Point, Style, Transform};
 
 /// Axis-aligned box, `x`/`y` is the top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -172,15 +172,47 @@ pub fn arc_to_cubics(x1: f64, y1: f64, rx: f64, ry: f64, x_rot_deg: f64, large: 
 /// skipped, so `None` also means "nothing measurable".
 pub fn elements_bbox(els: &[Element], m: Matrix2D) -> Option<BBox> {
     let mut ext = Extent::default();
-    collect_extent(els, m, &mut ext);
+    collect_extent(els, m, &mut ext, false);
     let (mn, mx) = (ext.min?, ext.max?);
     Some(BBox::from_corners(mn.0, mn.1, mx.0, mx.1))
+}
+
+/// True when drawing `els` reaches outside the viewport `(x0, y0, x1, y1)`, or
+/// when that cannot be measured (text, images, sdf, splats and `use` have no
+/// simple extent, so the answer is a cautious yes). Half the stroke width
+/// counts, so an outline poking over the edge is seen.
+pub fn reaches_outside(els: &[Element], (x0, y0, x1, y1): (f64, f64, f64, f64)) -> bool {
+    const SLACK: f64 = 1e-3;
+    let mut ext = Extent::default();
+    if !collect_extent(els, Matrix2D::identity(), &mut ext, true) {
+        return true;
+    }
+    match (ext.min, ext.max) {
+        (Some(mn), Some(mx)) => mn.0 < x0 - SLACK || mn.1 < y0 - SLACK || mx.0 > x1 + SLACK || mx.1 > y1 + SLACK,
+        _ => false,
+    }
 }
 
 fn local_matrix(outer: Matrix2D, t: &Option<Transform>) -> Matrix2D {
     match t {
         Some(t) => mul(outer, t.to_matrix()),
         None => outer,
+    }
+}
+
+/// Half the visible stroke width of `style` in the space `m` maps to, or zero.
+fn stroke_pad(style: &Style, m: Matrix2D, on: bool) -> f64 {
+    match (&style.stroke, style.stroke_width.unwrap_or(1.0)) {
+        (Some(p), w) if on && *p != Paint::None && w > 0.0 => w / 2.0 * m.a.hypot(m.b).max(m.c.hypot(m.d)),
+        _ => 0.0,
+    }
+}
+
+/// Merges one leaf, padded by `pad`, into `ext`.
+fn merge_padded(ext: &mut Extent, leaf: Extent, pad: f64) {
+    if let (Some(mn), Some(mx)) = (leaf.min, leaf.max) {
+        ext.add(mn.0 - pad, mn.1 - pad);
+        ext.add(mx.0 + pad, mx.1 + pad);
     }
 }
 
@@ -201,46 +233,67 @@ fn add_ellipse(ext: &mut Extent, m: Matrix2D, cx: f64, cy: f64, rx: f64, ry: f64
     ext.add(px + hx, py + hy);
 }
 
-fn collect_extent(els: &[Element], outer: Matrix2D, ext: &mut Extent) {
+/// Collects the extent of `els`. Returns false when something without a
+/// simple extent was met.
+fn collect_extent(els: &[Element], outer: Matrix2D, ext: &mut Extent, stroke: bool) -> bool {
+    let mut measurable = true;
     for el in els {
-        match el {
+        let mut leaf = Extent::default();
+        let pad = match el {
             Element::Rect(r) => {
                 let m = local_matrix(outer, &r.transform);
-                add_corners(ext, m, (r.x, r.y, r.x + r.width, r.y + r.height));
+                add_corners(&mut leaf, m, (r.x, r.y, r.x + r.width, r.y + r.height));
+                stroke_pad(&r.style, m, stroke)
             }
             Element::Circle(c) => {
                 let m = local_matrix(outer, &c.transform);
-                add_ellipse(ext, m, c.cx, c.cy, c.r, c.r);
+                add_ellipse(&mut leaf, m, c.cx, c.cy, c.r, c.r);
+                stroke_pad(&c.style, m, stroke)
             }
             Element::Ellipse(e) => {
                 let m = local_matrix(outer, &e.transform);
-                add_ellipse(ext, m, e.cx, e.cy, e.rx, e.ry);
+                add_ellipse(&mut leaf, m, e.cx, e.cy, e.rx, e.ry);
+                stroke_pad(&e.style, m, stroke)
             }
             Element::Line(l) => {
                 let m = local_matrix(outer, &l.transform);
                 for (x, y) in [(l.x1, l.y1), (l.x2, l.y2)] {
                     let (px, py) = apply(m, x, y);
-                    ext.add(px, py);
+                    leaf.add(px, py);
                 }
+                stroke_pad(&l.style, m, stroke)
             }
             Element::Polyline(p) | Element::Polygon(p) => {
                 let m = local_matrix(outer, &p.transform);
                 for pt in &p.points {
                     let (px, py) = apply(m, pt.x, pt.y);
-                    ext.add(px, py);
+                    leaf.add(px, py);
                 }
+                stroke_pad(&p.style, m, stroke)
             }
             Element::Path(p) => {
+                let m = local_matrix(outer, &p.transform);
                 if let Some(b) = path_bbox(&p.commands) {
-                    let m = local_matrix(outer, &p.transform);
-                    add_corners(ext, m, (b.x, b.y, b.x + b.w, b.y + b.h));
+                    add_corners(&mut leaf, m, (b.x, b.y, b.x + b.w, b.y + b.h));
                 }
+                stroke_pad(&p.style, m, stroke)
             }
-            Element::Group(g) => collect_extent(&g.children, local_matrix(outer, &g.transform), ext),
-            Element::Layer(l) => collect_extent(&l.children, local_matrix(outer, &l.transform), ext),
-            _ => {}
-        }
+            Element::Group(g) => {
+                measurable &= collect_extent(&g.children, local_matrix(outer, &g.transform), ext, stroke);
+                continue;
+            }
+            Element::Layer(l) => {
+                measurable &= collect_extent(&l.children, local_matrix(outer, &l.transform), ext, stroke);
+                continue;
+            }
+            _ => {
+                measurable = false;
+                continue;
+            }
+        };
+        merge_padded(ext, leaf, pad);
     }
+    measurable
 }
 
 pub fn path_bbox(cmds: &[PathCommand]) -> Option<BBox> {

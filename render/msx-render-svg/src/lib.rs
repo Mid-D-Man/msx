@@ -272,6 +272,44 @@ mod tests {
     }
 
     #[test]
+    fn layer_clip_path_becomes_a_clip_path_element_with_clip_rule() {
+        let mut even = style_solid(Color::rgb(0, 0, 0));
+        even.fill_rule = Some(msx_ast::FillRule::EvenOdd);
+        let clip = vec![
+            Element::Rect(Rect { x: 1.0, y: 2.0, width: 30.0, height: 40.0, rx: None, ry: None, id: None, transform: None, style: style_solid(Color::rgb(0, 0, 0)) }),
+            Element::Circle(Circle { cx: 9.0, cy: 8.0, r: 7.0, id: None, transform: None, style: even }),
+        ];
+        let layer = Layer::new(vec![Element::Circle(Circle { cx: 10.0, cy: 10.0, r: 5.0, id: None, transform: None, style: style_solid(Color::rgb(10, 20, 30)) })])
+            .with_clip_path(clip);
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(layer));
+        let svg = render(&scene);
+
+        assert!(svg.contains(r#"clip-path="url(#layer-clip-1)""#), "{svg}");
+        let def = svg.split("<clipPath").nth(1).expect("a clipPath in the defs");
+        let def = def.split("</clipPath>").next().unwrap();
+        assert!(def.contains("<rect") && def.contains("<circle"), "{def}");
+        assert!(def.contains(r#"clip-rule="evenodd""#) && !def.contains("fill-rule"), "{def}");
+    }
+
+    #[test]
+    fn empty_layer_clip_path_gives_an_empty_clip_path_element() {
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(Layer::new(vec![]).with_clip_path(vec![])));
+        let svg = render(&scene);
+        assert!(svg.contains(r#"<clipPath id="layer-clip-1"></clipPath>"#), "{svg}");
+        assert!(svg.contains(r#"clip-path="url(#layer-clip-1)""#), "{svg}");
+    }
+
+    #[test]
+    fn layers_without_a_clip_path_emit_no_clip_attributes() {
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(Layer::new(vec![])));
+        let svg = render(&scene);
+        assert!(!svg.contains("clip"), "{svg}");
+    }
+
+    #[test]
     fn z_index_reorders_emitted_g_elements_not_just_data() {
         // "front" is authored first (would emit its <g> first, and so
         // paint underneath, under plain SVG document order) but carries

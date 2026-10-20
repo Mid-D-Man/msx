@@ -443,7 +443,10 @@ fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     write_u8(out, e.blend_mode.to_byte());
     write_f32(out, e.opacity);
-    write_u8(out, e.clip as u8);
+    // Bit 0 is `clip`. Bit 1 says a clip path follows the z_index. Files
+    // written before clip paths existed only ever hold 0 or 1 here, so they
+    // still decode unchanged.
+    write_u8(out, e.clip as u8 | ((e.clip_path.is_some() as u8) << 1));
     write_u16(out, e.effects.len() as u16);
     for fx in &e.effects { write_effect(out, fx); }
     write_u32(out, e.children.len() as u32);
@@ -453,6 +456,10 @@ fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     // a breaking wire-format change either way (no external readers of
     // this format exist yet), but costs nothing to keep consistent.
     write_f32(out, e.z_index);
+    if let Some(shapes) = &e.clip_path {
+        write_u32(out, shapes.len() as u32);
+        for shape in shapes { encode_element(shape, out, pool); }
+    }
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
@@ -584,6 +591,39 @@ mod tests {
         } else {
             panic!("expected Layer");
         }
+    }
+
+    #[test]
+    fn layer_clip_paths_survive_compile_and_decode() {
+        use msx_ast::{Circle, FillRule, Rect};
+
+        let mut even = Style::empty();
+        even.fill_rule = Some(FillRule::EvenOdd);
+        let shapes = vec![
+            Element::Rect(Rect { x: 1.0, y: 2.0, width: 30.0, height: 40.0, rx: None, ry: None, id: None, transform: None, style: Style::empty() }),
+            Element::Circle(Circle { cx: 9.0, cy: 8.0, r: 7.0, id: None, transform: None, style: even }),
+        ];
+        let mut clipped = Layer::new(vec![]).with_clip_path(shapes);
+        clipped.clip = true;
+        let nothing = Layer::new(vec![]).with_clip_path(vec![]);
+        let plain = Layer::new(vec![]);
+
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.elements = vec![Element::Layer(clipped), Element::Layer(nothing), Element::Layer(plain)];
+        let decoded = crate::decode(&compile(&scene, false).unwrap()).unwrap();
+
+        let layers: Vec<&Layer> = decoded.elements.iter().map(|e| match e { Element::Layer(l) => l, _ => panic!("layer") }).collect();
+        assert!(layers[0].clip, "the clip flag shares a byte with the clip path flag");
+        let shapes = layers[0].clip_path.as_ref().expect("clip path kept");
+        assert_eq!(shapes.len(), 2);
+        assert!(matches!(shapes[0], Element::Rect(_)));
+        match &shapes[1] {
+            Element::Circle(c) => assert_eq!(c.style.fill_rule, Some(FillRule::EvenOdd)),
+            _ => panic!("circle"),
+        }
+        assert_eq!(layers[1].clip_path.as_ref().map(Vec::len), Some(0));
+        assert!(!layers[1].clip);
+        assert!(layers[2].clip_path.is_none());
     }
 
     /// Regression test for a real bug found in `examples/mid-qr-k.msx`:

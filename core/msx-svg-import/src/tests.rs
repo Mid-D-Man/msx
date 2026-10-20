@@ -235,7 +235,7 @@ fn unsupported_features_are_reported() {
             <image href="x.png" width="5" height="5"/>
             <pattern id="p"/><rect width="1" height="1" fill="url(#p)"/>"##,
     ));
-    for needle in ["clip-path", "filter", "mask", "<image", "pattern"] {
+    for needle in ["clip path", "filter", "mask", "<image", "pattern"] {
         assert!(has_warning(&i, needle), "missing a warning about {needle}: {:?}", i.warnings);
     }
     assert_eq!(i.scene.elements.len(), 4, "shapes are still imported, the image is not");
@@ -330,7 +330,7 @@ fn nested_svg_and_switch() {
     let Some(Transform::Multiple(t)) = &g.transform else { panic!("translate then scale") };
     assert!(matches!(t[0], Transform::Translate { x, y } if x == 10.0 && y == 20.0));
     assert!(matches!(t[1], Transform::Scale { x, y } if x == 10.0 && y == 10.0));
-    assert!(has_warning(&i, "clipping"));
+    assert!(!has_warning(&i, "clipping"), "content that fits needs no clip: {:?}", i.warnings);
     assert_eq!(i.scene.elements.len(), 2, "switch draws only its first child");
     assert_eq!(rect(&i.scene.elements[1]).id.as_deref(), Some("a"));
 }
@@ -791,22 +791,6 @@ fn markers_and_context_paint_are_reported() {
 }
 
 #[test]
-fn symbol_content_outside_its_default_viewport_is_reported() {
-    let i = imp(&doc(r##"<symbol id="s"><rect x="-20" y="-10" width="120" height="120"/></symbol><use href="#s"/>"##));
-    assert!(has_warning(&i, "symbol viewport clipping"));
-    let fits = imp(&doc(r##"<symbol id="s"><rect x="10" y="10" width="50" height="50"/></symbol><use href="#s"/>"##));
-    assert!(!has_warning(&fits, "symbol viewport clipping"), "{:?}", fits.warnings);
-}
-
-#[test]
-fn use_size_on_a_nested_svg_is_reported() {
-    let i = imp(&doc(r##"<defs><svg id="s"><circle cx="10" cy="10" r="5"/></svg></defs><use href="#s" width="20" height="20"/>"##));
-    assert!(has_warning(&i, "nested svg viewport clipping"));
-    let plain = imp(&doc(r##"<svg x="5" y="5"><circle cx="10" cy="10" r="5"/></svg>"##));
-    assert!(!has_warning(&plain, "nested svg viewport clipping"), "{:?}", plain.warnings);
-}
-
-#[test]
 fn root_transform_origin_percentages_use_the_viewport() {
     // 200 by 200 canvas over a 100 by 100 viewBox: 25% 75% is (50, 150) in
     // the canvas, so scale(0.5) about that point sends user (20, 20) to (45, 95).
@@ -826,12 +810,6 @@ fn ignored_text_and_stroke_properties_are_reported() {
     }
     let plain = imp(&doc(r#"<text x="0" y="10" style="text-decoration: none; letter-spacing: normal" font-style="normal">hi</text>"#));
     assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
-}
-
-#[test]
-fn symbol_viewport_clipping_is_reported() {
-    let i = imp(&doc(r##"<symbol id="s"><rect width="10" height="10"/></symbol><use href="#s" width="5" height="5"/>"##));
-    assert!(has_warning(&i, "symbol viewport clipping"));
 }
 
 #[test]
@@ -856,4 +834,233 @@ fn bounding_box_gradient_on_an_empty_box_uses_the_fallback_color() {
     let Element::Line(b) = &i.scene.elements[1] else { panic!("line") };
     assert_eq!(b.style.stroke, Some(Paint::None), "and nothing when there is none");
     assert!(i.scene.defs.is_empty());
+}
+
+// ── clip-path, symbol and nested svg viewports, animation ────────────────────
+
+fn layer(e: &Element) -> &Layer {
+    match e {
+        Element::Layer(l) => l,
+        other => panic!("expected a layer, got {other:?}"),
+    }
+}
+
+/// The geometry of a clip rect: `(x, y, width, height)`.
+fn clip_rect(e: &Element) -> (f64, f64, f64, f64) {
+    let r = rect(e);
+    (r.x, r.y, r.width, r.height)
+}
+
+#[test]
+fn clip_path_in_user_space_wraps_the_shape_in_a_clipped_layer() {
+    let i = imp(&doc(r##"<defs><clipPath id="c"><rect x="10" y="10" width="30" height="30"/></clipPath></defs>
+        <rect width="100" height="100" fill="red" clip-path="url(#c)"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.elements.len(), 1);
+    let l = layer(&i.scene.elements[0]);
+    let clip = l.clip_path.as_ref().expect("a clip path");
+    assert_eq!(clip.len(), 1);
+    assert_eq!(clip_rect(&clip[0]), (10.0, 10.0, 30.0, 30.0));
+    assert_eq!(l.children.len(), 1);
+    assert_eq!(rect(&l.children[0]).width, 100.0);
+}
+
+#[test]
+fn clip_path_on_a_transformed_shape_moves_the_transform_to_the_layer() {
+    let i = imp(&doc(r##"<defs><clipPath id="c"><rect width="10" height="10"/></clipPath></defs>
+        <rect width="20" height="20" transform="translate(5 6)" clip-path="url(#c)"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert!(matches!(l.transform, Some(Transform::Translate { x, y }) if x == 5.0 && y == 6.0), "{:?}", l.transform);
+    assert!(rect(&l.children[0]).transform.is_none(), "the shape no longer carries it");
+}
+
+#[test]
+fn clip_path_on_a_group_clips_the_whole_group() {
+    let i = imp(&doc(r##"<defs><clipPath id="c"><circle cx="5" cy="5" r="5"/></clipPath></defs>
+        <g clip-path="url(#c)" transform="translate(3 4)"><rect width="9" height="9"/><rect x="20" width="9" height="9"/></g>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert!(l.clip_path.is_some());
+    assert_eq!(l.children.len(), 2);
+    assert!(l.transform.is_some());
+}
+
+#[test]
+fn clip_path_object_bounding_box_units_map_the_unit_square_onto_the_shape() {
+    let i = imp(&doc(r##"<defs><clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="0.5" height="1"/></clipPath></defs>
+        <rect x="20" y="10" width="40" height="20" clip-path="url(#c)"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    let clip = l.clip_path.as_ref().unwrap();
+    let Element::Group(g) = &clip[0] else { panic!("the unit square group") };
+    let m = g.transform.as_ref().expect("bbox transform").to_matrix();
+    let (x, y) = geom::apply(m, 0.5, 1.0);
+    assert!(close(x, 40.0) && close(y, 30.0), "got ({x}, {y})");
+    let (x0, y0) = geom::apply(m, 0.0, 0.0);
+    assert!(close(x0, 20.0) && close(y0, 10.0));
+}
+
+#[test]
+fn clip_path_object_bounding_box_on_an_empty_box_clips_everything() {
+    let i = imp(&doc(r##"<defs><clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="1" height="1"/></clipPath></defs>
+        <g clip-path="url(#c)"><line x1="0" y1="0" x2="10" y2="0" stroke="red"/></g>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(l.clip_path.as_ref().map(Vec::len), Some(0));
+}
+
+#[test]
+fn clip_path_uses_clip_rule_and_ignores_paint() {
+    let i = imp(&doc(r##"<defs><clipPath id="c" clip-rule="evenodd"><rect width="5" height="5" fill="none" stroke="red" stroke-width="3" opacity=".1" fill-rule="nonzero"/>
+            <circle cx="9" cy="9" r="2" clip-rule="nonzero"/></clipPath></defs>
+        <rect width="20" height="20" clip-path="url(#c)"/>"##));
+    let clip = layer(&i.scene.elements[0]).clip_path.as_ref().unwrap();
+    let r = rect(&clip[0]);
+    assert_eq!(r.style.fill_rule, Some(msx_ast::FillRule::EvenOdd), "clip-rule is inherited from the clipPath");
+    assert_eq!(r.style.stroke, Some(Paint::None));
+    assert_eq!(r.style.opacity, Some(1.0));
+    let Element::Circle(c) = &clip[1] else { panic!("circle") };
+    assert_eq!(c.style.fill_rule, None, "nonzero is the default and stays unwritten");
+}
+
+#[test]
+fn clip_path_only_takes_shapes_with_an_area_text_and_use_of_those() {
+    let i = imp(&doc(r##"<defs><clipPath id="c">
+            <line x1="0" y1="0" x2="9" y2="9"/><g><rect width="9" height="9"/></g><image href="a.png" width="3" height="3"/>
+            <rect id="ok" width="4" height="4"/><rect width="4" height="4" visibility="hidden"/><rect width="4" height="4" display="none"/>
+            <text x="1" y="9">A</text><use href="#ok" x="10"/></clipPath>
+          <symbol id="sym"><rect width="2" height="2"/></symbol><clipPath id="d"><use href="#sym"/></clipPath></defs>
+        <rect width="20" height="20" clip-path="url(#c)"/><rect width="20" height="20" clip-path="url(#d)"/>"##));
+    let c = layer(&i.scene.elements[0]).clip_path.as_ref().unwrap();
+    assert_eq!(c.len(), 3, "rect, text and the use of the rect: {c:?}");
+    assert!(matches!(c[1], Element::Text(_)));
+    let d = layer(&i.scene.elements[1]).clip_path.as_ref().unwrap();
+    assert!(d.is_empty(), "a use of a symbol is not a valid child");
+}
+
+#[test]
+fn clip_path_on_a_clip_path_nests_a_second_layer() {
+    let i = imp(&doc(r##"<defs><clipPath id="a" clip-path="url(#b)"><rect width="30" height="30"/></clipPath>
+        <clipPath id="b"><rect width="10" height="40"/></clipPath></defs>
+        <rect width="50" height="50" clip-path="url(#a)"/>"##));
+    let outer = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&outer.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 30.0, 30.0));
+    let inner = layer(&outer.children[0]);
+    assert_eq!(clip_rect(&inner.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 10.0, 40.0));
+    assert_eq!(rect(&inner.children[0]).width, 50.0);
+}
+
+#[test]
+fn unusable_clip_references_are_reported_and_draw_unclipped() {
+    let i = imp(&doc(r##"<defs><clipPath id="self" clip-path="url(#self)"><rect width="5" height="5"/></clipPath><rect id="notclip" width="1" height="1"/></defs>
+        <rect width="9" height="9" clip-path="url(#missing)"/>
+        <rect width="9" height="9" clip-path="url(#notclip)"/>
+        <rect width="9" height="9" clip-path="circle(5px)"/>
+        <rect width="9" height="9" clip-path="url(#self)"/>"##));
+    for needle in ["#missing", "#notclip", "circle(5px)", "refers back to itself"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    assert!(i.scene.elements.iter().any(|e| matches!(e, Element::Rect(_))), "the unclipped rects are still drawn");
+}
+
+#[test]
+fn symbol_viewport_clips_content_that_overflows_it() {
+    // viewBox 0 0 10 10 scaled to the 100 by 100 use: the viewport is (0, 0, 10, 10) in symbol space.
+    let i = imp(&doc(r##"<symbol id="s" viewBox="0 0 10 10"><rect width="20" height="20"/></symbol><use href="#s" width="100" height="100"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 10.0, 10.0));
+    assert!(matches!(l.transform, Some(Transform::Scale { x, y }) if x == 10.0 && y == 10.0), "{:?}", l.transform);
+}
+
+#[test]
+fn symbol_without_a_viewbox_clips_to_the_use_viewport() {
+    let i = imp(&doc(r##"<symbol id="s"><rect x="-20" y="-10" width="120" height="120"/></symbol><use href="#s"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 100.0, 100.0));
+}
+
+#[test]
+fn viewport_clip_is_skipped_when_the_content_fits_or_overflow_is_visible() {
+    let fits = imp(&doc(r##"<symbol id="s" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20"/></symbol><use href="#s" width="48" height="48"/>"##));
+    assert!(matches!(fits.scene.elements[0], Element::Group(_)), "no layer for content that fits: {:?}", fits.scene.elements[0]);
+    let visible = imp(&doc(r##"<symbol id="s" overflow="visible" viewBox="0 0 10 10"><rect width="20" height="20"/></symbol><use href="#s" width="100" height="100"/>"##));
+    assert!(matches!(visible.scene.elements[0], Element::Group(_)));
+    let auto = imp(&doc(r##"<defs><svg id="n" width="10" height="10" style="overflow:auto"><circle cx="5" cy="5" r="30"/></svg></defs><use href="#n"/>"##));
+    assert!(!matches!(auto.scene.elements[0], Element::Layer(_)));
+}
+
+#[test]
+fn stroke_poking_over_the_viewport_edge_is_clipped() {
+    let i = imp(&doc(r##"<symbol id="s" viewBox="0 0 10 10"><rect width="10" height="10" fill="none" stroke="red" stroke-width="4"/></symbol><use href="#s" width="10" height="10"/>"##));
+    assert!(matches!(i.scene.elements[0], Element::Layer(_)), "the outline reaches 2 units past the edge");
+}
+
+#[test]
+fn text_inside_a_symbol_is_clipped_because_its_extent_is_unknown() {
+    let i = imp(&doc(r##"<symbol id="s" viewBox="0 0 10 10"><text x="1" y="5">Hello there</text></symbol><use href="#s" width="10" height="10"/>"##));
+    assert!(matches!(i.scene.elements[0], Element::Layer(_)));
+}
+
+#[test]
+fn nested_svg_viewport_clips_through_a_use_size() {
+    let i = imp(&doc(r##"<defs><svg id="s"><circle cx="10" cy="10" r="30"/></svg></defs><use href="#s" width="20" height="20"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 20.0, 20.0));
+    let plain = imp(&doc(r##"<svg x="5" y="5" width="30" height="30"><circle cx="10" cy="10" r="5"/></svg>"##));
+    assert!(!matches!(plain.scene.elements[0], Element::Layer(_)));
+}
+
+#[test]
+fn animations_are_reported_instead_of_dropped_silently() {
+    let i = imp(&doc(r##"<style>@keyframes spin { to { transform: rotate(360deg) } } .a { animation: spin 2s infinite }</style>
+        <rect width="5" height="5"><animate attributeName="x" from="0" to="9" dur="1s"/></rect>
+        <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="rotate" to="90" dur="1s"/><rect width="1" height="1"/></g>
+        <rect width="5" height="5"><set attributeName="fill" to="red"/></rect>"##));
+    for needle in ["@keyframes", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    assert!(i.scene.elements.len() >= 3, "the static frame is still drawn");
+}
+
+#[test]
+fn clipped_imports_survive_write_and_parse() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60">
+        <defs><clipPath id="c" clip-rule="evenodd"><path d="M0 0H40V40H0Z M10 10H30V30H10Z"/><circle cx="60" cy="30" r="9"/></clipPath>
+        <clipPath id="o" clipPathUnits="objectBoundingBox"><rect width=".5" height="1"/></clipPath></defs>
+        <rect width="80" height="60" fill="#f00" clip-path="url(#c)"/>
+        <g clip-path="url(#o)" transform="translate(5 5)"><rect width="40" height="20" fill="#00f"/></g></svg>"##;
+    let i = imp(svg);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));
+}
+
+#[test]
+fn use_that_sets_only_a_width_keeps_the_nested_svg_height() {
+    let i = imp(&doc(r##"<defs><svg id="s" x="40" y="40" width="80" height="80"><circle cx="100" cy="100" r="120"/></svg></defs><use href="#s" width="100"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 100.0, 80.0));
+}
+
+#[test]
+fn symbol_viewport_follows_a_view_box_that_does_not_start_at_the_origin() {
+    // The viewBox covers -100..100, so content past 100 is clipped and 20..100 stays.
+    let i = imp(&doc(r##"<symbol id="s" viewBox="-100 -100 200 200"><rect x="20" y="20" width="160" height="160"/></symbol><use href="#s" width="100" height="100"/>"##));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (-100.0, -100.0, 200.0, 200.0));
+}
+
+#[test]
+fn hidden_shapes_still_count_toward_an_object_bounding_box_clip() {
+    let svg = r##"<clipPath id="c" clipPathUnits="objectBoundingBox"><circle cx=".5" cy=".5" r=".45"/></clipPath>
+        <g clip-path="url(#c)"><rect x="20" y="20" width="160" height="160" fill="red" visibility="hidden"/><rect x="40" y="40" width="120" height="120" fill="green"/></g>"##;
+    let i = imp(&doc(svg));
+    let l = layer(&i.scene.elements[0]);
+    let Element::Group(g) = &l.clip_path.as_ref().unwrap()[0] else { panic!("bbox group") };
+    let m = g.transform.as_ref().unwrap().to_matrix();
+    let (x1, y1) = geom::apply(m, 1.0, 1.0);
+    assert!(close(x1, 180.0) && close(y1, 180.0), "the hidden rect sets the box: ({x1}, {y1})");
+    assert_eq!(l.children.len(), 2);
+    assert_eq!(rect(&l.children[0]).style.fill, Some(Paint::None), "the hidden rect draws nothing");
+    // Without such a clip path, hidden shapes are dropped as before.
+    let plain = imp(&doc(r#"<g><rect width="9" height="9" visibility="hidden"/><rect width="5" height="5"/></g>"#));
+    assert_eq!(plain.scene.elements.len(), 1);
 }

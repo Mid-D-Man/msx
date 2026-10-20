@@ -628,4 +628,64 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let px = target.get_pixel(13, 10);
         assert!(px[0] > 0 && px[0] < 255, "expected a blurred (partial) red channel past the edge, got {:?} — 0 means blur didn't run at all, 255 means the edge itself moved", px);
     }
+
+    fn clip_rect(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {
+        let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
+        Element::Rect(Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style })
     }
+
+    /// 40 by 40 blue backdrop, a full red layer clipped by `clip`.
+    fn render_clipped_red(clip: Option<Vec<Element>>, transform: Option<msx_ast::Transform>) -> Option<RenderTarget> {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return None;
+        };
+        let mut layer = Layer::new(vec![clip_rect(-20.0, -20.0, 80.0, 80.0, Color::rgb(255, 0, 0))]);
+        layer.clip_path = clip;
+        layer.transform = transform;
+        let mut scene = Scene::new(Canvas::new(40.0, 40.0, Color::rgb(0, 0, 255)));
+        scene.elements.push(Element::Layer(layer));
+        let mut target = RenderTarget::new(40, 40);
+        renderer.render(&scene, &mut target);
+        Some(target)
+    }
+
+    #[test]
+    fn layer_clip_path_keeps_only_the_covered_part_if_a_gpu_adapter_is_available() {
+        let Some(t) = render_clipped_red(Some(vec![clip_rect(10.0, 10.0, 20.0, 20.0, Color::BLACK)]), None) else { return };
+        assert_eq!(t.get_pixel(20, 20), [255, 0, 0, 255], "inside the clip the layer shows");
+        assert_eq!(t.get_pixel(5, 5), [0, 0, 255, 255], "outside the clip the backdrop shows");
+        assert_eq!(t.get_pixel(35, 20), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn layer_clip_path_shapes_union_and_the_gap_stays_clipped_if_a_gpu_adapter_is_available() {
+        let clip = vec![clip_rect(0.0, 0.0, 10.0, 10.0, Color::BLACK), clip_rect(25.0, 0.0, 10.0, 10.0, Color::BLACK)];
+        let Some(t) = render_clipped_red(Some(clip), None) else { return };
+        assert_eq!(t.get_pixel(5, 5), [255, 0, 0, 255]);
+        assert_eq!(t.get_pixel(30, 5), [255, 0, 0, 255]);
+        assert_eq!(t.get_pixel(17, 5), [0, 0, 255, 255], "the gap between the shapes is clipped");
+    }
+
+    #[test]
+    fn empty_layer_clip_path_clips_everything_if_a_gpu_adapter_is_available() {
+        let Some(t) = render_clipped_red(Some(vec![]), None) else { return };
+        assert_eq!(t.get_pixel(20, 20), [0, 0, 255, 255]);
+        assert_eq!(t.get_pixel(0, 0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn layer_without_a_clip_path_is_unchanged_if_a_gpu_adapter_is_available() {
+        let Some(t) = render_clipped_red(None, None) else { return };
+        assert_eq!(t.get_pixel(0, 0), [255, 0, 0, 255]);
+        assert_eq!(t.get_pixel(39, 39), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn layer_clip_path_follows_the_layer_transform_if_a_gpu_adapter_is_available() {
+        // The clip square sits at (0, 0) to (10, 10) in layer space, and the layer moves by (20, 20).
+        let Some(t) = render_clipped_red(Some(vec![clip_rect(0.0, 0.0, 10.0, 10.0, Color::BLACK)]), Some(msx_ast::Transform::Translate { x: 20.0, y: 20.0 })) else { return };
+        assert_eq!(t.get_pixel(25, 25), [255, 0, 0, 255]);
+        assert_eq!(t.get_pixel(5, 5), [0, 0, 255, 255], "the untransformed spot is outside the moved clip");
+    }
+}

@@ -426,7 +426,11 @@ fn write_element(out: &mut String, el: &Element, indent: usize, comma: bool) -> 
 }
 
 fn write_children(out: &mut String, children: &[Element], indent: usize) -> Result<(), WriteError> {
-    out.push_str(&format!("{}elements = [\n", pad(indent)));
+    write_element_list(out, "elements", children, indent)
+}
+
+fn write_element_list(out: &mut String, field: &str, children: &[Element], indent: usize) -> Result<(), WriteError> {
+    out.push_str(&format!("{}{} = [\n", pad(indent), field));
     for (i, child) in children.iter().enumerate() {
         write_element(out, child, indent + 2, i + 1 < children.len())?;
         out.push('\n');
@@ -464,6 +468,10 @@ fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result
     out.push_str(&head);
     out.push_str(&common(&l.id, &l.transform, None));
     out.push_str(",\n");
+    if let Some(shapes) = &l.clip_path {
+        write_element_list(out, "clip_path", shapes, indent + 2)?;
+        out.push_str(",\n");
+    }
     write_children(out, &l.children, indent + 2)?;
     let _ = write!(out, " }}{tail}");
     Ok(())
@@ -623,6 +631,28 @@ mod tests {
         let mut s = scene_with(vec![], vec![rect(style())]);
         s.canvas.viewbox = Some(ViewBox::new(-5.0, 10.0, 24.0, 24.0));
         assert_roundtrip(&s);
+    }
+
+    #[test]
+    fn layer_clip_paths_roundtrip_including_the_empty_one() {
+        let mut even = style();
+        even.fill_rule = Some(FillRule::EvenOdd);
+        let shapes = vec![
+            rect(style()),
+            Element::Circle(Circle { cx: 5.0, cy: 6.0, r: 7.5, id: None, transform: Some(Transform::Translate { x: 1.0, y: 2.0 }), style: even }),
+        ];
+        let clipped = Layer::new(vec![rect(style())]).with_clip_path(shapes);
+        let nothing = Layer::new(vec![rect(style())]).with_clip_path(vec![]);
+        let plain = Layer::new(vec![rect(style())]);
+        assert_roundtrip(&scene_with(vec![], vec![Element::Layer(clipped), Element::Layer(nothing), Element::Layer(plain)]));
+    }
+
+    #[test]
+    fn an_empty_clip_path_stays_empty_and_no_clip_path_stays_none() {
+        let s = scene_with(vec![], vec![Element::Layer(Layer::new(vec![]).with_clip_path(vec![])), Element::Layer(Layer::new(vec![]))]);
+        let back = parse_scene(&scene_to_msx(&s).unwrap()).unwrap();
+        let clips: Vec<Option<usize>> = back.elements.iter().map(|e| match e { Element::Layer(l) => l.clip_path.as_ref().map(Vec::len), _ => panic!("layer") }).collect();
+        assert_eq!(clips, vec![Some(0), None]);
     }
 
     #[test]
