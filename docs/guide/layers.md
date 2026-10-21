@@ -20,6 +20,8 @@ A `layer` is a container that draws its children into a separate buffer and then
 | `z_index` | Paint order among sibling layers | 0 |
 | `clip` | Clip the children to the layer's own pixel footprint | false |
 | `clip_path` | A list of shapes. Only the area they cover stays visible | none |
+| `mask` | A list of elements read as a mask over the layer | none |
+| `mask_type` | How `mask` is read, `luminance` or `alpha` | `luminance` |
 | `effects` | Effects applied to the buffer, in order | none |
 | `id`, `transform` | As for every element | |
 
@@ -39,6 +41,23 @@ A `layer` is a container that draws its children into a separate buffer and then
 The shapes live in the coordinate space of the layer, so the layer `transform` moves them together with the children. Only geometry and `fill_rule` count: fill, stroke and opacity are ignored, and a `line` has no area. Rectangles, circles, ellipses, polylines, polygons, paths and text are used. The clip is applied after the effects and before the layer blends, so a blurred edge is cut by the clip. Two clips that must both apply are written as one layer inside another.
 
 The SVG renderer writes a `clipPath` element. The CPU renderer builds an antialiased coverage mask. The GPU renderer draws the shapes into a mask texture and multiplies the layer with it, and its edges are not antialiased, as for every GPU shape.
+
+## Masks
+
+`mask` is a list of elements that are drawn normally and then read as a mask over the layer. With `mask_type = "luminance"` the layer keeps the brightness of the mask at each point, scaled by the mask alpha, so white and opaque keeps it, black or clear hides it. With `"alpha"` only the mask opacity counts and the color does not. The elements may use any paint, a gradient, an image, group opacity or a layer of their own. Leaving `mask` out masks nothing, and an empty list hides the whole layer.
+
+```
+{ type = "layer", mask_type = "luminance", mask = [
+    { type = "rect", x = 0, y = 0, width = 100, height = 100, style = { fill = "url(#fade)" } }
+  ],
+  elements = [
+    { type = "rect", x = 0, y = 0, width = 100, height = 100, style = { fill = #4a9eff } }
+  ] }
+```
+
+The mask is drawn in the coordinate space of the layer, so the layer `transform` moves it with the children. Luminance uses the coefficients 0.2125, 0.7154 and 0.0721 on the stored color values, the same as resvg. It is applied together with `clip_path`, after the effects. A mask that needs a limited region keeps that region as a `clip_path` on a layer around its own elements, and a mask of a mask is a layer with its own `mask` inside the mask list.
+
+The SVG renderer writes a `mask` element with a region far larger than the canvas. The CPU renderer draws the elements into a buffer and scales the layer by it. The GPU renderer draws them into a texture and multiplies the layer with its luminance or alpha.
 
 ## Blend modes
 

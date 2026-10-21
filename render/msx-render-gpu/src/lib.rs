@@ -688,4 +688,42 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         assert_eq!(t.get_pixel(25, 25), [255, 0, 0, 255]);
         assert_eq!(t.get_pixel(5, 5), [0, 0, 255, 255], "the untransformed spot is outside the moved clip");
     }
+
+    /// 40 by 40 blue backdrop, a full red layer under `mask`.
+    fn render_masked_red(mask: Vec<Element>, kind: msx_ast::MaskType) -> Option<RenderTarget> {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return None;
+        };
+        let layer = Layer::new(vec![clip_rect(-20.0, -20.0, 80.0, 80.0, Color::rgb(255, 0, 0))]).with_mask(mask, kind);
+        let mut scene = Scene::new(Canvas::new(40.0, 40.0, Color::rgb(0, 0, 255)));
+        scene.elements.push(Element::Layer(layer));
+        let mut target = RenderTarget::new(40, 40);
+        renderer.render(&scene, &mut target);
+        Some(target)
+    }
+
+    #[test]
+    fn luminance_mask_keeps_white_and_hides_black_if_a_gpu_adapter_is_available() {
+        let mask = vec![clip_rect(0.0, 0.0, 20.0, 40.0, Color::WHITE), clip_rect(20.0, 0.0, 20.0, 40.0, Color::BLACK)];
+        let Some(t) = render_masked_red(mask, msx_ast::MaskType::Luminance) else { return };
+        assert_eq!(t.get_pixel(10, 20), [255, 0, 0, 255], "white keeps the layer");
+        assert_eq!(t.get_pixel(30, 20), [0, 0, 255, 255], "opaque black hides it, the backdrop shows");
+    }
+
+    #[test]
+    fn luminance_mask_scales_with_gray_if_a_gpu_adapter_is_available() {
+        let Some(t) = render_masked_red(vec![clip_rect(0.0, 0.0, 40.0, 40.0, Color::rgb(128, 128, 128))], msx_ast::MaskType::Luminance) else { return };
+        let [r, _, b, _] = t.get_pixel(20, 20);
+        assert!((120..=135).contains(&r) && (120..=135).contains(&b), "about half red over half blue, got r={r} b={b}");
+    }
+
+    #[test]
+    fn alpha_mask_ignores_color_and_empty_mask_hides_everything_if_a_gpu_adapter_is_available() {
+        let Some(t) = render_masked_red(vec![clip_rect(0.0, 0.0, 20.0, 40.0, Color::BLACK)], msx_ast::MaskType::Alpha) else { return };
+        assert_eq!(t.get_pixel(10, 20), [255, 0, 0, 255], "black still has full alpha");
+        assert_eq!(t.get_pixel(30, 20), [0, 0, 255, 255]);
+        let Some(none) = render_masked_red(vec![], msx_ast::MaskType::Luminance) else { return };
+        assert_eq!(none.get_pixel(20, 20), [0, 0, 255, 255]);
+    }
 }

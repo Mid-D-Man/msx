@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 739 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 772 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, and of the 40 `mask` tests, 36. The rest of the `mask` tests need image import or are reference cycles. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -44,7 +44,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `clip-path` with `url(#id)` | Expanded | A layer with a clip path. Both units, `clip-rule`, `transform` and nested clip paths work on all three renderers |
 | `clip-path` as a basic shape such as `circle()` | Gap | Reported |
 | `clip-path` on a child inside a `clipPath` | Gap | Reported, the child is not clipped |
-| `mask` | Gap | |
+| `mask` with `url(#id)` | Expanded | A layer with a mask. Both units, the region, `mask-type`, nested masks and any paint in the mask work on all three renderers |
+| `mask` in a reference cycle, `color-interpolation: linearRGB` | Gap | Reported |
 | `filter` | Gap | Layers carry blur and shadow effects natively, but the importer does not map filter primitives to them yet |
 | `marker` properties | Gap | |
 
@@ -86,7 +87,7 @@ Imported files do not depend on the rows marked No, because the importer writes 
 
 The remaining gaps share a few causes, so they are closed in this order.
 
-1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks build on the same layer machinery and come next.
+1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks followed on the same layer machinery and are done too.
 2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
 3. Patterns, as a tiled group with its own transform.
 4. Markers, expanded by the importer into shapes along the path.

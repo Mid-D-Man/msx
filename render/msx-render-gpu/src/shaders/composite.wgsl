@@ -60,3 +60,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sample = textureSample(layer_texture, layer_sampler, input.uv);
     return vec4<f32>(sample.rgb * params.opacity, sample.a * params.opacity);
 }
+
+// Luminance of a mask texture, for the multiply pipeline behind a layer's
+// `mask`. The texture is premultiplied, so the weighted sum of its channels is
+// the luminance times the alpha, with the resvg coefficients. The result goes
+// in every channel because that pipeline's blend state reads only the alpha.
+@fragment
+fn fs_luma(input: VertexOutput) -> @location(0) vec4<f32> {
+    let sample = textureSample(layer_texture, layer_sampler, input.uv);
+    let l = dot(sample.rgb, vec3<f32>(0.2125, 0.7154, 0.0721));
+    return vec4<f32>(l, l, l, l);
+}

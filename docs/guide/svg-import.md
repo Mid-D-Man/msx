@@ -21,6 +21,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Gradients.** MSX gradients live in the bounding box of the shape and have no transform. The importer converts `userSpaceOnUse` coordinates and `gradientTransform` into that space for each shape. A linear gradient converts exactly under any transform. A radial gradient converts exactly under uniform scale, rotation and translation. Under a stretch or skew it is approximated by a circle of the same area, and a warning says so.
 - **Compositing.** `opacity` on a group becomes an isolated layer. `mix-blend-mode` becomes the blend mode of a layer for multiply, screen, overlay, darken, lighten, hard-light, soft-light, difference and exclusion. `isolation: isolate` becomes a layer. `paint-order: stroke` becomes two shapes, the stroke first.
 - **Clipping.** `clip-path: url(#id)` on any element becomes a layer with a `clip_path`. `clipPathUnits` of `userSpaceOnUse` and `objectBoundingBox`, the `transform` of the `clipPath`, `clip-rule` and a `clip-path` on the `clipPath` itself (the clips nest, so both apply) are honored. Only shapes with an area, text and a `use` of one of those count, and fill, stroke and opacity inside the clip path are ignored, as in SVG. A `symbol` and a nested `svg` clip to their viewport the same way, unless `overflow` is `visible` or `auto`. The clip is added only when the content can reach past the viewport, so a symbol that fits costs no extra layer.
+- **Masks.** `mask: url(#id)` on any element becomes a layer with a `mask`. `maskUnits` and `maskContentUnits` in both units, the `x`, `y`, `width` and `height` region (default 120 percent of the box, kept as a clip of the mask content when the content reaches past it), `mask-type` as an attribute or in style, and a `mask` on the `mask` itself are honored. The mask content keeps its paint, gradients, opacity and nested masks, since it is drawn as normal elements. A box based mask on a shape with no area, or a region with no area, hides the element, as in SVG.
 - **Transforms.** The `transform` attribute and the CSS `transform` property, with angle and length units, and `transform-origin`.
 - **Conditions.** `switch` draws its first child that passes, and `systemLanguage` and `requiredExtensions` apply to any element. The language is English.
 - **Text.** Whitespace collapses. A `tspan` with its own position becomes its own text element, which gives multi-line text.
@@ -30,7 +31,8 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 
 | SVG feature | Result |
 |---|---|
-| `mask`, `filter` | Drawn without them |
+| `filter` | Drawn without it |
+| `mask` that is not `url(#id)`, a mask in a reference cycle, or `color-interpolation: linearRGB` on a mask | Drawn without it, or read as sRGB |
 | `clip-path` that is not `url(#id)`, such as `circle()` | Drawn without it |
 | `clip-path` on a child inside a `clipPath` | Ignored |
 | A `clip-path` that points at a missing element, at something that is not a `clipPath`, or in a cycle | Drawn without it |

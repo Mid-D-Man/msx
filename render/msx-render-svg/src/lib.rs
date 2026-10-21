@@ -293,6 +293,34 @@ mod tests {
     }
 
     #[test]
+    fn layer_mask_becomes_a_mask_element_that_keeps_its_paint() {
+        let paint = style_solid(Color::rgb(255, 255, 255));
+        let mask = vec![Element::Rect(Rect { x: 1.0, y: 2.0, width: 30.0, height: 40.0, rx: None, ry: None, id: None, transform: None, style: paint })];
+        let layer = Layer::new(vec![Element::Circle(Circle { cx: 10.0, cy: 10.0, r: 5.0, id: None, transform: None, style: style_solid(Color::rgb(10, 20, 30)) })])
+            .with_mask(mask, msx_ast::MaskType::Luminance);
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(layer));
+        let svg = render(&scene);
+        assert!(svg.contains(r#"mask="url(#layer-mask-1)""#), "{svg}");
+        let def = svg.split("<mask ").nth(1).expect("a mask in the defs").split("</mask>").next().unwrap();
+        assert!(def.contains("<rect") && def.contains("fill=\"#ffffff\""), "{def}");
+        assert!(!def.contains("mask-type"), "luminance is the default: {def}");
+    }
+
+    #[test]
+    fn alpha_and_empty_layer_masks_are_written() {
+        let alpha = Layer::new(vec![]).with_mask(vec![], msx_ast::MaskType::Alpha);
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(alpha));
+        let svg = render(&scene);
+        assert!(svg.contains("mask-type:alpha"), "{svg}");
+        assert!(svg.contains("></mask>"), "an empty mask hides everything: {svg}");
+        let mut none = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        none.elements.push(Element::Layer(Layer::new(vec![])));
+        assert!(!render(&none).contains("mask"));
+    }
+
+    #[test]
     fn empty_layer_clip_path_gives_an_empty_clip_path_element() {
         let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
         scene.elements.push(Element::Layer(Layer::new(vec![]).with_clip_path(vec![])));

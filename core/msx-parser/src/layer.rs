@@ -7,10 +7,11 @@ use crate::element::parse_elements;
 use crate::transform::parse_transform;
 
 /// `{ type = "layer", blend_mode<enum> = BlendMode.Multiply (or "multiply"),
-///    opacity=0.75, z_index=1.0, clip=true, clip_path=[...shapes], effects=[...], elements=[...] }`
+///    opacity=0.75, z_index=1.0, clip=true, clip_path=[...shapes], mask=[...elements],
+///    mask_type="alpha", effects=[...], elements=[...] }`
 ///
-/// `clip_path` is optional. Absent means no clipping, present and empty clips
-/// everything away.
+/// `clip_path` and `mask` are optional. Absent means none, present and empty
+/// hides the whole layer. `mask_type` is `luminance` (default) or `alpha`.
 pub fn parse_layer(data: &DixData, prefix: &str) -> Result<Layer, String> {
     let id = opt::<String>(data, prefix, "id")?;
     let transform = parse_transform(data, prefix)?;
@@ -25,6 +26,12 @@ pub fn parse_layer(data: &DixData, prefix: &str) -> Result<Layer, String> {
     layer.clip = opt::<bool>(data, prefix, "clip")?.unwrap_or(false);
     if raw(data, prefix, "clip_path").is_some() {
         layer.clip_path = Some(parse_elements(data, prefix, "clip_path")?);
+    }
+    if raw(data, prefix, "mask").is_some() {
+        layer.mask = Some(parse_elements(data, prefix, "mask")?);
+    }
+    if let Some(name) = opt::<String>(data, prefix, "mask_type")? {
+        layer.mask_type = msx_ast::MaskType::from_name(&name);
     }
     layer.effects = parse_effects(data, prefix, "effects")?;
 

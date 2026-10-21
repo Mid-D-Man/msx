@@ -378,6 +378,8 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             let flags      = read_u8(data, cursor)?;
             let clip       = flags & 1 != 0;
             let has_clip_path = flags & 2 != 0;
+            let has_mask = flags & 4 != 0;
+            let mask_type = if flags & 8 != 0 { msx_ast::MaskType::Alpha } else { msx_ast::MaskType::Luminance };
             let effect_count = read_u16(data, cursor)? as usize;
             let mut effects = Vec::with_capacity(effect_count);
             for _ in 0..effect_count {
@@ -401,7 +403,17 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             } else {
                 None
             };
-            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, clip_path, effects, id, transform, z_index }))
+            let mask = if has_mask {
+                let count = read_u32(data, cursor)? as usize;
+                let mut elements = Vec::with_capacity(count.min(1024));
+                for _ in 0..count {
+                    elements.push(decode_element(data, cursor, pool)?);
+                }
+                Some(elements)
+            } else {
+                None
+            };
+            Ok(Element::Layer(Layer { children, blend_mode, opacity, clip, clip_path, mask, mask_type, effects, id, transform, z_index }))
         }
         TAG_IMAGE => {
             let source = decode_media_source(data, cursor, pool)?;

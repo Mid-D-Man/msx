@@ -1064,3 +1064,139 @@ fn hidden_shapes_still_count_toward_an_object_bounding_box_clip() {
     let plain = imp(&doc(r#"<g><rect width="9" height="9" visibility="hidden"/><rect width="5" height="5"/></g>"#));
     assert_eq!(plain.scene.elements.len(), 1);
 }
+
+// ── mask ─────────────────────────────────────────────────────────────────────
+
+fn mask_of(e: &Element) -> (&Vec<Element>, MaskType) {
+    let l = layer(e);
+    (l.mask.as_ref().expect("a mask"), l.mask_type)
+}
+
+#[test]
+fn mask_wraps_the_shape_in_a_layer_with_the_mask_content() {
+    let i = imp(&doc(r##"<defs><mask id="m"><rect x="10" y="10" width="30" height="30" fill="white"/></mask></defs>
+        <rect x="10" y="10" width="50" height="50" fill="red" mask="url(#m)"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let (content, kind) = mask_of(&i.scene.elements[0]);
+    assert_eq!(kind, MaskType::Luminance);
+    assert_eq!(content.len(), 1);
+    assert_eq!(rect(&content[0]).width, 30.0, "content inside the region needs no clip layer");
+    assert_eq!(rect(&layer(&i.scene.elements[0]).children[0]).width, 50.0);
+}
+
+#[test]
+fn mask_region_defaults_to_120_percent_of_the_box_and_clips_larger_content() {
+    // The box is (10, 10, 50, 50), so the region is 5 to 65.
+    let i = imp(&doc(r##"<defs><mask id="m"><rect width="100" height="100" fill="white"/></mask></defs>
+        <rect x="10" y="10" width="50" height="50" mask="url(#m)"/>"##));
+    let (content, _) = mask_of(&i.scene.elements[0]);
+    let clip = layer(&content[0]).clip_path.as_ref().expect("the region clips the content");
+    assert_eq!(clip_rect(&clip[0]), (5.0, 5.0, 60.0, 60.0));
+}
+
+#[test]
+fn mask_user_space_region_and_percent_units() {
+    let i = imp(&doc(r##"<defs><mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="40" height="30"><rect width="100" height="100" fill="white"/></mask></defs>
+        <rect width="80" height="80" mask="url(#m)"/>"##));
+    let (content, _) = mask_of(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&layer(&content[0]).clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 40.0, 30.0));
+    let pct = imp(&doc(r##"<defs><mask id="m" x="0%" y="0%" width="50%" height="100%"><rect width="100" height="100" fill="white"/></mask></defs>
+        <rect x="20" y="0" width="40" height="40" mask="url(#m)"/>"##));
+    let (c, _) = mask_of(&pct.scene.elements[0]);
+    assert_eq!(clip_rect(&layer(&c[0]).clip_path.as_ref().unwrap()[0]), (20.0, 0.0, 20.0, 40.0));
+}
+
+#[test]
+fn mask_content_units_object_bounding_box_map_the_unit_square() {
+    let i = imp(&doc(r##"<defs><mask id="m" maskContentUnits="objectBoundingBox"><rect width="0.5" height="1" fill="white"/></mask></defs>
+        <rect x="20" y="10" width="40" height="20" mask="url(#m)"/>"##));
+    let (content, _) = mask_of(&i.scene.elements[0]);
+    let Element::Group(g) = &content[0] else { panic!("unit square group") };
+    let (x, y) = geom::apply(g.transform.as_ref().unwrap().to_matrix(), 0.5, 1.0);
+    assert!(close(x, 40.0) && close(y, 30.0), "({x}, {y})");
+}
+
+#[test]
+fn mask_type_comes_from_the_attribute_or_the_style() {
+    let attr = imp(&doc(r##"<defs><mask id="m" mask-type="alpha"><rect width="9" height="9"/></mask></defs><rect width="9" height="9" mask="url(#m)"/>"##));
+    assert_eq!(mask_of(&attr.scene.elements[0]).1, MaskType::Alpha);
+    let style = imp(&doc(r##"<defs><mask id="m" style="mask-type:alpha"><rect width="9" height="9"/></mask></defs><rect width="9" height="9" mask="url(#m)"/>"##));
+    assert_eq!(mask_of(&style.scene.elements[0]).1, MaskType::Alpha);
+    let bad = imp(&doc(r##"<defs><mask id="m" mask-type="nonsense"><rect width="9" height="9"/></mask></defs><rect width="9" height="9" mask="url(#m)"/>"##));
+    assert_eq!(mask_of(&bad.scene.elements[0]).1, MaskType::Luminance);
+}
+
+#[test]
+fn mask_content_keeps_its_own_paint_and_effects() {
+    let i = imp(&doc(r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></linearGradient>
+        <mask id="m"><rect x="10" y="10" width="20" height="20" fill="url(#g)" opacity=".5"/></mask></defs>
+        <rect x="10" y="10" width="20" height="20" mask="url(#m)"/>"##));
+    let (content, _) = mask_of(&i.scene.elements[0]);
+    let r = rect(&content[0]);
+    assert!(matches!(r.style.fill, Some(Paint::Ref(_))), "{:?}", r.style.fill);
+    assert_eq!(r.style.opacity, Some(0.5));
+}
+
+#[test]
+fn mask_on_a_mask_nests_a_masked_layer_in_the_content() {
+    let i = imp(&doc(r##"<defs><mask id="a" mask="url(#b)"><rect x="10" y="10" width="20" height="20" fill="white"/></mask>
+        <mask id="b" mask-type="alpha"><rect x="10" y="10" width="10" height="20"/></mask></defs>
+        <rect x="10" y="10" width="20" height="20" mask="url(#a)"/>"##));
+    let (content, kind) = mask_of(&i.scene.elements[0]);
+    assert_eq!(kind, MaskType::Luminance);
+    let inner = layer(&content[0]);
+    assert_eq!(inner.mask_type, MaskType::Alpha);
+    assert_eq!(inner.mask.as_ref().map(Vec::len), Some(1));
+    assert_eq!(rect(&inner.children[0]).width, 20.0);
+}
+
+#[test]
+fn mask_on_a_transformed_shape_or_a_group_keeps_the_space() {
+    let i = imp(&doc(r##"<defs><mask id="m"><rect width="9" height="9" fill="white"/></mask></defs>
+        <rect width="9" height="9" transform="translate(5 6)" mask="url(#m)"/>
+        <g mask="url(#m)" transform="translate(1 2)"><rect width="3" height="3"/><rect x="5" width="3" height="3"/></g>"##));
+    let a = layer(&i.scene.elements[0]);
+    assert!(matches!(a.transform, Some(Transform::Translate { x, y }) if x == 5.0 && y == 6.0));
+    assert!(rect(&a.children[0]).transform.is_none());
+    let g = layer(&i.scene.elements[1]);
+    assert!(g.mask.is_some() && g.transform.is_some() && g.children.len() == 2);
+}
+
+#[test]
+fn unusable_masks_are_reported_or_hide_the_element() {
+    let i = imp(&doc(r##"<defs><mask id="self"><rect width="5" height="5" fill="white" mask="url(#self)"/></mask><rect id="notmask" width="1" height="1"/>
+        <mask id="empty" maskUnits="userSpaceOnUse" x="0" y="0" width="0" height="10"><rect width="5" height="5"/></mask></defs>
+        <rect width="9" height="9" mask="url(#missing)"/>
+        <rect width="9" height="9" mask="url(#notmask)"/>
+        <rect width="9" height="9" mask="url(#self)"/>
+        <rect width="9" height="9" mask="url(#empty)"/>"##));
+    for needle in ["#missing", "#notmask", "refers back to itself"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    let hidden = i.scene.elements.iter().filter_map(|e| if let Element::Layer(l) = e { Some(l) } else { None }).find(|l| l.mask.as_ref().is_some_and(Vec::is_empty));
+    assert!(hidden.is_some(), "an empty region leaves a mask with nothing in it, which hides the element");
+    let line = imp(&doc(r##"<defs><mask id="m"><rect width="9" height="9" fill="white"/></mask></defs><line x1="0" y1="5" x2="20" y2="5" stroke="red" mask="url(#m)"/>"##));
+    assert_eq!(layer(&line.scene.elements[0]).mask.as_ref().map(Vec::len), Some(0), "a line has no box, so a box based mask hides it");
+}
+
+#[test]
+fn masks_inside_a_clip_path_have_no_effect() {
+    let i = imp(&doc(r##"<defs><mask id="m"><rect width="1" height="1" fill="black"/></mask><clipPath id="c"><rect width="9" height="9" mask="url(#m)"/></clipPath></defs>
+        <rect width="20" height="20" clip-path="url(#c)"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(layer(&i.scene.elements[0]).mask.is_none());
+}
+
+#[test]
+fn masked_imports_survive_write_and_parse() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60">
+        <defs><linearGradient id="g"><stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></linearGradient>
+        <mask id="m"><rect width="80" height="60" fill="url(#g)"/></mask>
+        <mask id="a" mask-type="alpha" maskContentUnits="objectBoundingBox"><circle cx=".5" cy=".5" r=".4"/></mask></defs>
+        <rect width="80" height="60" fill="#f00" mask="url(#m)"/>
+        <g mask="url(#a)" transform="translate(5 5)"><rect width="40" height="20" fill="#00f"/></g></svg>"##;
+    let i = imp(svg);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));
+}

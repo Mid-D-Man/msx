@@ -19,7 +19,7 @@ pub type Props = HashMap<String, String>;
 
 /// Attribute names that are presentation properties.
 pub const PRESENTATION: &[&str] = &[
-    "fill", "fill-opacity", "fill-rule", "clip-rule", "overflow", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
+    "fill", "fill-opacity", "fill-rule", "clip-rule", "overflow", "mask-type", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
     "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity", "display", "visibility", "color", "font-size",
     "font-family", "font-weight", "text-anchor", "dominant-baseline", "stop-color", "stop-opacity", "clip-path", "mask",
     "filter", "paint-order", "transform-origin", "transform-box", "marker", "marker-start", "marker-mid",

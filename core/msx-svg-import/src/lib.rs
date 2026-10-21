@@ -30,7 +30,7 @@ use std::fmt;
 
 use msx_ast::path::parse_d_partial;
 use msx_ast::{
-    BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, Transform,
+    BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, MaskType, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, Transform,
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
@@ -107,8 +107,9 @@ pub(crate) struct Importer<'a, 'i> {
     /// True while the children of a `clipPath` are walked: only geometry and
     /// `clip-rule` matter, so paint is not resolved and effects are ignored.
     clip_mode: bool,
-    /// True when some `clipPath` uses `objectBoundingBox`: a hidden shape still
-    /// counts toward the box, so it is kept as an invisible element.
+    /// True when some `clipPath` or `mask` works in `objectBoundingBox` units: a
+    /// hidden shape still counts toward the box, so it is kept as an invisible
+    /// element.
     keep_hidden: bool,
     /// Ids of the clip paths being resolved right now, to stop cycles.
     clip_stack: Vec<String>,
@@ -147,13 +148,15 @@ struct Comp {
     /// Clip paths that all apply, in the element's own coordinate space. The
     /// first is the outermost layer, so the visible area is their intersection.
     clips: Vec<Vec<Element>>,
+    /// A mask that applies, as its elements and how it is read.
+    mask: Option<(Vec<Element>, MaskType)>,
 }
 
 impl Comp {
-    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false, clips: Vec::new() };
+    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false, clips: Vec::new(), mask: None };
 
     fn needs_layer(&self) -> bool {
-        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate || !self.clips.is_empty()
+        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate || !self.clips.is_empty() || self.mask.is_some()
     }
 }
 
@@ -210,14 +213,28 @@ fn elements_bbox(kids: &[Element]) -> Option<BBox> {
 /// `view` maps content into, found by mapping the viewport back through `view`.
 fn viewport_rect(view: &Option<Transform>, w: f64, h: f64) -> Element {
     let (x0, y0, x1, y1) = viewport_bounds(view, w, h);
+    plain_rect(x0, y0, x1, y1)
+}
+
+/// A black rectangle from `(x0, y0)` to `(x1, y1)`, for clip shapes.
+fn plain_rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Element {
     let style = Style { fill: Some(Paint::Color(Color::BLACK)), stroke: Some(Paint::None), ..Style::default() };
     Element::Rect(Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: None, ry: None, id: None, transform: None, style })
+}
+
+/// A number or a percentage as a fraction, for `objectBoundingBox` units.
+fn obb_fraction(v: &str) -> Option<f64> {
+    let v = v.trim();
+    match v.strip_suffix('%') {
+        Some(p) => p.trim().parse::<f64>().ok().map(|n| n / 100.0),
+        None => v.parse::<f64>().ok(),
+    }
 }
 
 /// Layers for one clipped element, outermost first: the first clip, opacity,
 /// blend mode and transform go on the outer layer, each further clip on its own
 /// layer inside it.
-fn layered(kids: Vec<Element>, opacity: f64, blend: BlendMode, mut clips: Vec<Vec<Element>>, transform: Option<Transform>, id: Option<String>) -> Element {
+fn layered(kids: Vec<Element>, opacity: f64, blend: BlendMode, mut clips: Vec<Vec<Element>>, mask: Option<(Vec<Element>, MaskType)>, transform: Option<Transform>, id: Option<String>) -> Element {
     let outer_clip = (!clips.is_empty()).then(|| clips.remove(0));
     let mut inner = kids;
     for shapes in clips.into_iter().rev() {
@@ -225,6 +242,10 @@ fn layered(kids: Vec<Element>, opacity: f64, blend: BlendMode, mut clips: Vec<Ve
     }
     let mut layer = Layer::new(inner);
     layer.clip_path = outer_clip;
+    if let Some((elements, kind)) = mask {
+        layer.mask = Some(elements);
+        layer.mask_type = kind;
+    }
     layer.opacity = opacity;
     layer.blend_mode = blend;
     layer.transform = transform;
@@ -386,7 +407,8 @@ impl<'a, 'i> Importer<'a, 'i> {
             if let Some(id) = n.attribute("id") {
                 ids.entry(id).or_insert(n);
             }
-            keep_hidden |= n.tag_name().name() == "clipPath" && n.attribute("clipPathUnits").is_some_and(|u| u.trim() == "objectBoundingBox");
+            keep_hidden |= (n.tag_name().name() == "clipPath" && n.attribute("clipPathUnits").is_some_and(|u| u.trim() == "objectBoundingBox"))
+                || (n.tag_name().name() == "mask" && n.attribute("maskUnits").is_none_or(|u| u.trim() != "userSpaceOnUse"));
             if n.tag_name().name() == "style" && n.attribute("type").is_none_or(|t| t.is_empty() || t == "text/css") {
                 let css: String = n.descendants().filter(|c| c.is_text()).filter_map(|c| c.text()).collect();
                 keyframes |= css.contains("@keyframes");
@@ -476,7 +498,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 self.warn(format!("{} uses a CSS {key}, which is not supported; the static frame is drawn", Self::label(node)));
             }
         }
-        for key in ["mask", "filter"] {
+        for key in ["filter"] {
             if let Some(v) = props.get(key) {
                 if !v.is_empty() && v != "none" {
                     self.warn(format!("{} uses {key}, which is not supported; drawn without it", Self::label(node)));
@@ -557,7 +579,101 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
         };
         let clips = self.resolve_clips(node, props, bbox);
-        Comp { opacity: element_opacity(props), blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips }
+        let mask = self.resolve_mask(node, props, bbox);
+        Comp { opacity: element_opacity(props), blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips, mask }
+    }
+
+    // ── Masks ─────────────────────────────────────────────────────────────────
+
+    /// The mask that applies to `node`, from its `mask` property. An unusable
+    /// reference is reported and the element is drawn without it.
+    fn resolve_mask(&mut self, node: &Node, props: &Props, bbox: Option<BBox>) -> Option<(Vec<Element>, MaskType)> {
+        let v = props.get("mask")?.trim().to_string();
+        if v.is_empty() || v == "none" {
+            return None;
+        }
+        let label = Self::label(node);
+        match parse_url_id(&v) {
+            Some(id) => self.mask_chain(&label, &id, bbox),
+            None => {
+                self.warn(format!("{label} uses mask: {v}, which is not supported (only url(#id)); drawn without it"));
+                None
+            }
+        }
+    }
+
+    fn mask_chain(&mut self, label: &str, id: &str, bbox: Option<BBox>) -> Option<(Vec<Element>, MaskType)> {
+        let key = format!("mask:{id}");
+        if self.clip_stack.contains(&key) {
+            self.warn(format!("{label} refers to the mask #{id}, which refers back to itself; drawn without it"));
+            return None;
+        }
+        let Some(m) = self.ids.get(id).copied() else {
+            self.warn(format!("{label} uses the mask #{id}, which does not exist; drawn without it"));
+            return None;
+        };
+        if m.tag_name().name() != "mask" {
+            self.warn(format!("{label} uses #{id} as a mask, but it is a <{}>; drawn without it", m.tag_name().name()));
+            return None;
+        }
+        self.clip_stack.push(key);
+        let out = self.mask_content(label, m, bbox);
+        self.clip_stack.pop();
+        Some(out)
+    }
+
+    /// The elements of one `mask`, in the coordinate space of the masked
+    /// element, and how they are read. A region that cannot be worked out, or
+    /// is empty, leaves a mask with nothing in it, which hides the element.
+    /// The region becomes a clip of the content, and a `mask` set on the
+    /// `mask` itself becomes a mask of the content.
+    fn mask_content(&mut self, label: &str, m: Node<'a, 'i>, bbox: Option<BBox>) -> (Vec<Element>, MaskType) {
+        let mprops = self.props_for(m);
+        let kind = MaskType::from_name(mprops.get("mask-type").map(String::as_str).unwrap_or("luminance"));
+        if mprops.get("color-interpolation").is_some_and(|v| v.trim() == "linearRGB") {
+            self.warn(format!("{label} uses a mask with color-interpolation: linearRGB, which is not supported; read as sRGB"));
+        }
+        let hidden = (Vec::new(), kind);
+        let bbox = bbox.filter(|b| b.w > 0.0 && b.h > 0.0);
+        let region = if m.attribute("maskUnits").is_some_and(|u| u.trim() == "userSpaceOnUse") {
+            let (vw, vh) = self.vp;
+            let get = |this: &Self, name: &str, base: f64, default: f64| this.length(m, name, 16.0, base).unwrap_or(default);
+            (get(self, "x", vw, -0.1 * vw), get(self, "y", vh, -0.1 * vh), get(self, "width", vw, 1.2 * vw), get(self, "height", vh, 1.2 * vh))
+        } else {
+            let Some(b) = bbox else { return hidden };
+            let f = |name: &str, default: f64| m.attribute(name).and_then(obb_fraction).unwrap_or(default);
+            (b.x + f("x", -0.1) * b.w, b.y + f("y", -0.1) * b.h, f("width", 1.2) * b.w, f("height", 1.2) * b.h)
+        };
+        if region.2 <= 0.0 || region.3 <= 0.0 {
+            return hidden;
+        }
+        let inh = self.inh_chain(m);
+        let mut content = Vec::new();
+        for child in m.children().filter(|c| c.is_element() && !is_foreign(c)) {
+            self.walk(child, &inh, &mut content, true);
+        }
+        if m.attribute("maskContentUnits").is_some_and(|u| u.trim() == "objectBoundingBox") {
+            let Some(b) = bbox else { return hidden };
+            let t = Transform::Multiple(vec![Transform::Translate { x: b.x, y: b.y }, Transform::Scale { x: b.w, y: b.h }]);
+            if !content.is_empty() {
+                content = vec![Element::Group(Group { children: content, id: None, transform: Some(t), style: None })];
+            }
+        }
+        let bounds = (region.0, region.1, region.0 + region.2, region.1 + region.3);
+        if reaches_outside(&content, bounds) {
+            content = vec![Element::Layer(Layer::new(content).with_clip_path(vec![plain_rect(bounds.0, bounds.1, bounds.2, bounds.3)]))];
+        }
+        if let Some(v) = mprops.get("mask").map(|v| v.trim().to_string()).filter(|v| !v.is_empty() && v != "none") {
+            match parse_url_id(&v) {
+                Some(nested) => {
+                    if let Some((elements, nested_kind)) = self.mask_chain(label, &nested, bbox) {
+                        content = vec![Element::Layer(Layer::new(content).with_mask(elements, nested_kind))];
+                    }
+                }
+                None => self.warn(format!("<mask> uses mask: {v}, which is not supported (only url(#id)); ignored")),
+            }
+        }
+        (content, kind)
     }
 
     // ── Clip paths ────────────────────────────────────────────────────────────
@@ -779,7 +895,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         if comp.needs_layer() {
-            out.push(layered(kids, comp.opacity, comp.blend, comp.clips, transform, id));
+            out.push(layered(kids, comp.opacity, comp.blend, comp.clips, comp.mask, transform, id));
         } else if transform.is_some() || id.is_some() {
             out.push(Element::Group(Group { children: kids, id, transform, style: None }));
         } else {
@@ -1044,11 +1160,11 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         self.emitted += 1;
         let mut parts = if inh.stroke_first { split_paint_order(el) } else { vec![el] };
-        if comp.blend != BlendMode::Normal || !comp.clips.is_empty() {
-            // A clip lives in the element's own space, so the element's
-            // transform moves from the shape to the layer that clips it.
+        if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() {
+            // A clip or mask lives in the element's own space, so the
+            // element's transform moves from the shape to the layer.
             let mut transform = None;
-            if !comp.clips.is_empty() {
+            if !comp.clips.is_empty() || comp.mask.is_some() {
                 for part in parts.iter_mut() {
                     if let Some(slot) = transform_mut(part) {
                         let t = slot.take();
@@ -1056,7 +1172,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     }
                 }
             }
-            out.push(layered(parts, 1.0, comp.blend, comp.clips, transform, None));
+            out.push(layered(parts, 1.0, comp.blend, comp.clips, comp.mask, transform, None));
         } else {
             out.extend(parts);
         }

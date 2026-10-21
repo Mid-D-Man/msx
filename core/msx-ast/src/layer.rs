@@ -34,6 +34,31 @@ pub enum BlendMode {
     Divide     = 12,  // Requires signed buffer — mirrors GP's divide blend
 }
 
+/// What a layer mask measures. Matches the SVG `mask-type` property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MaskType {
+    /// Luminance of the mask color times its alpha, with the same
+    /// coefficients resvg uses (0.2125, 0.7154, 0.0721).
+    #[default]
+    Luminance,
+    /// Only the alpha of the mask counts.
+    Alpha,
+}
+
+impl MaskType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MaskType::Luminance => "luminance",
+            MaskType::Alpha => "alpha",
+        }
+    }
+
+    /// Anything that is not `alpha` reads as `luminance`, as in SVG.
+    pub fn from_name(s: &str) -> Self {
+        if s.trim().eq_ignore_ascii_case("alpha") { MaskType::Alpha } else { MaskType::Luminance }
+    }
+}
+
 impl BlendMode {
     pub fn from_byte(b: u8) -> Self {
         match b {
@@ -100,6 +125,15 @@ pub struct Layer {
     /// `fill_rule` count, and a `Line`, stroke, fill color or opacity does
     /// not. Applied after the effects, before the layer composites.
     pub clip_path:  Option<Vec<Element>>,
+    /// Elements drawn as a mask. The layer shows through them by their
+    /// `mask_type` value, so a bright opaque area keeps it and a dark or clear
+    /// one hides it. `None` means no mask, `Some` with nothing in it hides the
+    /// whole layer. The elements are drawn normally, in the layer's own
+    /// coordinate space, so they may use any paint, an image or a gradient.
+    /// Applied after the effects, together with `clip_path`.
+    pub mask:       Option<Vec<Element>>,
+    /// How `mask` is read.
+    pub mask_type:  MaskType,
     /// Post-processing effects (blur, shadow, glow) applied in order.
     pub effects:    Vec<Effect>,
     pub id:         Option<String>,
@@ -125,6 +159,8 @@ impl Layer {
             opacity:    1.0,
             clip:       false,
             clip_path:  None,
+            mask:       None,
+            mask_type:  MaskType::Luminance,
             effects:    Vec::new(),
             id:         None,
             transform:  None,
@@ -137,6 +173,7 @@ impl Layer {
     pub fn with_effect(mut self, fx: Effect)        -> Self { self.effects.push(fx); self }
     pub fn with_z_index(mut self, z: f64)           -> Self { self.z_index = z; self }
     pub fn with_clip_path(mut self, shapes: Vec<Element>) -> Self { self.clip_path = Some(shapes); self }
+    pub fn with_mask(mut self, elements: Vec<Element>, kind: MaskType) -> Self { self.mask = Some(elements); self.mask_type = kind; self }
 }
 
 /// Returns `elements` in the order a renderer should actually draw them:
@@ -258,6 +295,18 @@ mod clip_path_tests {
     #[test]
     fn a_new_layer_has_no_clip_path() {
         assert!(Layer::new(vec![]).clip_path.is_none());
+    }
+
+    #[test]
+    fn mask_defaults_and_names() {
+        let l = Layer::new(vec![]);
+        assert!(l.mask.is_none() && l.mask_type == MaskType::Luminance);
+        let m = Layer::new(vec![]).with_mask(vec![], MaskType::Alpha);
+        assert_eq!(m.mask.as_ref().map(Vec::len), Some(0));
+        assert_eq!(m.mask_type, MaskType::Alpha);
+        assert_eq!(MaskType::from_name("ALPHA"), MaskType::Alpha);
+        assert_eq!(MaskType::from_name("nonsense"), MaskType::Luminance);
+        assert_eq!(MaskType::Alpha.as_str(), "alpha");
     }
 
     #[test]

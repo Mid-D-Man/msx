@@ -20,7 +20,7 @@ pub use color::{Color, Paint};
 pub use effect::{Effect, EffectType};
 pub use element::{Circle, Ellipse, Element, Group, Image, Line, Path, Polyline, Polygon, Rect, Text, Use};
 pub use gradient::{ConicGradient, Def, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, Stop};
-pub use layer::{layer_reordered, BlendMode, Layer};
+pub use layer::{layer_reordered, BlendMode, Layer, MaskType};
 pub use media::{Anchor, AudioDef, AudioFormat, ImageFormat, MediaSource};
 pub use path::PathCommand;
 pub use primitives::{BoundingBox, Point, ViewBox, fmt_f64};

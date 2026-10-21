@@ -7,7 +7,8 @@ use crate::{render_element, write_attr, write_id, write_transform, Ctx};
 /// equivalent and fall back to Normal here; `msx-render-cpu`/`-gpu`
 /// implement the signed-buffer math those actually need). `effects` → a
 /// generated `<filter>` chaining one SVG filter primitive per effect.
-/// `clip_path` → a generated `<clipPath>` of the same shapes, referenced
+/// `mask` → a generated `<mask>` of the same elements, same way. `clip_path` →
+/// a generated `<clipPath>` of the same shapes, referenced
 /// from the layer's `<g>`. `clip` (the pixel footprint flag) has no cheap
 /// SVG 1.1 fallback without a bbox computation, so it's left unenforced
 /// here.
@@ -35,6 +36,11 @@ pub(crate) fn render_layer(ctx: &mut Ctx, layer: &Layer, defs: &[Def]) {
         write_attr(ctx, "clip-path", format!("url(#{})", clip_id));
     }
 
+    if let Some(elements) = &layer.mask {
+        let mask_id = render_mask(ctx, elements, layer.mask_type, defs);
+        write_attr(ctx, "mask", format!("url(#{})", mask_id));
+    }
+
     ctx.push(">");
     for child in msx_ast::layer_reordered(&layer.children) {
         render_element(ctx, child, defs);
@@ -55,6 +61,26 @@ fn render_clip_path(ctx: &mut Ctx, shapes: &[msx_ast::Element], defs: &[Def]) ->
     }
     let body = std::mem::replace(&mut ctx.out, outer).replace(" fill-rule=\"", " clip-rule=\"");
     ctx.extra_defs.push_str(&format!("<clipPath id=\"{id}\">{body}</clipPath>"));
+    id
+}
+
+/// Renders `elements` into a `<mask>` in the synthesized defs and returns its
+/// id. The region is far larger than any canvas, so the layer is never cut by
+/// the default 120 percent box of a mask, since a mask that needs a region
+/// carries it as a clip of its own content. `alpha` masks write
+/// `mask-type: alpha`, and an empty list gives an empty `<mask>`, which hides
+/// the whole layer.
+fn render_mask(ctx: &mut Ctx, elements: &[msx_ast::Element], kind: msx_ast::MaskType, defs: &[Def]) -> String {
+    let id = ctx.fresh_id("layer-mask-");
+    let outer = std::mem::take(&mut ctx.out);
+    for el in elements {
+        render_element(ctx, el, defs);
+    }
+    let body = std::mem::replace(&mut ctx.out, outer);
+    let kind_attr = if kind == msx_ast::MaskType::Alpha { " style=\"mask-type:alpha\"" } else { "" };
+    ctx.extra_defs.push_str(&format!(
+        "<mask id=\"{id}\" maskUnits=\"userSpaceOnUse\" x=\"-1000000\" y=\"-1000000\" width=\"2000000\" height=\"2000000\"{kind_attr}>{body}</mask>"
+    ));
     id
 }
 

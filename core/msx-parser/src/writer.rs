@@ -459,6 +459,9 @@ fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result
         return Err(WriteError::Unsupported("layer effects".into()));
     }
     let mut head = format!("{}{{ type = \"layer\", blend_mode = {}, opacity = {}", pad(indent), quote(blend_mode_text(l.blend_mode)), num(l.opacity));
+    if l.mask_type != msx_ast::MaskType::Luminance {
+        head.push_str(&format!(", mask_type = {}", quote(l.mask_type.as_str())));
+    }
     if l.z_index != 0.0 {
         let _ = write!(head, ", z_index = {}", num(l.z_index));
     }
@@ -470,6 +473,10 @@ fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result
     out.push_str(",\n");
     if let Some(shapes) = &l.clip_path {
         write_element_list(out, "clip_path", shapes, indent + 2)?;
+        out.push_str(",\n");
+    }
+    if let Some(elements) = &l.mask {
+        write_element_list(out, "mask", elements, indent + 2)?;
         out.push_str(",\n");
     }
     write_children(out, &l.children, indent + 2)?;
@@ -645,6 +652,15 @@ mod tests {
         let nothing = Layer::new(vec![rect(style())]).with_clip_path(vec![]);
         let plain = Layer::new(vec![rect(style())]);
         assert_roundtrip(&scene_with(vec![], vec![Element::Layer(clipped), Element::Layer(nothing), Element::Layer(plain)]));
+    }
+
+    #[test]
+    fn layer_masks_roundtrip_with_their_type() {
+        let content = vec![rect(style()), Element::Circle(Circle { cx: 1.0, cy: 2.0, r: 3.0, id: None, transform: None, style: style() })];
+        let luminance = Layer::new(vec![rect(style())]).with_mask(content.clone(), msx_ast::MaskType::Luminance);
+        let alpha = Layer::new(vec![rect(style())]).with_mask(content, msx_ast::MaskType::Alpha).with_clip_path(vec![rect(style())]);
+        let nothing = Layer::new(vec![]).with_mask(vec![], msx_ast::MaskType::Luminance);
+        assert_roundtrip(&scene_with(vec![], vec![Element::Layer(luminance), Element::Layer(alpha), Element::Layer(nothing)]));
     }
 
     #[test]

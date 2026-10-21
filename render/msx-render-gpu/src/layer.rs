@@ -217,6 +217,9 @@ pub struct LayerCompositor {
     // (`dst * src.a`, source term dropped), so drawing the mask texture over
     // a layer buffer keeps only the covered part. See `apply_clip_path`.
     mask_pipeline: wgpu::RenderPipeline,
+    // The same multiply for a luminance `mask`: the fragment entry turns the
+    // mask texture into its luminance first.
+    luma_mask_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
 }
 
@@ -422,8 +425,8 @@ impl LayerCompositor {
             dst_factor: wgpu::BlendFactor::SrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("msx layer clip mask pipeline"),
+        let make_mask_pipeline = |label: &str, fragment_entry: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -433,7 +436,7 @@ impl LayerCompositor {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fragment_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState { color: multiply_by_alpha, alpha: multiply_by_alpha }),
@@ -448,7 +451,10 @@ impl LayerCompositor {
             cache: None,
         });
 
-        LayerCompositor { pipeline, bind_group_layout, blend_pipeline, blend_bind_group_layout, mask_pipeline, sampler }
+        let mask_pipeline = make_mask_pipeline("msx layer clip mask pipeline", "fs_main");
+        let luma_mask_pipeline = make_mask_pipeline("msx layer luminance mask pipeline", "fs_luma");
+
+        LayerCompositor { pipeline, bind_group_layout, blend_pipeline, blend_bind_group_layout, mask_pipeline, luma_mask_pipeline, sampler }
     }
 
     /// Renders `layer`'s children into a fresh offscreen buffer (vector +
@@ -587,7 +593,35 @@ impl LayerCompositor {
                 shader_base_dir,
                 time,
             );
-            self.apply_clip_path(device, queue, &masked.view, &mask.view);
+            self.apply_clip_path(device, queue, &masked.view, &mask.view, false);
+        }
+
+        // A mask is drawn with its real paint, then read as luminance or alpha.
+        if let Some(elements) = &layer.mask {
+            let masked = blurred.as_ref().unwrap_or(&buffer);
+            let mask = OffscreenTarget::new(device, canvas.0, canvas.1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            render_ordered(
+                device,
+                queue,
+                &mask,
+                elements,
+                combined,
+                canvas_f,
+                wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+                self,
+                vector_pipeline,
+                sdf_pipeline,
+                splat_pipeline,
+                shader_pipeline,
+                masked_shader_composite,
+                image_pipeline,
+                gpu_effects,
+                &defs,
+                scene_defs,
+                shader_base_dir,
+                time,
+            );
+            self.apply_clip_path(device, queue, &masked.view, &mask.view, layer.mask_type == msx_ast::MaskType::Luminance);
         }
 
         let composite_src = blurred.as_ref().map(|b| &b.view).unwrap_or(&buffer.view);
@@ -595,10 +629,11 @@ impl LayerCompositor {
         self.composite(device, queue, target, composite_src, layer.opacity as f32, layer.blend_mode);
     }
 
-    /// Multiplies `dst_view` by the alpha of `mask_view` in place. `mask_view`
-    /// holds the clip shapes drawn opaque white on transparent, so its alpha is
-    /// the clip coverage, and the pipeline's blend state is `dst * mask.a`.
-    fn apply_clip_path(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, mask_view: &wgpu::TextureView) {
+    /// Multiplies `dst_view` by the alpha of `mask_view` in place, or by its
+    /// luminance when `luminance` is set. For a clip path `mask_view` holds the
+    /// shapes drawn opaque white on transparent, so its alpha is the coverage.
+    /// The pipeline's blend state is `dst * mask.a`.
+    fn apply_clip_path(&self, device: &wgpu::Device, queue: &wgpu::Queue, dst_view: &wgpu::TextureView, mask_view: &wgpu::TextureView, luminance: bool) {
         let params = CompositeParams { opacity: 1.0, _pad: [0.0; 7] };
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("msx clip mask params"),
@@ -628,7 +663,7 @@ impl LayerCompositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.mask_pipeline);
+            pass.set_pipeline(if luminance { &self.luma_mask_pipeline } else { &self.mask_pipeline });
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..6, 0..1);
         }

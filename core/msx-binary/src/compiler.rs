@@ -443,10 +443,15 @@ fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     write_u8(out, e.blend_mode.to_byte());
     write_f32(out, e.opacity);
-    // Bit 0 is `clip`. Bit 1 says a clip path follows the z_index. Files
-    // written before clip paths existed only ever hold 0 or 1 here, so they
-    // still decode unchanged.
-    write_u8(out, e.clip as u8 | ((e.clip_path.is_some() as u8) << 1));
+    // Bit 0 is `clip`. Bit 1 says a clip path follows the z_index, bit 2 that
+    // a mask follows the clip path, bit 3 that the mask is `alpha`. Files
+    // written before these existed only ever hold 0 or 1 here, so they still
+    // decode unchanged.
+    let flags = e.clip as u8
+        | ((e.clip_path.is_some() as u8) << 1)
+        | ((e.mask.is_some() as u8) << 2)
+        | (((e.mask_type == msx_ast::MaskType::Alpha) as u8) << 3);
+    write_u8(out, flags);
     write_u16(out, e.effects.len() as u16);
     for fx in &e.effects { write_effect(out, fx); }
     write_u32(out, e.children.len() as u32);
@@ -459,6 +464,10 @@ fn encode_layer(e: &Layer, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     if let Some(shapes) = &e.clip_path {
         write_u32(out, shapes.len() as u32);
         for shape in shapes { encode_element(shape, out, pool); }
+    }
+    if let Some(elements) = &e.mask {
+        write_u32(out, elements.len() as u32);
+        for el in elements { encode_element(el, out, pool); }
     }
 }
 
@@ -624,6 +633,33 @@ mod tests {
         assert_eq!(layers[1].clip_path.as_ref().map(Vec::len), Some(0));
         assert!(!layers[1].clip);
         assert!(layers[2].clip_path.is_none());
+    }
+
+    #[test]
+    fn layer_masks_survive_compile_and_decode() {
+        use msx_ast::{Circle, MaskType, Rect};
+
+        let content = vec![
+            Element::Rect(Rect { x: 1.0, y: 2.0, width: 30.0, height: 40.0, rx: None, ry: None, id: None, transform: None, style: Style::empty() }),
+            Element::Circle(Circle { cx: 9.0, cy: 8.0, r: 7.0, id: None, transform: None, style: Style::empty() }),
+        ];
+        let luminance = Layer::new(vec![]).with_mask(content.clone(), MaskType::Luminance);
+        let mut alpha = Layer::new(vec![]).with_mask(content, MaskType::Alpha).with_clip_path(vec![]);
+        alpha.clip = true;
+        let nothing = Layer::new(vec![]).with_mask(vec![], MaskType::Luminance);
+        let plain = Layer::new(vec![]);
+
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.elements = vec![Element::Layer(luminance), Element::Layer(alpha), Element::Layer(nothing), Element::Layer(plain)];
+        let decoded = crate::decode(&compile(&scene, false).unwrap()).unwrap();
+        let layers: Vec<&Layer> = decoded.elements.iter().map(|e| match e { Element::Layer(l) => l, _ => panic!("layer") }).collect();
+
+        assert_eq!(layers[0].mask.as_ref().map(Vec::len), Some(2));
+        assert_eq!(layers[0].mask_type, MaskType::Luminance);
+        assert_eq!(layers[1].mask_type, MaskType::Alpha);
+        assert!(layers[1].clip && layers[1].clip_path.is_some(), "mask bits do not disturb the clip bits");
+        assert_eq!(layers[2].mask.as_ref().map(Vec::len), Some(0));
+        assert!(layers[3].mask.is_none() && layers[3].clip_path.is_none());
     }
 
     /// Regression test for a real bug found in `examples/mid-qr-k.msx`:

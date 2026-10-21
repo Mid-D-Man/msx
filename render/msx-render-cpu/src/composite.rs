@@ -10,7 +10,7 @@
 //! buffer after the effects. `clip` (clip children to the layer's pixel
 //! footprint) has no implementation here yet, same gap `msx-render-svg` has.
 
-use msx_ast::{BlendMode, Layer, Matrix2D};
+use msx_ast::{BlendMode, Layer, Matrix2D, MaskType};
 use rayon::prelude::*;
 use tiny_skia::Pixmap;
 
@@ -35,15 +35,44 @@ pub fn render_layer(pixmap: &mut Pixmap, layer: &Layer, parent: Matrix2D, defs: 
         apply_clip(&mut buffer, shapes, combined, index);
     }
 
+    if let Some(elements) = &layer.mask {
+        apply_mask(&mut buffer, elements, layer.mask_type, combined, defs, index, base_dir);
+    }
+
     composite_onto(pixmap, &buffer, layer.blend_mode, layer.opacity.clamp(0.0, 1.0) as f32);
 }
 
-/// Multiplies every pixel of `buffer` by the coverage of `shapes`. The buffer
-/// is premultiplied, so scaling all four channels by the same factor keeps it
-/// premultiplied.
+/// Multiplies every pixel of `buffer` by the coverage of `shapes`.
 fn apply_clip(buffer: &mut Pixmap, shapes: &[msx_ast::Element], matrix: Matrix2D, index: &ElementIndex) {
     let Some(mask) = clip_mask(buffer.width(), buffer.height(), shapes, matrix, index) else { return };
-    for (px, &cover) in buffer.data_mut().chunks_exact_mut(4).zip(mask.data()) {
+    multiply_by(buffer, mask.data());
+}
+
+/// Draws `elements` into a buffer of their own, in the layer's coordinate
+/// space and with their real paint, then scales `buffer` by what they measure.
+/// The mask buffer is premultiplied, so the luminance times the alpha is the
+/// weighted sum of the premultiplied channels with the resvg coefficients.
+fn apply_mask(buffer: &mut Pixmap, elements: &[msx_ast::Element], kind: MaskType, matrix: Matrix2D, defs: &Defs, index: &ElementIndex, base_dir: &std::path::Path) {
+    let Some(mut mask) = Pixmap::new(buffer.width(), buffer.height()) else { return };
+    for el in msx_ast::layer_reordered(elements) {
+        render_element(&mut mask, el, matrix, defs, index, base_dir);
+    }
+    let factors: Vec<u8> = mask
+        .data()
+        .chunks_exact(4)
+        .map(|px| match kind {
+            MaskType::Alpha => px[3],
+            MaskType::Luminance => (0.2125 * px[0] as f32 + 0.7154 * px[1] as f32 + 0.0721 * px[2] as f32 + 0.5).clamp(0.0, 255.0) as u8,
+        })
+        .collect();
+    multiply_by(buffer, &factors);
+}
+
+/// Scales every pixel of `buffer` by its factor out of 255. The buffer is
+/// premultiplied, so scaling all four channels by the same factor keeps it
+/// premultiplied.
+fn multiply_by(buffer: &mut Pixmap, factors: &[u8]) {
+    for (px, &cover) in buffer.data_mut().chunks_exact_mut(4).zip(factors) {
         if cover == 255 {
             continue;
         }
@@ -169,6 +198,46 @@ mod tests {
         assert_eq!(alpha_at(&pm, 5, 5), 0);
         let edge = alpha_at(&pm, 25, 25);
         assert!(edge > 0 && edge < 255, "the circle edge is antialiased, got {edge}");
+    }
+
+    fn masked(mask: Vec<Element>, kind: MaskType) -> Pixmap {
+        let layer = Layer::new(vec![rect_el(0.0, 0.0, 40.0, 40.0, Color::rgb(255, 0, 0))]).with_mask(mask, kind);
+        render_clipped(&layer)
+    }
+
+    #[test]
+    fn luminance_mask_keeps_the_bright_area_and_hides_the_dark_one() {
+        let pm = masked(vec![rect_el(0.0, 0.0, 20.0, 40.0, Color::WHITE), rect_el(20.0, 0.0, 20.0, 40.0, Color::BLACK)], MaskType::Luminance);
+        assert_eq!(alpha_at(&pm, 10, 20), 255, "white keeps the layer");
+        assert_eq!(alpha_at(&pm, 30, 20), 0, "opaque black hides it");
+    }
+
+    #[test]
+    fn luminance_mask_scales_with_gray_and_with_the_mask_alpha() {
+        let gray = masked(vec![rect_el(0.0, 0.0, 40.0, 40.0, Color::rgb(128, 128, 128))], MaskType::Luminance);
+        let a = alpha_at(&gray, 20, 20);
+        assert!((126..=130).contains(&a), "mid gray keeps about half, got {a}");
+        let clear = masked(vec![], MaskType::Luminance);
+        assert!(clear.data().iter().all(|&b| b == 0), "no mask content hides the layer");
+        let uncovered = masked(vec![rect_el(0.0, 0.0, 10.0, 10.0, Color::WHITE)], MaskType::Luminance);
+        assert_eq!(alpha_at(&uncovered, 30, 30), 0, "where the mask draws nothing the layer is hidden");
+    }
+
+    #[test]
+    fn alpha_mask_only_reads_opacity_so_black_keeps_the_layer() {
+        let pm = masked(vec![rect_el(0.0, 0.0, 20.0, 40.0, Color::BLACK)], MaskType::Alpha);
+        assert_eq!(alpha_at(&pm, 10, 20), 255);
+        assert_eq!(alpha_at(&pm, 30, 20), 0);
+    }
+
+    #[test]
+    fn mask_follows_the_layer_transform() {
+        let mut layer = Layer::new(vec![rect_el(-20.0, -20.0, 80.0, 80.0, Color::rgb(0, 0, 255))])
+            .with_mask(vec![rect_el(0.0, 0.0, 10.0, 10.0, Color::WHITE)], MaskType::Luminance);
+        layer.transform = Some(msx_ast::Transform::Translate { x: 20.0, y: 20.0 });
+        let pm = render_clipped(&layer);
+        assert_eq!(alpha_at(&pm, 25, 25), 255);
+        assert_eq!(alpha_at(&pm, 5, 5), 0);
     }
 
     #[test]

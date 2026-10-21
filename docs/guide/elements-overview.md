@@ -36,7 +36,7 @@ A missing required field stops the parse with a message such as `elements[3].r: 
 | `group` | yes, including its style | yes, without its style | yes, without its style |
 | `use` | yes | yes | yes |
 | `image` | yes | yes | yes |
-| `layer` | yes, `clip` not enforced, `clip_path` enforced | yes | yes |
+| `layer` | yes, `clip` not enforced, `clip_path` and `mask` enforced | yes | yes |
 | `sdf` | a comment only | yes | yes |
 | `splat` | approximated with a radial gradient | yes | yes |
 
