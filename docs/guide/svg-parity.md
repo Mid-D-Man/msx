@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 772 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, and of the 40 `mask` tests, 36. The rest of the `mask` tests need image import or are reference cycles. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 803 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, and of the 56 `image` tests 31. The rest of the `image` tests use SVG, GIF or WebP images. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -58,7 +58,9 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `transform`, CSS `transform`, `transform-origin` | Expanded | `transform-box` other than `view-box` is a gap |
 | `switch`, `systemLanguage`, `requiredExtensions` | Expanded | The language is English |
 | `<style>` rules | Partial | Type, id and class selectors and their compounds. Combinators, attributes and pseudo-classes are skipped |
-| `image`, `foreignObject` | Gap | The format has an image element, the writer and importer do not use it yet |
+| `image` with PNG or JPEG | Expanded | From a data URI or a file, with `preserveAspectRatio`, a clip for `slice`, opacity, transform, clip and mask |
+| `image` with SVG, GIF or WebP | Gap | Reported. MSX holds only PNG and JPEG, and an SVG image would need the inner file imported into the scene |
+| `foreignObject` | Gap | Reported |
 | `animate`, `animateTransform`, `animateMotion`, `set`, CSS `animation` | Gap | Reported, the static frame is drawn. MSX has animation tracks, but the importer does not map to them yet and the writer refuses animated scenes |
 
 ## Text
@@ -91,7 +93,7 @@ The remaining gaps share a few causes, so they are closed in this order.
 2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
 3. Patterns, as a tiled group with its own transform.
 4. Markers, expanded by the importer into shapes along the path.
-5. Images, which needs writer support for the image element first.
+5. Done for PNG and JPEG. What is left is SVG, GIF and WebP images.
 6. Filter primitives mapped onto layer effects where an equivalent exists.
 7. Text styling, then `textPath`.
 8. A binary version bump with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`.

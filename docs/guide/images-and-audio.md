@@ -18,7 +18,7 @@ MSX carries raster images as elements and audio as a def. Both accept their byte
 | `anchor` | Which point of the image sits at `x`, `y` | `top_left` |
 | `style` | `opacity` applies to the image | none |
 
-Setting both `data` and `source_ref`, or neither, stops the parse. The image is scaled to `width` by `height`.
+Setting both `data` and `source_ref`, or neither, stops the parse. The image is stretched to `width` by `height` and never keeps its own aspect ratio, so the SVG renderer writes `preserveAspectRatio="none"`. The CPU renderer scales smoothly with a bicubic filter and the GPU renderer linearly, and an image placed on whole pixels without scaling stays exact. SVG's `preserveAspectRatio` is applied when an SVG is imported: the importer works out the size and position and adds a clip for a `slice`.
 
 A `source_ref` path is relative to the `.msx` file. The renderers read the file when they draw, so a missing or invalid file shows up at render time and does not stop the parse. An embedded `data` value is checked at parse time. Its first bytes must look like a PNG or a JPEG, and a corrupted blob is reported with the element's path.
 

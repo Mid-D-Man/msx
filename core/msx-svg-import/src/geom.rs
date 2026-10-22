@@ -278,6 +278,12 @@ fn collect_extent(els: &[Element], outer: Matrix2D, ext: &mut Extent, stroke: bo
                 }
                 stroke_pad(&p.style, m, stroke)
             }
+            Element::Image(i) => {
+                let m = local_matrix(outer, &i.transform);
+                let (x, y) = i.anchor.top_left_for(i.x, i.y, i.width, i.height);
+                add_corners(&mut leaf, m, (x, y, x + i.width, y + i.height));
+                0.0
+            }
             Element::Group(g) => {
                 measurable &= collect_extent(&g.children, local_matrix(outer, &g.transform), ext, stroke);
                 continue;

@@ -293,6 +293,15 @@ mod tests {
     }
 
     #[test]
+    fn images_are_stretched_not_letterboxed() {
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Image(msx_ast::Image::new(msx_ast::MediaSource::Embedded(png), 1.0, 2.0, 30.0, 10.0)));
+        let svg = render(&scene);
+        assert!(svg.contains(r#"preserveAspectRatio="none""#), "{svg}");
+    }
+
+    #[test]
     fn layer_mask_becomes_a_mask_element_that_keeps_its_paint() {
         let paint = style_solid(Color::rgb(255, 255, 255));
         let mask = vec![Element::Rect(Rect { x: 1.0, y: 2.0, width: 30.0, height: 40.0, rx: None, ry: None, id: None, transform: None, style: paint })];

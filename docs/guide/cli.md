@@ -88,7 +88,7 @@ Prints the canvas size, background, element counts and def count. For a binary f
 msx import <input.svg> [-o <output.msx>]
 ```
 
-Reads an SVG file and writes it as editable source. The output defaults to the input path with a `.msx` extension, and the command refuses to overwrite its own input. Features of the SVG that MSX cannot express are listed as warnings on stderr.
+Reads an SVG file and writes it as editable source. The output defaults to the input path with a `.msx` extension, and the command refuses to overwrite its own input. Images the SVG refers to by file path are read from the SVG's directory and embedded, so the `.msx` stands alone. Features of the SVG that MSX cannot express are listed as warnings on stderr.
 
 ## validate
 

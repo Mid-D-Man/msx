@@ -23,6 +23,7 @@
 mod geom;
 mod gradient;
 mod parse;
+mod raster;
 mod style;
 
 use std::collections::{HashMap, HashSet};
@@ -73,8 +74,22 @@ impl fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
+/// Settings for an import.
+#[derive(Debug, Clone, Default)]
+pub struct ImportOptions {
+    /// Directory that relative `<image>` file references are read from. With it
+    /// the image bytes are embedded in the scene, so the result stands alone.
+    /// Without it a file reference is kept as a path and reported.
+    pub base_dir: Option<std::path::PathBuf>,
+}
+
 /// Import SVG source text.
 pub fn import_svg(source: &str) -> Result<Imported, ImportError> {
+    import_svg_with(source, &ImportOptions::default())
+}
+
+/// Import SVG source text with `options`.
+pub fn import_svg_with(source: &str, options: &ImportOptions) -> Result<Imported, ImportError> {
     // A byte order mark or blank lines before `<?xml` make an XML parser
     // reject the file, and real SVG exports have both.
     let source = source.trim_start_matches('\u{feff}').trim_start();
@@ -85,6 +100,7 @@ pub fn import_svg(source: &str) -> Result<Imported, ImportError> {
         return Err(ImportError::NotSvg(format!("the root element is <{}>", root.tag_name().name())));
     }
     let mut imp = Importer::new(&doc);
+    imp.base_dir = options.base_dir.clone();
     Ok(imp.run(root))
 }
 
@@ -107,6 +123,8 @@ pub(crate) struct Importer<'a, 'i> {
     /// True while the children of a `clipPath` are walked: only geometry and
     /// `clip-rule` matter, so paint is not resolved and effects are ignored.
     clip_mode: bool,
+    /// Where relative `<image>` files are read from, if anywhere.
+    base_dir: Option<std::path::PathBuf>,
     /// True when some `clipPath` or `mask` works in `objectBoundingBox` units: a
     /// hidden shape still counts toward the box, so it is kept as an invisible
     /// element.
@@ -170,6 +188,7 @@ fn transform_mut(el: &mut Element) -> Option<&mut Option<Transform>> {
         Element::Polyline(e) | Element::Polygon(e) => Some(&mut e.transform),
         Element::Path(e) => Some(&mut e.transform),
         Element::Text(e) => Some(&mut e.transform),
+        Element::Image(e) => Some(&mut e.transform),
         _ => None,
     }
 }
@@ -428,6 +447,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             depth: 0,
             use_stack: Vec::new(),
             clip_mode: false,
+            base_dir: None,
             keep_hidden,
             clip_stack: Vec::new(),
             emitted: 0,
@@ -916,11 +936,115 @@ impl<'a, 'i> Importer<'a, 'i> {
             "use" => self.walk_use(node, parent, out),
             tag @ ("rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path") => self.walk_shape(node, tag, parent, out, expanded),
             "text" => self.walk_text(node, parent, out, expanded),
-            "image" | "foreignObject" => {
+            "image" => self.walk_image(node, parent, out, expanded),
+            "foreignObject" => {
                 let msg = format!("{} is not supported and was skipped", Self::label(&node));
                 self.warn(msg);
             }
             _ => {}
+        }
+    }
+
+    /// `<image>` with a PNG or JPEG, from a `data:` URI or a file. The image is
+    /// placed by `preserveAspectRatio` into the box the SVG gives, since MSX
+    /// stretches an image to its width and height, and a `slice` that spills
+    /// over the box is clipped to it.
+    fn walk_image(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
+        let Some((inh, props)) = self.begin(node, parent) else { return };
+        if inh.hidden {
+            return;
+        }
+        let label = Self::label(&node);
+        let href = node.attribute("href").or_else(|| node.attribute((XLINK_NS, "href"))).map(str::trim).unwrap_or("");
+        if href.is_empty() {
+            return;
+        }
+        let Some((source, intrinsic)) = self.load_image(&label, href) else { return };
+
+        let (fs, vp) = (inh.font_size, self.vp);
+        let x = self.length(node, "x", fs, vp.0).unwrap_or(0.0);
+        let y = self.length(node, "y", fs, vp.1).unwrap_or(0.0);
+        let (w, h) = (self.length(node, "width", fs, vp.0), self.length(node, "height", fs, vp.1));
+        let known = intrinsic.map(|(iw, ih)| (iw as f64, ih as f64));
+        // A missing size comes from the image, the other side keeping its ratio.
+        let (w, h) = match (w, h, known) {
+            (Some(w), Some(h), _) => (w, h),
+            (Some(w), None, Some((iw, ih))) => (w, w * ih / iw),
+            (None, Some(h), Some((iw, ih))) => (h * iw / ih, h),
+            (None, None, Some((iw, ih))) => (iw, ih),
+            _ => {
+                self.warn(format!("{label} has no usable size and its pixel size is unknown; skipped"));
+                return;
+            }
+        };
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+
+        let par = raster::parse_aspect_ratio(node.attribute("preserveAspectRatio").unwrap_or(""));
+        let ((ix, iy, iw, ih), spill) = match known {
+            Some(k) => raster::fit((x, y, w, h), k, par),
+            None => ((x, y, w, h), false),
+        };
+        let bbox = Some(BBox { x, y, w, h });
+        let mut comp = self.composite(&node, &props, bbox);
+        if spill {
+            comp.clips.push(vec![plain_rect(x, y, x + w, y + h)]);
+        }
+        if let Some(v) = props.get("image-rendering").map(|v| v.trim()) {
+            if !matches!(v, "" | "auto" | "optimizeQuality") {
+                self.warn(format!("{label} uses image-rendering: {v}, which is not supported; smooth scaling is used"));
+            }
+        }
+        let mut image = msx_ast::Image::new(source, ix, iy, iw, ih);
+        image.id = if expanded { None } else { node.attribute("id").map(String::from) };
+        image.transform = self.node_transform(node);
+        image.style = Style { opacity: Some(element_opacity(&props)), ..Style::default() };
+        self.push_leaf(Element::Image(image), &inh, comp, out);
+    }
+
+    /// The embedded bytes or the file reference for `href`, and the size in
+    /// pixels when it is known. Only PNG and JPEG can be held; anything else is
+    /// reported and skipped.
+    fn load_image(&mut self, label: &str, href: &str) -> Option<(msx_ast::MediaSource, Option<(u32, u32)>)> {
+        let bytes = match raster::decode_data_uri(href) {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(e)) => {
+                self.warn(format!("{label} has a bad data URI ({e}); skipped"));
+                return None;
+            }
+            None => {
+                let lower = href.to_ascii_lowercase();
+                if lower.starts_with("http://") || lower.starts_with("https://") {
+                    self.warn(format!("{label} points at a web address, which is not fetched; skipped"));
+                    return None;
+                }
+                let path = href.strip_prefix("file://").unwrap_or(href);
+                let path = String::from_utf8_lossy(&raster::percent_decode(path)).into_owned();
+                match &self.base_dir {
+                    Some(dir) => match std::fs::read(dir.join(&path)) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            self.warn(format!("{label} could not read {path} ({e}); skipped"));
+                            return None;
+                        }
+                    },
+                    None => {
+                        self.warn(format!("{label} refers to the file {path}, which is kept as a path and not embedded because no base directory is known; its size is unknown"));
+                        return Some((msx_ast::MediaSource::FileRef(path), None));
+                    }
+                }
+            }
+        };
+        match raster::sniff(&bytes) {
+            f @ (raster::Format::Png | raster::Format::Jpeg) => {
+                let size = raster::dimensions(&bytes, f);
+                Some((msx_ast::MediaSource::Embedded(bytes), size))
+            }
+            raster::Format::Other(name) => {
+                self.warn(format!("{label} holds an image MSX cannot embed ({name}; only PNG and JPEG); skipped"));
+                None
+            }
         }
     }
 
@@ -1159,7 +1283,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         self.emitted += 1;
-        let mut parts = if inh.stroke_first { split_paint_order(el) } else { vec![el] };
+        let mut parts = if inh.stroke_first && !matches!(el, Element::Image(_)) { split_paint_order(el) } else { vec![el] };
         if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() {
             // A clip or mask lives in the element's own space, so the
             // element's transform moves from the shape to the layer.

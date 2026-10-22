@@ -22,6 +22,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Compositing.** `opacity` on a group becomes an isolated layer. `mix-blend-mode` becomes the blend mode of a layer for multiply, screen, overlay, darken, lighten, hard-light, soft-light, difference and exclusion. `isolation: isolate` becomes a layer. `paint-order: stroke` becomes two shapes, the stroke first.
 - **Clipping.** `clip-path: url(#id)` on any element becomes a layer with a `clip_path`. `clipPathUnits` of `userSpaceOnUse` and `objectBoundingBox`, the `transform` of the `clipPath`, `clip-rule` and a `clip-path` on the `clipPath` itself (the clips nest, so both apply) are honored. Only shapes with an area, text and a `use` of one of those count, and fill, stroke and opacity inside the clip path are ignored, as in SVG. A `symbol` and a nested `svg` clip to their viewport the same way, unless `overflow` is `visible` or `auto`. The clip is added only when the content can reach past the viewport, so a symbol that fits costs no extra layer.
 - **Masks.** `mask: url(#id)` on any element becomes a layer with a `mask`. `maskUnits` and `maskContentUnits` in both units, the `x`, `y`, `width` and `height` region (default 120 percent of the box, kept as a clip of the mask content when the content reaches past it), `mask-type` as an attribute or in style, and a `mask` on the `mask` itself are honored. The mask content keeps its paint, gradients, opacity and nested masks, since it is drawn as normal elements. A box based mask on a shape with no area, or a region with no area, hides the element, as in SVG.
+- **Images.** `<image>` with a PNG or JPEG becomes an image element. The bytes come from a `data:` URI, with line breaks and any padding in the base64 accepted, or from a file. A file is read from the SVG's directory and embedded when the importer is given one, as `msx import` and every command that takes an SVG do. Without a directory, as in the browser converter, the path is kept and reported, and the size must then come from the SVG. The format is decided by the bytes, not the mime type. A missing `width` or `height` is taken from the image, the other side keeping its ratio. `preserveAspectRatio` is worked out by the importer: the image is placed and sized inside the box, and a `slice` that spills over the box is clipped to it. Opacity, `transform`, `clip-path` and `mask` apply as for shapes.
 - **Transforms.** The `transform` attribute and the CSS `transform` property, with angle and length units, and `transform-origin`.
 - **Conditions.** `switch` draws its first child that passes, and `systemLanguage` and `requiredExtensions` apply to any element. The language is English.
 - **Text.** Whitespace collapses. A `tspan` with its own position becomes its own text element, which gives multi-line text.
@@ -39,7 +40,9 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 | `<animate>`, `<animateTransform>`, `<animateMotion>`, `<set>`, CSS `animation` and `@keyframes` | The static frame is drawn |
 | `pattern` paint | Fallback color if given, otherwise none |
 | `marker`, `marker-start`, `marker-mid`, `marker-end` | Drawn without markers |
-| `image`, `foreignObject` | Skipped |
+| `foreignObject` | Skipped |
+| `image` that is SVG, GIF or WebP, or points at a web address | Skipped, because MSX holds only PNG and JPEG |
+| `image-rendering` other than `auto` and `optimizeQuality` | Drawn with smooth scaling |
 | `textPath` | Its text is skipped |
 | `spreadMethod` of `reflect` or `repeat` | Imported as `pad` |
 | `fr` on a radial gradient, a focal point outside the circle | `fr` ignored, focal point moved onto the circle |

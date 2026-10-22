@@ -134,6 +134,9 @@ pub(crate) fn render_image(ctx: &mut Ctx, img: &Image) {
     write_attr(ctx, "y", fmt_f64(tl_y));
     write_attr(ctx, "width", fmt_f64(img.width));
     write_attr(ctx, "height", fmt_f64(img.height));
+    // MSX stretches an image to its width and height. SVG would otherwise keep
+    // the aspect ratio and leave bars.
+    write_attr(ctx, "preserveAspectRatio", "none");
 
     let href = match &img.source {
         MediaSource::Embedded(bytes) => {

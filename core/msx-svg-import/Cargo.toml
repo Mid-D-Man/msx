@@ -12,6 +12,7 @@ publish     = false
 msx-ast    = { workspace = true }
 msx-text   = { workspace = true }
 roxmltree  = "0.20"
+base64    = { workspace = true }
 
 [dev-dependencies]
 msx-parser = { workspace = true }

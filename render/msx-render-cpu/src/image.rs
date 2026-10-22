@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use msx_ast::{Image, Matrix2D, MediaSource};
-use tiny_skia::{Pixmap, PixmapPaint, Transform as SkTransform};
+use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform as SkTransform};
 
 pub(crate) fn render_image(pixmap: &mut Pixmap, img: &Image, parent: Matrix2D, base_dir: &Path) {
     let bytes: std::borrow::Cow<[u8]> = match &img.source {
@@ -93,8 +93,13 @@ pub(crate) fn render_image(pixmap: &mut Pixmap, img: &Image, parent: Matrix2D, b
         combined.e as f32, combined.f as f32,
     );
 
+    // Smooth scaling, as browsers and resvg do by default. The default
+    // filter here is nearest, which turns a scaled image into blocks. tiny-skia
+    // drops back to nearest by itself for a pure whole pixel translation, so
+    // an unscaled image stays exact.
     let paint = PixmapPaint {
         opacity: img.style.opacity.unwrap_or(1.0) as f32,
+        quality: FilterQuality::Bicubic,
         ..Default::default()
     };
 
@@ -127,17 +132,38 @@ mod tests {
     }
 
     #[test]
+    fn scaled_images_are_smoothed_and_unscaled_ones_stay_exact() {
+        // The 2x2 test image is red on top and clear below. Scaled up tenfold the
+        // edge between them blends over several pixels, which nearest would not.
+        let up = Image::new(MediaSource::Embedded(tiny_test_png()), 0.0, 0.0, 20.0, 20.0);
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        render_image(&mut pm, &up, Matrix2D::identity(), Path::new("."));
+        let edge: Vec<u8> = (6..14).map(|y| pm.pixel(5, y).unwrap().alpha()).collect();
+        assert!(edge.iter().any(|&a| a > 10 && a < 245), "a smooth edge has in between alphas, got {edge:?}");
+        assert_eq!(pm.pixel(5, 1).unwrap().alpha(), 255, "far from the edge it is solid");
+
+        let exact = Image::new(MediaSource::Embedded(tiny_test_png()), 3.0, 4.0, 2.0, 2.0);
+        let mut pm = Pixmap::new(10, 10).unwrap();
+        render_image(&mut pm, &exact, Matrix2D::identity(), Path::new("."));
+        assert_eq!(pm.pixel(3, 4).unwrap().alpha(), 255);
+        assert_eq!(pm.pixel(4, 4).unwrap().alpha(), 255);
+        assert_eq!(pm.pixel(3, 5).unwrap().alpha(), 0, "a whole pixel placement does not blur");
+    }
+
+    #[test]
     fn embedded_png_renders_opaque_pixels_at_the_expected_position() {
         let mut pixmap = Pixmap::new(20, 20).unwrap();
         let img = Image::new(MediaSource::Embedded(tiny_test_png()), 0.0, 0.0, 10.0, 10.0);
 
         render_image(&mut pixmap, &img, Matrix2D::identity(), Path::new("."));
 
-        // Top-left 5x5 block (the scaled-up top row of the 2x2 source)
-        // should now be opaque red — nearest-neighbor-ish scaling means
-        // exact edges can be soft, so this checks well inside the block.
+        // Top-left 5x5 block (the scaled-up top row of the 2x2 source) is
+        // red. Scaling is smooth, so the clear row below leaks in a little even
+        // two pixels from the edge: the block is nearly opaque and purely red.
         let px = pixmap.pixel(2, 2).unwrap();
-        assert_eq!((px.red(), px.green(), px.blue(), px.alpha()), (255, 0, 0, 255));
+        assert!(px.alpha() > 230, "nearly opaque, got {}", px.alpha());
+        assert_eq!((px.green(), px.blue()), (0, 0));
+        assert_eq!(px.red(), px.alpha(), "premultiplied red equals alpha for pure red");
     }
 
     #[test]

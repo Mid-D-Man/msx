@@ -232,13 +232,13 @@ fn unsupported_features_are_reported() {
         r##"<rect width="1" height="1" clip-path="url(#c)"/>
             <rect width="1" height="1" filter="url(#f)"/>
             <rect width="1" height="1" mask="url(#m)"/>
-            <image href="x.png" width="5" height="5"/>
+            <foreignObject width="5" height="5"/>
             <pattern id="p"/><rect width="1" height="1" fill="url(#p)"/>"##,
     ));
-    for needle in ["clip path", "filter", "mask", "<image", "pattern"] {
+    for needle in ["clip path", "filter", "mask", "<foreignObject", "pattern"] {
         assert!(has_warning(&i, needle), "missing a warning about {needle}: {:?}", i.warnings);
     }
-    assert_eq!(i.scene.elements.len(), 4, "shapes are still imported, the image is not");
+    assert_eq!(i.scene.elements.len(), 4, "shapes are still imported, the foreignObject is not");
 }
 
 // ── use, symbol, nested svg ──────────────────────────────────────────────────
@@ -1196,6 +1196,159 @@ fn masked_imports_survive_write_and_parse() {
         <rect width="80" height="60" fill="#f00" mask="url(#m)"/>
         <g mask="url(#a)" transform="translate(5 5)"><rect width="40" height="20" fill="#00f"/></g></svg>"##;
     let i = imp(svg);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));
+}
+
+// ── images ───────────────────────────────────────────────────────────────────
+
+fn png_uri(w: u32, h: u32) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    format!("data:image/png;base64,{}", STANDARD.encode(raster::tests_support::fake_png(w, h)))
+}
+
+fn image_of(e: &Element) -> &msx_ast::Image {
+    match e {
+        Element::Image(i) => i,
+        other => panic!("expected an image, got {other:?}"),
+    }
+}
+
+fn geometry(i: &msx_ast::Image) -> (f64, f64, f64, f64) {
+    (i.x, i.y, i.width, i.height)
+}
+
+#[test]
+fn a_png_data_uri_becomes_an_embedded_image() {
+    let i = imp(&doc(&format!(r#"<image x="5" y="6" width="40" height="20" href="{}"/>"#, png_uri(40, 20))));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let img = image_of(&i.scene.elements[0]);
+    assert_eq!(geometry(img), (5.0, 6.0, 40.0, 20.0));
+    assert!(matches!(&img.source, msx_ast::MediaSource::Embedded(b) if b.starts_with(&[0x89, b'P'])));
+}
+
+#[test]
+fn base64_with_line_breaks_and_the_xlink_href_work() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let b64 = STANDARD.encode(raster::tests_support::fake_png(8, 8));
+    let broken: String = b64.as_bytes().chunks(12).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join("\n    ");
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="50" height="50"><image width="8" height="8" xlink:href="data:image/png;base64,
+    {broken}"/></svg>"#);
+    let i = imp(&svg);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(image_of(&i.scene.elements[0]).width, 8.0);
+}
+
+#[test]
+fn a_missing_size_comes_from_the_image() {
+    let uri = png_uri(40, 20);
+    let both = imp(&doc(&format!(r#"<image x="1" y="2" href="{uri}"/>"#)));
+    assert_eq!(geometry(image_of(&both.scene.elements[0])), (1.0, 2.0, 40.0, 20.0));
+    let only_w = imp(&doc(&format!(r#"<image width="80" href="{uri}"/>"#)));
+    assert_eq!(geometry(image_of(&only_w.scene.elements[0])), (0.0, 0.0, 80.0, 40.0));
+    let only_h = imp(&doc(&format!(r#"<image height="10" href="{uri}"/>"#)));
+    assert_eq!(geometry(image_of(&only_h.scene.elements[0])), (0.0, 0.0, 20.0, 10.0));
+}
+
+#[test]
+fn preserve_aspect_ratio_is_baked_into_the_placement() {
+    let uri = png_uri(40, 20);
+    let place = |par: &str| {
+        let i = imp(&doc(&format!(r#"<image x="10" y="20" width="100" height="100" preserveAspectRatio="{par}" href="{uri}"/>"#)));
+        geometry(image_of(&i.scene.elements[0]))
+    };
+    assert_eq!(place("xMidYMid meet"), (10.0, 45.0, 100.0, 50.0));
+    assert_eq!(place("xMinYMin meet"), (10.0, 20.0, 100.0, 50.0));
+    assert_eq!(place("xMaxYMax meet"), (10.0, 70.0, 100.0, 50.0));
+    assert_eq!(place("none"), (10.0, 20.0, 100.0, 100.0));
+}
+
+#[test]
+fn a_slice_that_spills_is_clipped_to_the_box_and_the_transform_moves_to_the_layer() {
+    let uri = png_uri(40, 20);
+    let i = imp(&doc(&format!(r#"<image x="10" y="20" width="100" height="100" preserveAspectRatio="xMidYMid slice" transform="translate(3 4)" href="{uri}"/>"#)));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(clip_rect(&l.clip_path.as_ref().unwrap()[0]), (10.0, 20.0, 100.0, 100.0));
+    assert!(matches!(l.transform, Some(Transform::Translate { x, y }) if x == 3.0 && y == 4.0));
+    let img = image_of(&l.children[0]);
+    assert_eq!(geometry(img), (-40.0, 20.0, 200.0, 100.0));
+    assert!(img.transform.is_none());
+    let fits = imp(&doc(&format!(r#"<image width="40" height="20" preserveAspectRatio="xMidYMid slice" href="{uri}"/>"#)));
+    assert!(matches!(fits.scene.elements[0], Element::Image(_)), "a slice that covers exactly needs no clip");
+}
+
+#[test]
+fn image_opacity_transform_and_jpeg_are_kept() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let jpeg = format!("data:image/jpeg;base64,{}", STANDARD.encode(raster::tests_support::fake_jpeg(300, 200)));
+    let i = imp(&doc(&format!(r#"<image width="60" height="40" opacity=".5" transform="rotate(10)" href="{jpeg}"/>"#)));
+    let img = image_of(&i.scene.elements[0]);
+    assert_eq!(img.style.opacity, Some(0.5));
+    assert!(img.transform.is_some());
+    // The mime type is not trusted: the bytes decide.
+    let no_mime = imp(&doc(&format!(r#"<image width="30" href="data:;base64,{}"/>"#, STANDARD.encode(raster::tests_support::fake_jpeg(300, 200)))));
+    assert_eq!(geometry(image_of(&no_mime.scene.elements[0])), (0.0, 0.0, 30.0, 20.0));
+}
+
+#[test]
+fn images_take_part_in_clip_paths_and_masks() {
+    let uri = png_uri(10, 10);
+    let i = imp(&doc(&format!(r##"<defs><clipPath id="c"><circle cx="5" cy="5" r="4"/></clipPath></defs>
+        <image x="0" y="0" width="10" height="10" transform="translate(7 8)" clip-path="url(#c)" href="{uri}"/>"##)));
+    let l = layer(&i.scene.elements[0]);
+    assert!(l.clip_path.is_some());
+    assert!(matches!(l.transform, Some(Transform::Translate { x, y }) if x == 7.0 && y == 8.0));
+    assert!(image_of(&l.children[0]).transform.is_none());
+}
+
+#[test]
+fn images_msx_cannot_hold_are_reported_and_skipped() {
+    let i = imp(&doc(r#"<image width="9" height="9" href="data:image/gif;base64,R0lGODlhAQABAAAAACw="/>
+        <image width="9" height="9" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E"/>
+        <image width="9" height="9" href="https://example.com/a.png"/>
+        <image width="9" height="9" href="data:image/png;base64,@@@"/>"#));
+    for needle in ["GIF", "SVG", "web address", "bad data URI"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    assert!(i.scene.elements.is_empty());
+}
+
+#[test]
+fn empty_or_zero_sized_images_draw_nothing_quietly() {
+    let uri = png_uri(10, 10);
+    let i = imp(&doc(&format!(r#"<image width="0" height="9" href="{uri}"/><image width="9" height="-1" href="{uri}"/><image width="9" height="9" href=""/><image width="9" height="9"/>"#)));
+    assert!(i.scene.elements.is_empty());
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+}
+
+#[test]
+fn image_files_are_embedded_with_a_base_directory_and_kept_as_paths_without() {
+    let dir = std::env::temp_dir().join(format!("msx-import-images-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("pic.png"), raster::tests_support::fake_png(30, 10)).unwrap();
+    let svg = doc(r#"<image x="1" y="2" width="60" href="pic.png"/><image width="5" height="5" href="missing.png"/>"#);
+
+    let with = import_svg_with(&svg, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert_eq!(geometry(image_of(&with.scene.elements[0])), (1.0, 2.0, 60.0, 20.0), "the height follows the embedded size");
+    assert!(matches!(image_of(&with.scene.elements[0]).source, msx_ast::MediaSource::Embedded(_)));
+    assert!(with.warnings.iter().any(|w| w.contains("missing.png") && w.contains("could not read")), "{:?}", with.warnings);
+    assert_eq!(with.scene.elements.len(), 1, "the unreadable file is skipped");
+
+    let without = imp(&doc(r#"<image x="1" y="2" width="60" height="20" href="pic.png"/>"#));
+    assert!(matches!(&image_of(&without.scene.elements[0]).source, msx_ast::MediaSource::FileRef(p) if p == "pic.png"));
+    assert!(has_warning(&without, "not embedded"));
+    let sizeless = imp(&doc(r#"<image href="pic.png"/>"#));
+    assert!(sizeless.scene.elements.is_empty() && has_warning(&sizeless, "size is unknown"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn imported_images_survive_write_and_parse() {
+    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">
+        <image x="10" y="10" width="100" height="60" preserveAspectRatio="xMidYMid slice" opacity=".8" href="{}"/>
+        <image id="b" x="0" y="0" width="30" height="30" transform="rotate(5)" href="{}"/></svg>"##, png_uri(40, 20), png_uri(8, 8));
+    let i = imp(&svg);
     let text = msx_parser::scene_to_msx(&i.scene).expect("written");
     let back = msx_parser::parse_scene(&text).expect("parsed");
     assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));

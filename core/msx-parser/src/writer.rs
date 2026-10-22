@@ -7,7 +7,7 @@
 //!
 //! Supported: canvas and `viewbox`, linear, radial and conic gradients,
 //! and the elements rect, circle, ellipse, line, polyline, polygon, path,
-//! text, group, use and layer (without effects). Anything else returns
+//! text, image, group, use and layer (without effects). Anything else returns
 //! [`WriteError::Unsupported`] instead of writing a file that would lose
 //! content: SDF nodes, splats, images, shader and audio defs, layer
 //! effects and animations.
@@ -15,7 +15,8 @@
 use std::fmt::{self, Write as _};
 
 use msx_ast::{
-    BlendMode, Color, Def, Element, FontWeight, Group, Layer, Paint, PathCommand, Point, Scene, Stop, Style, Transform,
+    Anchor, BlendMode, Color, Def, Element, FontWeight, Group, ImageFormat, Layer, MediaSource, Paint, PathCommand, Point, Scene, Stop,
+    Style, Transform,
 };
 
 /// Why a scene could not be written.
@@ -366,6 +367,20 @@ fn common(id: &Option<String>, transform: &Option<Transform>, style: Option<&Sty
     s
 }
 
+fn anchor_text(a: Anchor) -> &'static str {
+    match a {
+        Anchor::TopLeft => "top_left",
+        Anchor::Top => "top",
+        Anchor::TopRight => "top_right",
+        Anchor::Left => "left",
+        Anchor::Center => "center",
+        Anchor::Right => "right",
+        Anchor::BottomLeft => "bottom_left",
+        Anchor::Bottom => "bottom",
+        Anchor::BottomRight => "bottom_right",
+    }
+}
+
 fn pad(n: usize) -> String {
     " ".repeat(n)
 }
@@ -420,7 +435,25 @@ fn write_element(out: &mut String, el: &Element, indent: usize, comma: bool) -> 
         Element::Layer(l) => write_layer(out, l, indent, tail)?,
         Element::Sdf(_) => return Err(WriteError::Unsupported("sdf elements".into())),
         Element::Splat(_) => return Err(WriteError::Unsupported("splat elements".into())),
-        Element::Image(_) => return Err(WriteError::Unsupported("image elements".into())),
+        Element::Image(e) => {
+            let mut s = format!("{{ type = \"image\", x = {}, y = {}, width = {}, height = {}", num(e.x), num(e.y), num(e.width), num(e.height));
+            if e.anchor != Anchor::TopLeft {
+                let _ = write!(s, ", anchor = {}", quote(anchor_text(e.anchor)));
+            }
+            match &e.source {
+                MediaSource::Embedded(bytes) => {
+                    if ImageFormat::sniff(bytes).is_none() {
+                        return Err(WriteError::Unsupported("image data that is not PNG or JPEG".into()));
+                    }
+                    use base64::{engine::general_purpose::STANDARD, Engine as _};
+                    let _ = write!(s, ", data = {}", quote(&STANDARD.encode(bytes)));
+                }
+                MediaSource::FileRef(path) => {
+                    let _ = write!(s, ", source_ref = {}", quote(path));
+                }
+            }
+            let _ = write!(out, "{}{}{} }}{tail}", pad(indent), s, common(&e.id, &e.transform, Some(&e.style)));
+        }
     }
     Ok(())
 }
@@ -652,6 +685,28 @@ mod tests {
         let nothing = Layer::new(vec![rect(style())]).with_clip_path(vec![]);
         let plain = Layer::new(vec![rect(style())]);
         assert_roundtrip(&scene_with(vec![], vec![Element::Layer(clipped), Element::Layer(nothing), Element::Layer(plain)]));
+    }
+
+    #[test]
+    fn images_roundtrip_embedded_and_by_path_with_anchor_and_style() {
+        use msx_ast::{Anchor, Image, MediaSource};
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 255, 0];
+        let mut a = Image::new(MediaSource::Embedded(png), 1.5, 2.0, 30.0, 40.5);
+        a.id = Some("pic".into());
+        a.transform = Some(Transform::Translate { x: 3.0, y: 4.0 });
+        a.anchor = Anchor::Center;
+        a.style.opacity = Some(0.5);
+        let b = Image::new(MediaSource::FileRef("assets/a b.png".into()), 0.0, 0.0, 5.0, 5.0);
+        let jpeg = Image::new(MediaSource::Embedded(vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10]), 0.0, 0.0, 2.0, 2.0);
+        assert_roundtrip(&scene_with(vec![], vec![Element::Image(a), Element::Image(b), Element::Image(jpeg)]));
+    }
+
+    #[test]
+    fn image_bytes_that_are_not_png_or_jpeg_are_refused_not_written() {
+        use msx_ast::{Image, MediaSource};
+        let gif = Image::new(MediaSource::Embedded(b"GIF89a".to_vec()), 0.0, 0.0, 1.0, 1.0);
+        let err = scene_to_msx(&scene_with(vec![], vec![Element::Image(gif)])).unwrap_err();
+        assert!(matches!(err, WriteError::Unsupported(w) if w.contains("PNG or JPEG")));
     }
 
     #[test]

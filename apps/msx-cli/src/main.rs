@@ -451,7 +451,7 @@ fn cmd_animate_gpu(
 fn cmd_info(input: &Path) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
     let is_binary = bytes.len() >= 4 && &bytes[0..4] == b"MSX\0";
-    let scene = load_scene_bytes(&bytes)?;
+    let scene = load_scene_bytes_in(&bytes, input.parent())?;
 
     println!("File:       {}", input.display());
     println!("Format:     {}", if is_binary { "binary (MBFA)" } else { "DixScript source" });
@@ -472,7 +472,8 @@ fn cmd_info(input: &Path) -> Result<(), String> {
 
 fn cmd_import(input: &Path, output: Option<&Path>) -> Result<(), String> {
     let source = std::fs::read_to_string(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
-    let imported = msx_svg_import::import_svg(&source).map_err(|e| format!("{}: {}", input.display(), e))?;
+    let options = msx_svg_import::ImportOptions { base_dir: input.parent().map(|d| d.to_path_buf()) };
+    let imported = msx_svg_import::import_svg_with(&source, &options).map_err(|e| format!("{}: {}", input.display(), e))?;
     let text = msx_parser::scene_to_msx(&imported.scene).map_err(|e| e.to_string())?;
 
     let out = output.map(Path::to_path_buf).unwrap_or_else(|| input.with_extension("msx"));
@@ -672,10 +673,17 @@ fn cmd_view(input: &Path) -> Result<(), String> {
 
 fn load_scene(path: &Path) -> Result<Scene, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    load_scene_bytes(&bytes)
+    load_scene_bytes_in(&bytes, path.parent())
 }
 
+#[cfg(test)]
 fn load_scene_bytes(bytes: &[u8]) -> Result<Scene, String> {
+    load_scene_bytes_in(bytes, None)
+}
+
+/// Loads a scene from `bytes`. `base_dir` is where an SVG's relative image
+/// files are read from, so they end up embedded in the scene.
+fn load_scene_bytes_in(bytes: &[u8], base_dir: Option<&Path>) -> Result<Scene, String> {
     if bytes.len() >= 4 && &bytes[0..4] == b"MSX\0" {
         msx_binary::decode(bytes).map_err(|e| format!("binary decode failed: {}", e))
     } else {
@@ -683,7 +691,8 @@ fn load_scene_bytes(bytes: &[u8]) -> Result<Scene, String> {
         // DixScript starts with `@CONFIG` or a `//` comment, never with `<`,
         // so a leading `<` (XML declaration or root element) means SVG.
         if source.trim_start_matches('\u{feff}').trim_start().starts_with('<') {
-            let imported = msx_svg_import::import_svg(source).map_err(|e| e.to_string())?;
+            let options = msx_svg_import::ImportOptions { base_dir: base_dir.map(|d| d.to_path_buf()) };
+            let imported = msx_svg_import::import_svg_with(source, &options).map_err(|e| e.to_string())?;
             for w in &imported.warnings {
                 eprintln!("warning: {w}");
             }
@@ -732,7 +741,7 @@ fn open_in_system_viewer(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{AnimatedProperty, AnimationTrack, Canvas, Color, Easing, Keyframe, LoopMode};
+    use msx_ast::{AnimatedProperty, AnimationTrack, Canvas, Color, Easing, Element, Keyframe, LoopMode};
 
     #[test]
     fn load_scene_bytes_detects_dixscript_source() {
@@ -755,6 +764,31 @@ mod tests {
         let with_bom = format!("\u{feff}\n  {svg}");
         assert!(load_scene_bytes(with_bom.as_bytes()).is_ok(), "a BOM and leading whitespace are fine");
         assert!(load_scene_bytes(b"<html/>").is_err(), "XML that is not an SVG is rejected");
+    }
+
+    #[test]
+    fn svg_image_files_are_embedded_from_the_files_directory() {
+        let dir = std::env::temp_dir().join(format!("msx-cli-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&[0, 0, 0, 8, 0, 0, 0, 4, 8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        std::fs::write(dir.join("pic.png"), &png).unwrap();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><image width="16" href="pic.png"/></svg>"#;
+        let svg_path = dir.join("scene.svg");
+        std::fs::write(&svg_path, svg).unwrap();
+
+        let scene = load_scene(&svg_path).expect("the svg loads");
+        match &scene.elements[0] {
+            Element::Image(i) => {
+                assert!(matches!(&i.source, msx_ast::MediaSource::Embedded(b) if *b == png), "the file is embedded");
+                assert_eq!((i.width, i.height), (16.0, 8.0), "the height follows the file's own size");
+            }
+            other => panic!("expected an image, got {other:?}"),
+        }
+        let no_dir = load_scene_bytes(svg.as_bytes()).expect("loads without a directory");
+        assert!(no_dir.elements.is_empty(), "without a directory the sizeless image is skipped, with a warning");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
