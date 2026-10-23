@@ -82,4 +82,5 @@ def main():
     json.dump(results, open(sys.argv[3], "w"))
     print("compared", len(results))
 
-main()
+if __name__ == "__main__":
+    main()

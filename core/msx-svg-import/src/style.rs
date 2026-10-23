@@ -22,7 +22,7 @@ pub const PRESENTATION: &[&str] = &[
     "fill", "fill-opacity", "fill-rule", "clip-rule", "overflow", "mask-type", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
     "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity", "display", "visibility", "color", "font-size",
     "font-family", "font-weight", "text-anchor", "dominant-baseline", "stop-color", "stop-opacity", "clip-path", "mask",
-    "filter", "paint-order", "transform-origin", "transform-box", "marker", "marker-start", "marker-mid",
+    "filter", "paint-order", "transform-origin", "transform-box", "marker-start", "marker-mid",
     "marker-end", "text-decoration", "letter-spacing", "word-spacing", "font-style", "writing-mode", "vector-effect",
 ];
 
@@ -62,6 +62,12 @@ pub struct Inh {
     pub color: Color,
     /// `paint-order` puts the stroke before the fill.
     pub stroke_first: bool,
+    /// `marker-start`, `marker-mid` and `marker-end` as written (`url(#id)`),
+    /// `None` for `none`. They are inherited, and the `marker` shorthand in CSS
+    /// sets all three.
+    pub marker_start: Option<String>,
+    pub marker_mid: Option<String>,
+    pub marker_end: Option<String>,
 }
 
 impl Default for Inh {
@@ -88,6 +94,9 @@ impl Default for Inh {
             hidden: false,
             color: Color::BLACK,
             stroke_first: false,
+            marker_start: None,
+            marker_mid: None,
+            marker_end: None,
         }
     }
 }
@@ -239,6 +248,21 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
         Some("evenodd") => inh.fill_rule = FillRule::EvenOdd,
         Some("nonzero") => inh.fill_rule = FillRule::NonZero,
         _ => {}
+    }
+    let marker = |v: &str| (!v.trim().is_empty() && v.trim() != "none").then(|| v.trim().to_string());
+    if let Some(v) = get("marker") {
+        inh.marker_start = marker(v);
+        inh.marker_mid = marker(v);
+        inh.marker_end = marker(v);
+    }
+    if let Some(v) = get("marker-start") {
+        inh.marker_start = marker(v);
+    }
+    if let Some(v) = get("marker-mid") {
+        inh.marker_mid = marker(v);
+    }
+    if let Some(v) = get("marker-end") {
+        inh.marker_end = marker(v);
     }
     match get("clip-rule") {
         Some("evenodd") => inh.clip_rule = FillRule::EvenOdd,

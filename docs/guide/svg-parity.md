@@ -47,7 +47,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `mask` with `url(#id)` | Expanded | A layer with a mask. Both units, the region, `mask-type`, nested masks and any paint in the mask work on all three renderers |
 | `mask` in a reference cycle, `color-interpolation: linearRGB` | Gap | Reported |
 | `filter` | Gap | Layers carry blur and shadow effects natively, but the importer does not map filter primitives to them yet |
-| `marker` properties | Gap | |
+| `marker-start`, `marker-mid`, `marker-end`, `marker` in CSS | Expanded | Copies of the marker content at the vertices, on paths, lines, polylines, polygons, rectangles and ellipses. All marker attributes work, and the viewport clips |
 
 ## Structure
 
@@ -92,7 +92,7 @@ The remaining gaps share a few causes, so they are closed in this order.
 1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks followed on the same layer machinery and are done too.
 2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
 3. Patterns, as a tiled group with its own transform.
-4. Markers, expanded by the importer into shapes along the path.
+4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG and JPEG. What is left is SVG, GIF and WebP images.
 6. Filter primitives mapped onto layer effects where an equivalent exists.
 7. Text styling, then `textPath`.

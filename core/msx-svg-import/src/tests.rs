@@ -778,14 +778,14 @@ fn a_path_must_start_with_a_moveto() {
 }
 
 #[test]
-fn markers_and_context_paint_are_reported() {
+fn unusable_markers_and_context_paint_are_reported() {
     let i = imp(&doc(
         r##"<path d="M0 0 L 5 5" marker-end="url(#m)" stroke="#000"/>
             <path d="M0 0 L 5 5" style="marker: url(#m)" stroke="#000"/>
             <rect width="1" height="1" fill="context-stroke"/>"##,
     ));
-    assert!(has_warning(&i, "marker-end"));
-    assert!(has_warning(&i, "markers are not supported"));
+    assert!(has_warning(&i, "#m"), "{:?}", i.warnings);
+    assert!(has_warning(&i, "does not exist"));
     assert!(has_warning(&i, "context-stroke"));
     assert_eq!(i.scene.elements.len(), 3, "the shapes themselves are still imported");
 }
@@ -1352,4 +1352,191 @@ fn imported_images_survive_write_and_parse() {
     let text = msx_parser::scene_to_msx(&i.scene).expect("written");
     let back = msx_parser::parse_scene(&text).expect("parsed");
     assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));
+}
+
+// ── markers ──────────────────────────────────────────────────────────────────
+
+/// Maps the point `(x, y)` in the marker content through a marker copy.
+fn place(e: &Element, x: f64, y: f64) -> (f64, f64) {
+    let m = |t: &Option<Transform>| t.as_ref().map(|t| t.to_matrix()).unwrap_or_else(msx_ast::Matrix2D::identity);
+    match e {
+        Element::Group(g) => geom::apply(m(&g.transform), x, y),
+        Element::Layer(l) => {
+            let (x, y) = match l.children.first() {
+                Some(Element::Group(g)) => geom::apply(m(&g.transform), x, y),
+                _ => (x, y),
+            };
+            geom::apply(m(&l.transform), x, y)
+        }
+        other => panic!("not a marker copy: {other:?}"),
+    }
+}
+
+fn at(p: (f64, f64)) -> (f64, f64) {
+    ((p.0 * 1000.0).round() / 1000.0, (p.1 * 1000.0).round() / 1000.0)
+}
+
+const M4: &str = r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="2" refY="2"><rect width="4" height="4" fill="red"/></marker></defs>"##;
+
+#[test]
+fn a_marker_is_placed_at_the_vertex_and_scaled_by_the_stroke_width() {
+    let i = imp(&doc(&format!(r##"{M4}<line x1="0" y1="0" x2="10" y2="0" stroke="#000" stroke-width="2" marker-end="url(#m)"/>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(l.children.len(), 2, "the line and one marker copy");
+    assert!(matches!(l.children[0], Element::Line(_)));
+    let copy = &l.children[1];
+    assert_eq!(at(place(copy, 2.0, 2.0)), (10.0, 0.0), "the reference point lands on the end of the line");
+    assert_eq!(at(place(copy, 4.0, 4.0)), (14.0, 4.0), "scaled by the stroke width of 2");
+}
+
+#[test]
+fn start_mid_and_end_markers_go_on_the_right_vertices_in_that_order() {
+    let svg = format!(r##"{M4}<polyline points="0,0 10,0 10,10 20,10" fill="none" stroke="#000" marker-start="url(#m)" marker-mid="url(#m)" marker-end="url(#m)"/>"##);
+    let i = imp(&doc(&svg));
+    let l = layer(&i.scene.elements[0]);
+    let spots: Vec<(f64, f64)> = l.children[1..].iter().map(|c| at(place(c, 2.0, 2.0))).collect();
+    assert_eq!(spots, vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (20.0, 10.0)]);
+}
+
+#[test]
+fn only_the_marker_properties_that_are_set_draw() {
+    let i = imp(&doc(&format!(r##"{M4}<polyline points="0,0 10,0 10,10" fill="none" stroke="#000" marker-mid="url(#m)"/>"##)));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(l.children.len(), 2);
+    assert_eq!(at(place(&l.children[1], 2.0, 2.0)), (10.0, 0.0));
+    let none = imp(&doc(&format!(r##"{M4}<polyline points="0,0 10,0" stroke="#000"/>"##)));
+    assert!(matches!(none.scene.elements[0], Element::Polyline(_)), "no markers, no layer");
+}
+
+#[test]
+fn orient_auto_turns_the_marker_along_the_path() {
+    let svg = r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="0" refY="0" orient="auto" markerUnits="userSpaceOnUse"><rect width="4" height="4"/></marker></defs>
+        <line x1="0" y1="0" x2="0" y2="10" stroke="#000" marker-end="url(#m)"/>"##;
+    let i = imp(&doc(svg));
+    let copy = &layer(&i.scene.elements[0]).children[1];
+    assert_eq!(at(place(copy, 1.0, 0.0)), (0.0, 11.0), "the content x axis points down the path");
+    let fixed = imp(&doc(&svg.replace(r#"orient="auto""#, r#"orient="90deg""#)));
+    assert_eq!(at(place(&layer(&fixed.scene.elements[0]).children[1], 1.0, 0.0)), (0.0, 11.0));
+    let reversed = imp(&doc(&svg.replace(r#"orient="auto""#, r#"orient="auto-start-reverse""#).replace("marker-end", "marker-start")));
+    assert_eq!(at(place(&layer(&reversed.scene.elements[0]).children[1], 1.0, 0.0)), (0.0, -1.0), "the start marker is turned half a turn");
+}
+
+#[test]
+fn marker_units_user_space_do_not_scale_with_the_stroke() {
+    let svg = r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="2" refY="2" markerUnits="userSpaceOnUse"><rect width="4" height="4"/></marker></defs>
+        <line x1="0" y1="0" x2="10" y2="0" stroke="#000" stroke-width="5" marker-end="url(#m)"/>"##;
+    let i = imp(&doc(svg));
+    assert_eq!(at(place(&layer(&i.scene.elements[0]).children[1], 4.0, 4.0)), (12.0, 2.0));
+    let zero = imp(&doc(&format!(r##"{M4}<line x1="0" y1="0" x2="10" y2="0" stroke="#000" stroke-width="0" marker-end="url(#m)"/>"##)));
+    assert!(matches!(zero.scene.elements[0], Element::Line(_)), "a zero stroke width scales the marker away");
+}
+
+#[test]
+fn marker_view_box_scales_the_content_into_the_marker_viewport() {
+    // A 10 by 10 content box in a 20 by 20 viewport: scale 2, and the reference point is in content units.
+    let svg = r##"<defs><marker id="m" markerWidth="20" markerHeight="20" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse"><rect width="10" height="10"/></marker></defs>
+        <line x1="0" y1="0" x2="50" y2="0" stroke="#000" marker-end="url(#m)"/>"##;
+    let i = imp(&doc(svg));
+    let copy = &layer(&i.scene.elements[0]).children[1];
+    assert_eq!(at(place(copy, 5.0, 5.0)), (50.0, 0.0));
+    assert_eq!(at(place(copy, 10.0, 5.0)), (60.0, 0.0), "5 content units are 10 user units");
+}
+
+#[test]
+fn marker_content_past_the_viewport_is_clipped_unless_overflow_is_visible() {
+    let svg = |extra: &str| format!(r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="0" refY="0" markerUnits="userSpaceOnUse" {extra}><rect width="9" height="9"/></marker></defs>
+        <line x1="0" y1="0" x2="10" y2="0" stroke="#000" marker-end="url(#m)"/>"##);
+    let clipped = imp(&doc(&svg("")));
+    let copy = layer(&layer(&clipped.scene.elements[0]).children[1]);
+    assert_eq!(clip_rect(&copy.clip_path.as_ref().unwrap()[0]), (0.0, 0.0, 4.0, 4.0));
+    let visible = imp(&doc(&svg(r#"overflow="visible""#)));
+    assert!(matches!(layer(&visible.scene.elements[0]).children[1], Element::Group(_)));
+    let fits = imp(&doc(&format!(r##"{M4}<line x1="0" y1="0" x2="10" y2="0" stroke="#000" marker-end="url(#m)"/>"##)));
+    assert!(matches!(layer(&fits.scene.elements[0]).children[1], Element::Group(_)), "content inside the viewport needs no clip");
+}
+
+#[test]
+fn rects_circles_and_ellipses_get_markers_at_their_outline_vertices() {
+    let all = r#"marker-start="url(#m)" marker-mid="url(#m)" marker-end="url(#m)""#;
+    let rect = imp(&doc(&format!(r##"{M4}<rect x="20" y="20" width="160" height="160" fill="none" stroke="#000" {all}/>"##)));
+    let spots: Vec<(f64, f64)> = layer(&rect.scene.elements[0]).children[1..].iter().map(|c| at(place(c, 2.0, 2.0))).collect();
+    assert_eq!(spots, vec![(20.0, 20.0), (180.0, 20.0), (180.0, 180.0), (20.0, 180.0), (20.0, 20.0)]);
+    let circle = imp(&doc(&format!(r##"{M4}<circle cx="100" cy="100" r="80" fill="none" stroke="#000" {all}/>"##)));
+    assert_eq!(layer(&circle.scene.elements[0]).children.len(), 1 + 6, "the circle, then a start, four mids and an end");
+}
+
+#[test]
+fn marker_properties_inherit_and_the_marker_attribute_is_ignored() {
+    let inherited = imp(&doc(&format!(r##"{M4}<g marker-end="url(#m)"><path d="M0 0 L10 0" stroke="#000"/><path d="M0 5 L10 5" stroke="#000" marker-end="none"/></g>"##)));
+    let l = layer(&inherited.scene.elements[0]);
+    assert!(matches!(&inherited.scene.elements[1], Element::Path(_)), "the second path switches it off");
+    assert_eq!(l.children.len(), 2);
+    let css = imp(&doc(&format!(r##"{M4}<path d="M0 0 L10 0" stroke="#000" style="marker: url(#m)"/>"##)));
+    assert_eq!(layer(&css.scene.elements[0]).children.len(), 1 + 2, "the CSS shorthand sets all three");
+    let attr = imp(&doc(&format!(r##"{M4}<path d="M0 0 L10 0" stroke="#000" marker="url(#m)"/>"##)));
+    assert!(matches!(attr.scene.elements[0], Element::Path(_)), "marker is valid only in CSS");
+}
+
+#[test]
+fn markers_fade_clip_and_transform_with_their_shape() {
+    let svg = format!(r##"{M4}<defs><clipPath id="c"><rect width="50" height="50"/></clipPath></defs>
+        <line x1="0" y1="0" x2="10" y2="0" stroke="#000" opacity=".5" transform="translate(7 8)" clip-path="url(#c)" marker-end="url(#m)"/>"##);
+    let i = imp(&doc(&svg));
+    let l = layer(&i.scene.elements[0]);
+    assert_eq!(l.opacity, 0.5, "the shape and its markers fade together");
+    let Element::Line(line) = &l.children[0] else { panic!("line") };
+    assert_eq!(line.style.opacity, Some(1.0));
+    assert!(line.transform.is_none(), "the transform moved to the layer");
+    assert!(matches!(l.transform, Some(Transform::Translate { x, y }) if x == 7.0 && y == 8.0));
+    assert!(l.clip_path.is_some());
+}
+
+#[test]
+fn unusable_markers_are_reported_and_cycles_stop() {
+    let i = imp(&doc(r##"<defs><marker id="zero" markerWidth="0" markerHeight="4"><rect width="1" height="1"/></marker><rect id="notmarker" width="1" height="1"/>
+        <marker id="loop" markerWidth="4" markerHeight="4"><path id="inner" d="M0 0 L2 2" stroke="#000" marker-end="url(#loop)"/></marker></defs>
+        <path d="M0 0 L10 0" stroke="#000" marker-end="url(#missing)"/>
+        <path d="M0 0 L10 0" stroke="#000" marker-end="url(#notmarker)"/>
+        <path d="M0 0 L10 0" stroke="#000" marker-end="url(#zero)"/>
+        <path d="M0 0 L10 0" stroke="#000" marker-end="url(#loop)"/>"##));
+    for needle in ["#missing", "#notmarker", "refers back to itself"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    assert_eq!(i.scene.elements.iter().filter(|e| matches!(e, Element::Path(_))).count(), 3, "the plain paths stay plain");
+}
+
+#[test]
+fn a_marker_that_uses_the_shape_it_marks_still_draws_both_ends() {
+    // The shape of the recursive tests: the marker content is a use of a path that has markers of its own.
+    let svg = r##"<defs><marker id="a" markerWidth="6" markerHeight="6" refX="1" refY="3"><use href="#p"/></marker>
+        <marker id="b" markerWidth="6" markerHeight="6" refX="5" refY="3"><use href="#p"/></marker>
+        <path id="p" d="M1 1 5 3 1 5" fill="none" stroke="#00f" marker-start="url(#a)" marker-end="url(#b)"/></defs>
+        <path d="M10 10 L190 190" fill="none" stroke="#0a0" stroke-width="5" marker-start="url(#a)" marker-end="url(#b)"/>"##;
+    let i = imp(&doc(svg));
+    let l = layer(&i.scene.elements[0]);
+    assert!(l.children.len() >= 3, "the path, a start copy and an end copy: {}", l.children.len());
+}
+
+#[test]
+fn imported_markers_survive_write_and_parse() {
+    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">{M4}
+        <polyline points="5,5 40,5 40,40 80,40" fill="none" stroke="#06f" stroke-width="2" marker-start="url(#m)" marker-mid="url(#m)" marker-end="url(#m)"/></svg>"##);
+    let i = imp(&svg);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(format!("{:?}", i.scene.elements), format!("{:?}", back.elements));
+}
+
+#[test]
+fn overflow_inherit_takes_the_parent_value_and_falls_back_to_visible() {
+    let content = r##"<marker id="m" overflow="inherit" markerWidth="4" markerHeight="4" markerUnits="userSpaceOnUse"><rect width="9" height="9"/></marker>
+        <line x1="0" y1="0" x2="10" y2="0" stroke="#000" marker-end="url(#m)"/>"##;
+    let svg = |attrs: &str| format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" {attrs}>{content}</svg>"#);
+    let open = imp(&svg(r#"overflow="visible""#));
+    assert!(matches!(layer(&open.scene.elements[0]).children[1], Element::Group(_)), "a visible parent leaves the marker unclipped");
+    let closed = imp(&svg(r#"overflow="hidden""#));
+    assert!(matches!(layer(&closed.scene.elements[0]).children[1], Element::Layer(_)), "a hidden parent clips it");
+    let nothing = imp(&svg(""));
+    assert!(matches!(layer(&nothing.scene.elements[0]).children[1], Element::Group(_)), "with no value up the tree it is visible");
 }

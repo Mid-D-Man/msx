@@ -21,6 +21,7 @@
 //! transforms.
 
 mod geom;
+mod markers;
 mod gradient;
 mod parse;
 mod raster;
@@ -123,6 +124,10 @@ pub(crate) struct Importer<'a, 'i> {
     /// True while the children of a `clipPath` are walked: only geometry and
     /// `clip-rule` matter, so paint is not resolved and effects are ignored.
     clip_mode: bool,
+    /// Markers already built, by id. `None` is a marker that cannot be used.
+    marker_cache: HashMap<String, Option<std::rc::Rc<MarkerDef>>>,
+    /// Ids of the markers being built right now, to stop cycles.
+    marker_stack: Vec<String>,
     /// Where relative `<image>` files are read from, if anywhere.
     base_dir: Option<std::path::PathBuf>,
     /// True when some `clipPath` or `mask` works in `objectBoundingBox` units: a
@@ -178,6 +183,33 @@ impl Comp {
     }
 }
 
+/// A marker ready to be placed at the vertices of a shape.
+#[derive(Debug)]
+struct MarkerDef {
+    /// The content, drawn in the marker's own coordinates.
+    kids: Vec<Element>,
+    /// The marker viewport.
+    width: f64,
+    height: f64,
+    /// Maps the content into the viewport (`viewBox` and `preserveAspectRatio`).
+    view: Option<Transform>,
+    /// The reference point in viewport coordinates, which lands on the vertex.
+    ref_x: f64,
+    ref_y: f64,
+    /// `markerUnits="strokeWidth"`: scale by the stroke width of the shape.
+    scale_by_stroke: bool,
+    orient: markers::Orient,
+    /// The content reaches past the viewport, which clips it.
+    clip: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MarkerKind {
+    Start,
+    Mid,
+    End,
+}
+
 /// The transform slot of `el`, for the elements that have one.
 fn transform_mut(el: &mut Element) -> Option<&mut Option<Transform>> {
     match el {
@@ -216,10 +248,48 @@ fn viewport_bounds(view: &Option<Transform>, w: f64, h: f64) -> (f64, f64, f64, 
     }
 }
 
-/// `overflow` decides whether a `symbol` or nested `svg` clips to its viewport.
-/// Both clip by default, and only `visible` and `auto` switch it off.
-fn viewport_clips(props: &Props) -> bool {
-    !matches!(props.get("overflow").map(|v| v.trim()), Some("visible") | Some("auto"))
+/// One copy of `def` at `vertex`: turned by `orient`, scaled by the stroke
+/// width when the marker works in stroke units, and moved so that the
+/// reference point lands on the vertex. A marker that works out to nothing
+/// (empty, or a zero stroke width) gives no element.
+fn marker_copy(def: &MarkerDef, vertex: &markers::Vertex, kind: MarkerKind, stroke_width: f64) -> Option<Element> {
+    if def.kids.is_empty() {
+        return None;
+    }
+    let scale = if def.scale_by_stroke { stroke_width } else { 1.0 };
+    if scale <= 0.0 {
+        return None;
+    }
+    let radians = match def.orient {
+        markers::Orient::Auto => vertex.angle,
+        markers::Orient::AutoStartReverse if kind == MarkerKind::Start => vertex.angle + std::f64::consts::PI,
+        markers::Orient::AutoStartReverse => vertex.angle,
+        markers::Orient::Angle(a) => a,
+    };
+    let degrees = radians.to_degrees();
+    let place = compose(vec![
+        translate(vertex.x, vertex.y),
+        (degrees != 0.0).then_some(Transform::Rotate { angle: degrees, cx: None, cy: None }),
+        (scale != 1.0).then_some(Transform::Scale { x: scale, y: scale }),
+        translate(-def.ref_x, -def.ref_y),
+    ]);
+    let content = def.kids.clone();
+    if def.clip {
+        let inner = match &def.view {
+            Some(v) => vec![Element::Group(Group { children: content, id: None, transform: Some(v.clone()), style: None })],
+            None => content,
+        };
+        let mut layer = Layer::new(inner).with_clip_path(vec![plain_rect(0.0, 0.0, def.width, def.height)]);
+        layer.transform = place;
+        Some(Element::Layer(layer))
+    } else {
+        Some(Element::Group(Group { children: content, id: None, transform: compose(vec![place, def.view.clone()]), style: None }))
+    }
+}
+
+/// Whether an `overflow` value switches clipping off: only `visible` and `auto` do.
+fn overflow_is_open(v: &str) -> bool {
+    matches!(v.trim(), "visible" | "auto")
 }
 
 /// Bounding box of the geometry of freshly built `kids`, for
@@ -447,6 +517,8 @@ impl<'a, 'i> Importer<'a, 'i> {
             depth: 0,
             use_stack: Vec::new(),
             clip_mode: false,
+            marker_cache: HashMap::new(),
+            marker_stack: Vec::new(),
             base_dir: None,
             keep_hidden,
             clip_stack: Vec::new(),
@@ -522,13 +594,6 @@ impl<'a, 'i> Importer<'a, 'i> {
             if let Some(v) = props.get(key) {
                 if !v.is_empty() && v != "none" {
                     self.warn(format!("{} uses {key}, which is not supported; drawn without it", Self::label(node)));
-                }
-            }
-        }
-        for key in ["marker", "marker-start", "marker-mid", "marker-end"] {
-            if let Some(v) = props.get(key) {
-                if !v.is_empty() && v != "none" {
-                    self.warn(format!("{} uses {key}, but markers are not supported; drawn without them", Self::label(node)));
                 }
             }
         }
@@ -945,6 +1010,135 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
     }
 
+    // ── Markers ───────────────────────────────────────────────────────────────
+
+    /// The marker copies for a shape with `cmds` as its outline: a copy of the
+    /// marker content at every vertex it applies to, start markers first, then
+    /// the mid ones, then the end ones. The copies sit in the shape's own
+    /// coordinate space.
+    fn marker_elements(&mut self, node: &Node, inh: &Inh, cmds: &[PathCommand]) -> Vec<Element> {
+        if self.clip_mode || inh.hidden {
+            return Vec::new();
+        }
+        let label = Self::label(node);
+        let mut defs: [Option<std::rc::Rc<MarkerDef>>; 3] = [None, None, None];
+        for (slot, spec) in defs.iter_mut().zip([&inh.marker_start, &inh.marker_mid, &inh.marker_end]) {
+            let Some(v) = spec else { continue };
+            match parse_url_id(v) {
+                Some(id) => *slot = self.marker_def(&label, &id),
+                None => self.warn(format!("{label} uses a marker value {v}, which is not supported (only url(#id)); drawn without it")),
+            }
+        }
+        if defs.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        let verts = markers::vertices(cmds);
+        let last = verts.len().saturating_sub(1);
+        let mut out = Vec::new();
+        for (kind, def_ix) in [(MarkerKind::Start, 0), (MarkerKind::Mid, 1), (MarkerKind::End, 2)] {
+            let Some(def) = &defs[def_ix] else { continue };
+            for (i, v) in verts.iter().enumerate() {
+                let applies = match kind {
+                    MarkerKind::Start => i == 0,
+                    MarkerKind::End => i == last,
+                    MarkerKind::Mid => i != 0 && i != last,
+                };
+                if !applies {
+                    continue;
+                }
+                if self.emitted + out.len() >= MAX_ELEMENTS {
+                    self.warn(format!("the SVG has more than {MAX_ELEMENTS} shapes; the rest of the markers were not imported"));
+                    return out;
+                }
+                out.extend(marker_copy(def, v, kind, inh.stroke_width));
+            }
+        }
+        out
+    }
+
+    /// The marker `id`, built once and then reused. An unusable reference is
+    /// reported and the marker is left out.
+    fn marker_def(&mut self, label: &str, id: &str) -> Option<std::rc::Rc<MarkerDef>> {
+        if let Some(found) = self.marker_cache.get(id) {
+            return found.clone();
+        }
+        if self.marker_stack.iter().any(|s| s == id) {
+            self.warn(format!("{label} refers to the marker #{id}, which refers back to itself; drawn without it"));
+            return None;
+        }
+        let Some(m) = self.ids.get(id).copied() else {
+            self.warn(format!("{label} uses the marker #{id}, which does not exist; drawn without it"));
+            return None;
+        };
+        if m.tag_name().name() != "marker" {
+            self.warn(format!("{label} uses #{id} as a marker, but it is a <{}>; drawn without it", m.tag_name().name()));
+            return None;
+        }
+        // The content stands alone: a `use` being expanded around the shape that
+        // asked for the marker must not make the marker's own `use` look recursive.
+        let outer_uses = std::mem::take(&mut self.use_stack);
+        self.marker_stack.push(id.to_string());
+        let def = self.build_marker(m).map(std::rc::Rc::new);
+        self.marker_stack.pop();
+        self.use_stack = outer_uses;
+        self.marker_cache.insert(id.to_string(), def.clone());
+        def
+    }
+
+    fn build_marker(&mut self, m: Node<'a, 'i>) -> Option<MarkerDef> {
+        let vp = self.vp;
+        let width = self.length(m, "markerWidth", 16.0, vp.0).unwrap_or(3.0);
+        let height = self.length(m, "markerHeight", 16.0, vp.1).unwrap_or(3.0);
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let vb = view_box(&m);
+        let view = viewbox_transform(vb.as_deref(), m.attribute("preserveAspectRatio").unwrap_or(""), width, height);
+        let ref_x = self.length(m, "refX", 16.0, vp.0).unwrap_or(0.0);
+        let ref_y = self.length(m, "refY", 16.0, vp.1).unwrap_or(0.0);
+        let (ref_x, ref_y) = match view.as_ref() {
+            Some(t) => geom::apply(t.to_matrix(), ref_x, ref_y),
+            None => (ref_x, ref_y),
+        };
+        let inh = self.inh_chain(m);
+        let mut kids = Vec::new();
+        for child in m.children().filter(|c| c.is_element() && !is_foreign(c)) {
+            self.walk(child, &inh, &mut kids, true);
+        }
+        let clip = self.viewport_clips(m) && reaches_outside(&kids, viewport_bounds(&view, width, height));
+        Some(MarkerDef {
+            kids,
+            width,
+            height,
+            view,
+            ref_x,
+            ref_y,
+            scale_by_stroke: m.attribute("markerUnits").is_none_or(|u| u.trim() != "userSpaceOnUse"),
+            orient: markers::parse_orient(m.attribute("orient").unwrap_or("0")),
+            clip,
+        })
+    }
+
+    /// Whether a `symbol`, nested `svg` or `marker` clips to its viewport. All
+    /// three clip by default, and `overflow` of `visible` or `auto` switches it
+    /// off. `inherit` takes the value of the parent, and with none anywhere up
+    /// the tree it falls back to `visible`.
+    fn viewport_clips(&mut self, node: Node<'a, 'i>) -> bool {
+        let mut current = node;
+        loop {
+            let value = self.props_for(current).get("overflow").map(|v| v.trim().to_string());
+            match value.as_deref() {
+                Some("inherit") => match current.parent_element() {
+                    Some(parent) => current = parent,
+                    None => return false,
+                },
+                Some(v) => return !overflow_is_open(v),
+                None if current == node => return true,
+                None => return false,
+            }
+        }
+    }
+
     /// `<image>` with a PNG or JPEG, from a `data:` URI or a file. The image is
     /// placed by `preserveAspectRatio` into the box the SVG gives, since MSX
     /// stretches an image to its width and height, and a `slice` that spills
@@ -1000,7 +1194,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         image.id = if expanded { None } else { node.attribute("id").map(String::from) };
         image.transform = self.node_transform(node);
         image.style = Style { opacity: Some(element_opacity(&props)), ..Style::default() };
-        self.push_leaf(Element::Image(image), &inh, comp, out);
+        self.push_leaf(Element::Image(image), Vec::new(), &inh, comp, out);
     }
 
     /// The embedded bytes or the file reference for `href`, and the size in
@@ -1090,7 +1284,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         let transform = compose(vec![self.node_transform(node), translate(x, y), view.clone()]);
         let bbox = elements_bbox(&kids);
         let mut comp = self.composite(&node, &props, bbox);
-        if viewport_clips(&props) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
+        if self.viewport_clips(node) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
             comp.clips.push(vec![viewport_rect(&view, w, h)]);
         }
         self.emit(kids, comp, transform, None, out);
@@ -1143,7 +1337,7 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     fn walk_symbol(&mut self, symbol: Node<'a, 'i>, parent: &Inh, size: Option<(f64, f64)>, out: &mut Vec<Element>) {
-        let Some((inh, props)) = self.begin(symbol, parent) else { return };
+        let Some((inh, _)) = self.begin(symbol, parent) else { return };
         let vb = view_box(&symbol);
         let (w, h) = size.unwrap_or(self.vp);
         let inner_vp = vb.as_ref().map_or((w, h), |v| (v[2], v[3]));
@@ -1155,7 +1349,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.vp = saved;
         let view = viewbox_transform(vb.as_deref(), symbol.attribute("preserveAspectRatio").unwrap_or(""), w, h);
         let mut comp = Comp::NONE;
-        if viewport_clips(&props) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
+        if self.viewport_clips(symbol) && reaches_outside(&kids, viewport_bounds(&view, w, h)) {
             comp.clips.push(vec![viewport_rect(&view, w, h)]);
         }
         self.emit(kids, comp, view, None, out);
@@ -1258,6 +1452,32 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         let id = if expanded { None } else { node.attribute("id").map(String::from) };
         let transform = self.node_transform(node);
+        // Markers go on every shape, as SVG 2 has it: a rectangle and an ellipse
+        // through the path they stand for. The outline is only built when a
+        // marker property is set.
+        let wants_markers = inh.marker_start.is_some() || inh.marker_mid.is_some() || inh.marker_end.is_some();
+        let marker_cmds = if !wants_markers {
+            None
+        } else {
+            match &shape {
+                Shape::Path { commands } => Some(commands.clone()),
+                Shape::Line { x1, y1, x2, y2 } => Some(vec![PathCommand::MoveTo(Point::new(*x1, *y1)), PathCommand::LineTo(Point::new(*x2, *y2))]),
+                Shape::Poly { points, closed } => {
+                    let mut cmds: Vec<PathCommand> = points.iter().enumerate().map(|(i, p)| if i == 0 { PathCommand::MoveTo(*p) } else { PathCommand::LineTo(*p) }).collect();
+                    if *closed {
+                        cmds.push(PathCommand::ClosePath);
+                    }
+                    Some(cmds)
+                }
+                Shape::Rect { x, y, w, h, rx, ry } => Some(markers::rect_commands(*x, *y, *w, *h, *rx, *ry)),
+                Shape::Circle { cx, cy, r } => Some(markers::ellipse_commands(*cx, *cy, *r, *r)),
+                Shape::Ellipse { cx, cy, rx, ry } => Some(markers::ellipse_commands(*cx, *cy, *rx, *ry)),
+            }
+        };
+        let extras = marker_cmds.map(|cmds| self.marker_elements(&node, &inh, &cmds)).unwrap_or_default();
+        if !extras.is_empty() {
+            style.opacity = Some(1.0);
+        }
         let element = match shape {
             Shape::Rect { x, y, w, h, rx, ry } => Element::Rect(Rect { x, y, width: w, height: h, rx, ry, id, transform, style }),
             Shape::Circle { cx, cy, r } => Element::Circle(Circle { cx, cy, r, id, transform, style }),
@@ -1272,23 +1492,24 @@ impl<'a, 'i> Importer<'a, 'i> {
                 Element::Path(Path { commands, d_raw, id, transform, style })
             }
         };
-        self.push_leaf(element, &inh, comp, out);
+        self.push_leaf(element, extras, &inh, comp, out);
     }
 
     /// Add one shape or text to `out`, split for `paint-order` and wrapped
     /// in a layer for `mix-blend-mode`.
-    fn push_leaf(&mut self, el: Element, inh: &Inh, comp: Comp, out: &mut Vec<Element>) {
+    fn push_leaf(&mut self, el: Element, extras: Vec<Element>, inh: &Inh, comp: Comp, out: &mut Vec<Element>) {
         if self.emitted >= MAX_ELEMENTS {
             self.warn(format!("the SVG has more than {MAX_ELEMENTS} shapes; the rest was not imported"));
             return;
         }
         self.emitted += 1;
         let mut parts = if inh.stroke_first && !matches!(el, Element::Image(_)) { split_paint_order(el) } else { vec![el] };
-        if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() {
-            // A clip or mask lives in the element's own space, so the
+        let with_extras = !extras.is_empty();
+        if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() || with_extras {
+            // A clip, a mask or markers live in the element's own space, so the
             // element's transform moves from the shape to the layer.
             let mut transform = None;
-            if !comp.clips.is_empty() || comp.mask.is_some() {
+            if !comp.clips.is_empty() || comp.mask.is_some() || with_extras {
                 for part in parts.iter_mut() {
                     if let Some(slot) = transform_mut(part) {
                         let t = slot.take();
@@ -1296,7 +1517,11 @@ impl<'a, 'i> Importer<'a, 'i> {
                     }
                 }
             }
-            out.push(layered(parts, 1.0, comp.blend, comp.clips, comp.mask, transform, None));
+            parts.extend(extras);
+            // The shape and its markers fade together, so the opacity that is
+            // otherwise in the shape's style sits on the layer.
+            let opacity = if with_extras { comp.opacity } else { 1.0 };
+            out.push(layered(parts, opacity, comp.blend, comp.clips, comp.mask, transform, None));
         } else {
             out.extend(parts);
         }
@@ -1454,7 +1679,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
             first = false;
             let element = Element::Text(Text { x: run.x, y: run.y, content, id, transform: transform.clone(), style });
-            self.push_leaf(element, &run.inh, comp, out);
+            self.push_leaf(element, Vec::new(), &run.inh, comp, out);
         }
     }
 }
