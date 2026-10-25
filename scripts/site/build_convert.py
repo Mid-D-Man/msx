@@ -11,7 +11,12 @@ same WASM build that drives the playground (web/msx-wasm) exposes
 
 JS/WASM contract, installed by /playground/wasm-loader.js:
   window.__msxImportSvg(svgText) -> JSON string, or throws an error string
-      {msx, svg, warnings: [..], svg_bytes, msx_bytes, element_count, reparse_matches}
+      {msx, svg, warnings: [..], svg_bytes, msx_bytes, element_count, reparse_matches,
+       animated, duration, loop_mode}
+      `svg` is the frame at time 0. The converted scene stays loaded, so
+  window.__msxRenderFrame(t) -> SVG of the converted scene at elapsed seconds t
+  window.__msxLocalTime(t)   -> the timeline position that frame shows
+  drive the play bar the same way they do in the playground.
   window.__msxCompile(msxSource) -> Uint8Array holding the compressed binary
 The page reuses the element ids `pg-status` and `pg-preview` because the
 loader writes its failure message into them.
@@ -48,6 +53,22 @@ EXAMPLES = {
   <g transform="translate(170 60) rotate(20)"><rect width="50" height="30" fill="#7ad17a"/></g>
 </svg>
 """,
+    "animated shapes": """<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160" viewBox="0 0 240 160">
+  <rect width="240" height="160" fill="#0f172a"/>
+  <rect x="30" y="50" width="60" height="60" rx="8" fill="#4a9eff">
+    <animateTransform attributeName="transform" type="rotate" from="0 60 80" to="360 60 80" dur="3s" repeatCount="indefinite"/>
+  </rect>
+  <circle cx="150" cy="80" r="22" fill="#f5a623">
+    <animate attributeName="cy" values="50;110;50" dur="1.5s" repeatCount="indefinite" calcMode="spline" keySplines=".45 0 .55 1;.45 0 .55 1"/>
+    <animate attributeName="opacity" values="1;.35;1" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+  <g transform="translate(205 80)">
+    <circle r="8" fill="#f2545b">
+      <animateTransform attributeName="transform" type="scale" values="1;1.8;1" dur="1s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+</svg>
+""",
 }
 
 DEFAULT_EXAMPLE = "gradient badge"
@@ -81,6 +102,8 @@ const $ = (id) => document.getElementById(id);
 const svgIn = $('cv-svg'), msxOut = $('cv-msx'), statusEl = $('pg-status');
 const origBox = $('cv-orig'), msxBox = $('pg-preview'), warnBox = $('cv-warnings'), statsEl = $('cv-stats');
 const copyBtn = $('cv-copy'), dlSrc = $('cv-dl-src'), dlBin = $('cv-dl-bin'), fileIn = $('cv-file');
+const transport = $('cv-transport'), playBtn = $('cv-play'), scrub = $('cv-scrub'), timeLabel = $('cv-time');
+const reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 let lastSource = '';
 let baseName = 'converted';
 const urls = { orig: null, msx: null };
@@ -96,7 +119,88 @@ function showSvg(box, key, text) {
   box.replaceChildren(img);
 }
 
+// Playback of the converted scene. `pos` is raw elapsed seconds; the engine
+// applies the loop mode itself (render_frame in web/msx-wasm), so a loop or
+// ping_pong scene keeps counting up here and its frames wrap or mirror.
+const FRAME_MS = 33;
+const player = { animated: false, duration: 0, loopMode: 'once', playing: false, pos: 0, startWall: 0, startPos: 0, raf: 0, lastDraw: 0 };
+
+function atEnd() { return player.loopMode === 'once' && player.duration > 0 && player.pos >= player.duration; }
+function refreshButton() { playBtn.textContent = player.playing ? 'Pause' : (atEnd() ? 'Replay' : 'Play'); }
+
+function drawFrame() {
+  msxBox.innerHTML = window.__msxRenderFrame(player.pos);
+  const local = (typeof window.__msxLocalTime === 'function') ? window.__msxLocalTime(player.pos) : player.pos;
+  scrub.value = player.duration > 0 ? Math.round(local / player.duration * 1000) : 0;
+  timeLabel.textContent = local.toFixed(2) + ' / ' + player.duration.toFixed(2) + ' s';
+}
+
+function setPlaying(on) {
+  player.playing = on;
+  if (player.raf) { cancelAnimationFrame(player.raf); player.raf = 0; }
+  if (on) {
+    player.startWall = performance.now();
+    player.startPos = player.pos;
+    player.raf = requestAnimationFrame(tick);
+  }
+  refreshButton();
+}
+
+function tick(now) {
+  if (!player.playing) return;
+  player.pos = player.startPos + (now - player.startWall) / 1000;
+  const finished = player.loopMode === 'once' && player.pos >= player.duration;
+  if (finished) player.pos = player.duration;
+  if (finished || now - player.lastDraw >= FRAME_MS) {
+    player.lastDraw = now;
+    try { drawFrame(); } catch (err) { showError((err && err.message) ? err.message : String(err)); return; }
+  }
+  if (finished) { setPlaying(false); return; }
+  player.raf = requestAnimationFrame(tick);
+}
+
+function stopPlayer() {
+  setPlaying(false);
+  player.animated = false;
+  transport.hidden = true;
+}
+
+playBtn.addEventListener('click', () => {
+  if (!player.animated) return;
+  if (player.playing) { setPlaying(false); return; }
+  if (atEnd()) player.pos = 0;
+  setPlaying(true);
+});
+
+scrub.addEventListener('input', () => {
+  if (!player.animated) return;
+  setPlaying(false);
+  player.pos = (Number(scrub.value) / 1000) * player.duration;
+  try { drawFrame(); } catch (err) { showError((err && err.message) ? err.message : String(err)); return; }
+  refreshButton();
+});
+
+// Called after every successful conversion. A scene that just became animated
+// starts playing unless the visitor asked for reduced motion. Editing a scene
+// that was already playing keeps it playing from the same position.
+function showConverted(info) {
+  const wasAnimated = player.animated;
+  const canPlay = !!info.animated && typeof window.__msxRenderFrame === 'function';
+  player.animated = canPlay;
+  player.duration = Number(info.duration) || 0;
+  player.loopMode = info.loop_mode || 'once';
+  transport.hidden = !canPlay;
+  if (!canPlay) { setPlaying(false); showSvg(msxBox, 'msx', info.svg); return; }
+  if (!wasAnimated) player.pos = 0;
+  if (player.loopMode === 'once' && player.pos > player.duration) player.pos = player.duration;
+  try { drawFrame(); } catch (err) { showError((err && err.message) ? err.message : String(err)); return; }
+  if (!wasAnimated) { setPlaying(!reducedMotion); }
+  else if (player.playing) { setPlaying(true); }
+  else { refreshButton(); }
+}
+
 function showError(msg) {
+  stopPlayer();
   const pane = document.createElement('div');
   pane.className = 'pg-error-pane';
   pane.textContent = msg;
@@ -129,6 +233,7 @@ function convert() {
   if (typeof window.__msxImportSvg !== 'function') return;
   const src = svgIn.value;
   if (!src.trim()) {
+    stopPlayer();
     msxOut.value = ''; lastSource = '';
     origBox.replaceChildren(); msxBox.replaceChildren();
     warnBox.hidden = true; statsEl.textContent = '';
@@ -141,9 +246,11 @@ function convert() {
     lastSource = info.msx;
     msxOut.value = info.msx;
     showSvg(origBox, 'orig', src);
-    showSvg(msxBox, 'msx', info.svg);
+    showConverted(info);
     showWarnings(info.warnings);
-    statsEl.textContent = info.svg_bytes + ' B svg -> ' + info.msx_bytes + ' B msx source · ' + info.element_count + ' element(s)' + (info.reparse_matches ? '' : ' · reparse differs');
+    statsEl.textContent = info.svg_bytes + ' B svg -> ' + info.msx_bytes + ' B msx source · ' + info.element_count + ' element(s)'
+      + (info.animated ? ' · ' + Number(info.duration).toFixed(2) + ' s ' + info.loop_mode : '')
+      + (info.reparse_matches ? '' : ' · reparse differs');
     copyBtn.disabled = dlSrc.disabled = dlBin.disabled = false;
     setStatus('ready', 'ok');
   } catch (err) {
@@ -206,7 +313,7 @@ def build_convert_page() -> str:
         .replace("__DEFAULT__", json.dumps(DEFAULT_EXAMPLE))
     )
     body = f'''<h1>Convert SVG to MSX</h1>
-<p class="lede">Paste an SVG, drop a file on the editor or open one from disk. The page converts it to MSX source with the same importer as <code>msx import</code>, then draws the original and the converted scene next to each other. Nothing is sent to a server.</p>
+<p class="lede">Paste an SVG, drop a file on the editor or open one from disk. The page converts it to MSX source with the same importer as <code>msx import</code>, then draws the original and the converted scene next to each other. SMIL animations come across as MSX tracks and play in the converted pane; the original plays on the browser's own clock, so the two are not in step. Nothing is sent to a server.</p>
 
 <div class="cv-bar">
   <label class="cv-btn" for="cv-file">Open SVG file</label>
@@ -239,6 +346,11 @@ def build_convert_page() -> str:
   <div class="pg-pane">
     <div class="pg-pane-header"><span>Converted (MSX)</span><span id="cv-stats" class="pg-status"></span></div>
     <div id="pg-preview" class="pg-preview-body"><span style="color:var(--muted)">Loading render engine…</span></div>
+    <div id="cv-transport" class="pg-transport" hidden>
+      <button id="cv-play" type="button">Pause</button>
+      <input id="cv-scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Animation position">
+      <span id="cv-time" class="pg-time">0.00 / 0.00 s</span>
+    </div>
   </div>
 </div>
 <div id="cv-warnings" class="cv-warnings" hidden></div>

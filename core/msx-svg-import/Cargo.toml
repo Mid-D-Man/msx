@@ -15,4 +15,5 @@ roxmltree  = "0.20"
 base64    = { workspace = true }
 
 [dev-dependencies]
+msx-anim   = { workspace = true }
 msx-parser = { workspace = true }

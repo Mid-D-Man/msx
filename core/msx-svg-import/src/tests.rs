@@ -1009,15 +1009,16 @@ fn nested_svg_viewport_clips_through_a_use_size() {
 }
 
 #[test]
-fn animations_are_reported_instead_of_dropped_silently() {
+fn animations_without_a_channel_are_reported_instead_of_dropped_silently() {
     let i = imp(&doc(r##"<style>@keyframes spin { to { transform: rotate(360deg) } } .a { animation: spin 2s infinite }</style>
-        <rect width="5" height="5"><animate attributeName="x" from="0" to="9" dur="1s"/></rect>
-        <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="rotate" to="90" dur="1s"/><rect width="1" height="1"/></g>
+        <rect width="5" height="5"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect>
+        <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="skewX" to="30" dur="1s"/><rect width="1" height="1"/></g>
         <rect width="5" height="5"><set attributeName="fill" to="red"/></rect>"##));
     for needle in ["@keyframes", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
         assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
     }
     assert!(i.scene.elements.len() >= 3, "the static frame is still drawn");
+    assert!(i.scene.animations.is_empty() && i.scene.duration == 0.0);
 }
 
 #[test]
@@ -1539,4 +1540,224 @@ fn overflow_inherit_takes_the_parent_value_and_falls_back_to_visible() {
     assert!(matches!(layer(&closed.scene.elements[0]).children[1], Element::Layer(_)), "a hidden parent clips it");
     let nothing = imp(&svg(""));
     assert!(matches!(layer(&nothing.scene.elements[0]).children[1], Element::Group(_)), "with no value up the tree it is visible");
+}
+
+// ── SMIL animation ───────────────────────────────────────────────────────────
+
+fn find_rect(el: &Element, acc: msx_ast::Matrix2D) -> Option<(msx_ast::Matrix2D, &Rect)> {
+    let with = |t: &Option<Transform>| acc.concat(t.as_ref().map_or(msx_ast::Matrix2D::identity(), |t| t.to_matrix()));
+    match el {
+        Element::Group(g) => g.children.iter().find_map(|c| find_rect(c, with(&g.transform))),
+        Element::Layer(l) => l.children.iter().find_map(|c| find_rect(c, with(&l.transform))),
+        Element::Rect(r) => Some((with(&r.transform), r)),
+        _ => None,
+    }
+}
+
+/// Where the first rect's local point lands in the scene at time `t`.
+fn frame_point(i: &Imported, t: f64, x: f64, y: f64) -> (f64, f64) {
+    let scene = msx_anim::resolve_at_time(&i.scene, t);
+    let (m, _) = scene.elements.iter().find_map(|e| find_rect(e, msx_ast::Matrix2D::identity())).expect("a rect in the frame");
+    geom::apply(m, x, y)
+}
+
+fn near(p: (f64, f64), q: (f64, f64)) -> bool {
+    (p.0 - q.0).abs() < 1e-6 && (p.1 - q.1).abs() < 1e-6
+}
+
+fn track(i: &Imported, prop: msx_ast::AnimatedProperty) -> Vec<&msx_ast::AnimationTrack> {
+    i.scene.animations.iter().filter(|t| t.property == prop).collect()
+}
+
+fn group(e: &Element) -> &Group {
+    match e {
+        Element::Group(g) => g,
+        other => panic!("expected a group, got {other:?}"),
+    }
+}
+
+const SPINNER: &str = r##"<rect id="r" x="10" y="10" width="20" height="20" fill="#f00">
+    <animateTransform attributeName="transform" type="rotate" from="0 20 20" to="360 20 20" dur="2s" repeatCount="indefinite"/></rect>"##;
+
+#[test]
+fn a_spinner_becomes_a_looping_rotation_about_its_centre() {
+    let i = imp(&doc(SPINNER));
+    assert_eq!(i.scene.duration, 2.0);
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let tracks = track(&i, msx_ast::AnimatedProperty::Rotate);
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(i.scene.animations.len(), 1, "only the rotation moves");
+    let keys: Vec<(f64, f64)> = tracks[0].keyframes.iter().map(|k| (k.time, k.value)).collect();
+    assert_eq!(keys, vec![(0.0, 0.0), (2.0, 360.0)]);
+    // translate(centre) > wrapper > translate(-centre) > rect
+    let outer = group(&i.scene.elements[0]);
+    assert!(outer.id.is_none() && outer.transform.is_some());
+    let wrapper = group(&outer.children[0]);
+    assert_eq!(wrapper.id.as_deref(), Some(tracks[0].target_id.as_str()));
+    assert_eq!(rect(&group(&wrapper.children[0]).children[0]).id.as_deref(), Some("r"));
+    // A quarter turn after 0.5s of 2s takes (30,20), 10 right of the centre, to 10 below it.
+    assert!(near(frame_point(&i, 0.5, 30.0, 20.0), (20.0, 30.0)));
+    assert!(near(frame_point(&i, 1.0, 30.0, 20.0), (10.0, 20.0)));
+    assert!(near(frame_point(&i, 0.0, 30.0, 20.0), (30.0, 20.0)));
+    // The loop wraps.
+    assert!(near(frame_point(&i, 2.5, 30.0, 20.0), (20.0, 30.0)));
+}
+
+#[test]
+fn an_animation_sits_inside_the_static_transform() {
+    let i = imp(&doc(r##"<g transform="translate(5 5)"><animateTransform attributeName="transform" type="translate" values="0 0;10 0;0 0" dur="1s" repeatCount="indefinite" additive="sum"/>
+        <rect width="4" height="4"/></g>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.animations.len(), 1, "translate y never changes");
+    let outer = group(&i.scene.elements[0]);
+    assert!(matches!(outer.transform, Some(Transform::Translate { x, y }) if x == 5.0 && y == 5.0));
+    assert!(near(frame_point(&i, 0.0, 0.0, 0.0), (5.0, 5.0)));
+    assert!(near(frame_point(&i, 0.5, 0.0, 0.0), (15.0, 5.0)));
+    assert!(near(frame_point(&i, 1.0, 0.0, 0.0), (5.0, 5.0)));
+}
+
+#[test]
+fn a_rotation_is_applied_inside_a_static_scale() {
+    // SMIL adds the animation after the static transform: scale(2 1) rotate(90).
+    // (10,0) turns to (0,10) first and the stretch of x leaves it there. With the
+    // animation on the outside the point would land on (0,20).
+    let i = imp(&doc(r##"<rect width="10" height="10" transform="scale(2 1)" fill="#000">
+        <animateTransform attributeName="transform" type="rotate" from="0" to="90" dur="1s" additive="sum" fill="freeze"/></rect>"##));
+    assert!(near(frame_point(&i, 1.0, 10.0, 0.0), (0.0, 10.0)), "{:?}", frame_point(&i, 1.0, 10.0, 0.0));
+    assert!(near(frame_point(&i, 1.0, 0.0, 10.0), (-20.0, 0.0)), "{:?}", frame_point(&i, 1.0, 0.0, 10.0));
+}
+
+#[test]
+fn opacity_animation_replaces_the_static_opacity_and_loops() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" opacity="0.5"><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let Element::Layer(l) = &i.scene.elements[0] else { panic!("expected a layer, got {:?}", i.scene.elements[0]) };
+    assert_eq!(l.opacity, 1.0);
+    assert!(matches!(l.children[0], Element::Circle(_)), "the static 0.5 is left off the circle");
+    let at = |t: f64| match &msx_anim::resolve_at_time(&i.scene, t).elements[0] {
+        Element::Layer(l) => l.opacity,
+        other => panic!("{other:?}"),
+    };
+    assert!(close(at(0.0), 0.5) && close(at(1.0), 1.0) && close(at(2.0), 0.5) && close(at(0.5), 0.75));
+}
+
+#[test]
+fn a_delayed_frozen_animation_plays_once() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="x" from="0" to="20" begin="1s" dur="2s" fill="freeze"/></rect>"##));
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Once);
+    assert_eq!(i.scene.duration, 3.0);
+    assert!(near(frame_point(&i, 0.5, 0.0, 0.0), (0.0, 0.0)));
+    assert!(near(frame_point(&i, 2.0, 0.0, 0.0), (10.0, 0.0)));
+    assert!(near(frame_point(&i, 3.0, 0.0, 0.0), (20.0, 0.0)));
+    assert!(near(frame_point(&i, 9.0, 0.0, 0.0), (20.0, 0.0)), "frozen");
+}
+
+#[test]
+fn x_animation_moves_by_the_difference_from_the_attribute() {
+    let i = imp(&doc(r##"<rect x="30" y="10" width="5" height="5"><animate attributeName="x" from="30" to="50" dur="1s" fill="freeze"/>
+        <animate attributeName="y" by="7" dur="1s" fill="freeze"/></rect>"##));
+    assert!(near(frame_point(&i, 1.0, 30.0, 10.0), (50.0, 17.0)), "{:?}", frame_point(&i, 1.0, 30.0, 10.0));
+    let c = imp(&doc(r##"<circle cx="10" cy="10" r="3"><animate attributeName="cx" values="10;40;10" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert_eq!(track(&c, msx_ast::AnimatedProperty::TranslateX).len(), 1);
+}
+
+#[test]
+fn several_animations_on_one_element_nest_in_document_order() {
+    let i = imp(&doc(r##"<rect width="10" height="10" fill="#000">
+        <animateTransform attributeName="transform" type="rotate" from="0" to="90" dur="1s" fill="freeze" additive="sum"/>
+        <animateTransform attributeName="transform" type="translate" from="0 0" to="10 0" dur="1s" fill="freeze" additive="sum"/></rect>"##));
+    let outer = group(&i.scene.elements[0]);
+    let inner = group(&outer.children[0]);
+    let id_of = |g: &Group| g.id.clone().unwrap();
+    let prop_of = |id: String| i.scene.animations.iter().find(|t| t.target_id == id).unwrap().property;
+    assert_eq!(prop_of(id_of(outer)), msx_ast::AnimatedProperty::Rotate);
+    assert_eq!(prop_of(id_of(inner)), msx_ast::AnimatedProperty::TranslateX);
+    // rotate(90) then translate(10,0) in local space: (0,0) goes to (10,0), then turns to (0,10).
+    assert!(near(frame_point(&i, 1.0, 0.0, 0.0), (0.0, 10.0)), "{:?}", frame_point(&i, 1.0, 0.0, 0.0));
+}
+
+#[test]
+fn an_animation_can_name_its_target_with_href() {
+    let i = imp(&doc(r##"<rect id="r" width="5" height="5"/><animate href="#r" attributeName="opacity" from="1" to="0" dur="1s" fill="freeze"/>
+        <animateTransform xlink:href="#r" attributeName="transform" type="translate" to="10 0" dur="1s" fill="freeze"/>"##));
+    assert_eq!(i.scene.animations.len(), 2);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+}
+
+#[test]
+fn repeating_animations_share_a_loop() {
+    let i = imp(&doc(r##"<rect id="a" width="5" height="5"><animateTransform attributeName="transform" type="rotate" to="360" dur="1s" repeatCount="indefinite"/></rect>
+        <rect id="b" width="5" height="5"><animateTransform attributeName="transform" type="rotate" to="360" dur="1.5s" repeatCount="indefinite"/></rect>"##));
+    assert_eq!(i.scene.duration, 3.0);
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+    let lens: Vec<usize> = i.scene.animations.iter().map(|t| t.keyframes.len()).collect();
+    assert_eq!(lens.len(), 2);
+    assert!(lens.contains(&6) && lens.contains(&4), "unrolled to whole iterations: {lens:?}");
+}
+
+#[test]
+fn key_splines_are_baked_into_keyframes() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="x" values="0;100" calcMode="spline" keySplines="0.42 0 0.58 1" dur="1s" fill="freeze"/></rect>"##));
+    let t = &track(&i, msx_ast::AnimatedProperty::TranslateX)[0];
+    assert_eq!(t.keyframes.len(), 13);
+    assert!((frame_point(&i, 0.5, 0.0, 0.0).0 - 50.0).abs() < 0.5);
+    assert!(frame_point(&i, 0.1, 0.0, 0.0).0 < 10.0);
+}
+
+#[test]
+fn animations_that_cannot_run_are_reported_and_the_static_frame_stays() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="opacity" from="0" to="1" begin="click" dur="1s"/></rect>
+        <rect width="5" height="5"><animate attributeName="width" from="1" to="9" dur="1s"/></rect>
+        <rect width="5" height="5"><animate attributeName="opacity" from="0" to="1"/></rect>
+        <rect width="5" height="5"><animateMotion path="M0 0 L9 9" dur="1s"/></rect>
+        <rect width="5" height="5"><animate attributeName="opacity" values="0;1" keyTimes="0;0.5" dur="1s"/></rect>
+        <text x="1" y="1"><animate attributeName="x" from="0" to="5" dur="1s"/>hi</text>"##));
+    for needle in ["waits for an event", "animating width", "no finite dur", "<animateMotion>", "keyTimes must rise", "x on <text>"] {
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+    }
+    assert!(i.scene.animations.is_empty());
+    assert_eq!(i.scene.elements.len(), 6);
+    assert!(matches!(i.scene.elements[0], Element::Rect(_)), "no wrapper around a rect whose animation was refused");
+}
+
+#[test]
+fn replacing_a_static_transform_is_noted() {
+    let i = imp(&doc(r##"<rect width="5" height="5" transform="translate(5 5)"><animateTransform attributeName="transform" type="rotate" to="90" dur="1s"/></rect>"##));
+    assert!(has_warning(&i, "replaces the transform attribute"), "{:?}", i.warnings);
+    assert_eq!(i.scene.animations.len(), 1);
+}
+
+#[test]
+fn animations_inside_a_mask_are_reported_and_left_static() {
+    let i = imp(&doc(r##"<defs><mask id="m"><rect width="9" height="9" fill="#fff"><animate attributeName="opacity" from="0" to="1" dur="1s"/></rect></mask></defs>
+        <rect width="20" height="20" mask="url(#m)"/>"##));
+    assert!(has_warning(&i, "inside a mask or marker"), "{:?}", i.warnings);
+    assert!(i.scene.animations.is_empty());
+}
+
+#[test]
+fn use_copies_animate_independently() {
+    let i = imp(&doc(r##"<defs><rect id="d" width="5" height="5"><animateTransform attributeName="transform" type="translate" to="10 0" dur="1s" fill="freeze"/></rect></defs>
+        <use href="#d"/><use href="#d" y="20"/>"##));
+    assert_eq!(i.scene.animations.len(), 2);
+    assert_ne!(i.scene.animations[0].target_id, i.scene.animations[1].target_id);
+}
+
+#[test]
+fn imported_animations_survive_write_and_parse() {
+    let svg = doc(&format!(
+        "{SPINNER}<circle cx=\"60\" cy=\"60\" r=\"9\" opacity=\".4\"><animate attributeName=\"opacity\" values=\".4;1;.4\" dur=\"1.5s\" repeatCount=\"indefinite\"/></circle>\
+         <g transform=\"translate(3 4)\"><animateTransform attributeName=\"transform\" type=\"scale\" values=\"1;2;1\" calcMode=\"spline\" keySplines=\".4 0 .6 1;.4 0 .6 1\" dur=\"3s\" repeatCount=\"indefinite\" additive=\"sum\"/><rect width=\"9\" height=\"9\"/></g>"
+    ));
+    let i = imp(&svg);
+    assert!(i.scene.animations.len() >= 3);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("animated scenes are writable");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    assert_eq!(back.duration, i.scene.duration);
+    assert_eq!(back.loop_mode, i.scene.loop_mode);
+    assert_eq!(format!("{:?}", back.animations), format!("{:?}", i.scene.animations));
+    for t in [0.0, 0.4, 1.1, 2.9, 3.7] {
+        assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements), "frame at {t}");
+    }
 }

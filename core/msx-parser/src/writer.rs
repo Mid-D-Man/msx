@@ -7,16 +7,16 @@
 //!
 //! Supported: canvas and `viewbox`, linear, radial and conic gradients,
 //! and the elements rect, circle, ellipse, line, polyline, polygon, path,
-//! text, image, group, use and layer (without effects). Anything else returns
+//! text, image, group, use and layer (without effects), plus the timeline:
+//! `duration`, `loop_mode` and the animation tracks. Anything else returns
 //! [`WriteError::Unsupported`] instead of writing a file that would lose
-//! content: SDF nodes, splats, images, shader and audio defs, layer
-//! effects and animations.
+//! content: SDF nodes, splats, shader and audio defs and layer effects.
 
 use std::fmt::{self, Write as _};
 
 use msx_ast::{
-    Anchor, BlendMode, Color, Def, Element, FontWeight, Group, ImageFormat, Layer, MediaSource, Paint, PathCommand, Point, Scene, Stop,
-    Style, Transform,
+    Anchor, AnimationTrack, BlendMode, Color, Def, Easing, Element, FontWeight, Group, ImageFormat, Layer, LoopMode, MediaSource, Paint,
+    PathCommand, Point, Scene, Stop, Style, Transform,
 };
 
 /// Why a scene could not be written.
@@ -38,10 +38,6 @@ impl std::error::Error for WriteError {}
 
 /// Write `scene` as `.msx` source text.
 pub fn scene_to_msx(scene: &Scene) -> Result<String, WriteError> {
-    if !scene.animations.is_empty() || scene.duration != 0.0 {
-        return Err(WriteError::Unsupported("animations".into()));
-    }
-
     let mut out = String::new();
     out.push_str("@CONFIG( version -> \"1.0.0\" )\n@DATA(\n");
 
@@ -64,6 +60,13 @@ pub fn scene_to_msx(scene: &Scene) -> Result<String, WriteError> {
         );
     }
 
+    if scene.duration != 0.0 {
+        let _ = writeln!(out, "  duration = {}", float(scene.duration));
+    }
+    if scene.loop_mode != LoopMode::Once {
+        let _ = writeln!(out, "  loop_mode = {}", quote(scene.loop_mode.to_dixscript_str()));
+    }
+
     if !scene.defs.is_empty() {
         out.push_str("  defs::\n");
         for def in &scene.defs {
@@ -76,6 +79,13 @@ pub fn scene_to_msx(scene: &Scene) -> Result<String, WriteError> {
         for el in &scene.elements {
             write_element(&mut out, el, 4, false)?;
             out.push('\n');
+        }
+    }
+
+    if !scene.animations.is_empty() {
+        out.push_str("  animations::\n");
+        for track in &scene.animations {
+            write_track(&mut out, track);
         }
     }
 
@@ -487,6 +497,19 @@ fn write_group(out: &mut String, g: &Group, indent: usize, tail: &str) -> Result
     Ok(())
 }
 
+/// One animation track, with a keyframe per line. Easing is written only when
+/// it is not the linear default, which is also what the parser assumes.
+fn write_track(out: &mut String, t: &AnimationTrack) {
+    let _ = writeln!(out, "    {{ target_id = {}, property = {},", quote(&t.target_id), quote(t.property.to_dixscript_str()));
+    out.push_str("      keyframes = [\n");
+    for (i, k) in t.keyframes.iter().enumerate() {
+        let easing = if k.easing == Easing::Linear { String::new() } else { format!(", easing = {}", quote(k.easing.to_dixscript_str())) };
+        let comma = if i + 1 < t.keyframes.len() { "," } else { "" };
+        let _ = writeln!(out, "        {{ time = {}, value = {}{easing} }}{comma}", float(k.time), float(k.value));
+    }
+    out.push_str("      ] }\n");
+}
+
 fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result<(), WriteError> {
     if !l.effects.is_empty() {
         return Err(WriteError::Unsupported("layer effects".into()));
@@ -741,8 +764,51 @@ mod tests {
         layer.effects = vec![msx_ast::Effect::Blur { radius: 2.0 }];
         assert!(scene_to_msx(&scene_with(vec![], vec![Element::Layer(layer)])).is_err());
 
-        let mut animated = scene_with(vec![], vec![]);
-        animated.duration = 2.0;
-        assert!(scene_to_msx(&animated).is_err());
+    }
+
+    fn animated_scene() -> Scene {
+        use msx_ast::{AnimatedProperty, Keyframe};
+        let mut s = scene_with(vec![], vec![rect(style())]);
+        s.duration = 2.5;
+        s.loop_mode = LoopMode::PingPong;
+        s.animations = vec![
+            AnimationTrack::new("r1", AnimatedProperty::Rotate, vec![Keyframe::linear(0.0, 0.0), Keyframe::new(2.5, 360.0, Easing::EaseInOut)]),
+            AnimationTrack::new("r1", AnimatedProperty::Opacity, vec![Keyframe::linear(0.0, 1.0), Keyframe::new(1.25, 0.125, Easing::EaseOut), Keyframe::linear(2.5, 1.0)]),
+            AnimationTrack::new("a \"quoted\" id", AnimatedProperty::TranslateX, vec![Keyframe::linear(0.0, -3.5)]),
+        ];
+        s
+    }
+
+    #[test]
+    fn animations_roundtrip() {
+        let s = animated_scene();
+        let text = scene_to_msx(&s).unwrap();
+        let back = parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}\n{text}"));
+        assert_eq!(back.duration, 2.5);
+        assert_eq!(back.loop_mode, LoopMode::PingPong);
+        assert_eq!(format!("{:?}", s.animations), format!("{:?}", back.animations), "{text}");
+        assert_eq!(format!("{:?}", s.elements), format!("{:?}", back.elements));
+    }
+
+    #[test]
+    fn timeline_keys_are_left_out_when_default() {
+        let text = scene_to_msx(&scene_with(vec![], vec![rect(style())])).unwrap();
+        assert!(!text.contains("duration") && !text.contains("loop_mode") && !text.contains("animations"), "{text}");
+        let mut s = scene_with(vec![], vec![]);
+        s.duration = 2.0;
+        let text = scene_to_msx(&s).unwrap();
+        assert!(text.contains("duration = 2.0") && !text.contains("loop_mode"), "{text}");
+        assert_eq!(parse_scene(&text).unwrap().duration, 2.0);
+    }
+
+    #[test]
+    fn a_track_with_many_keyframes_roundtrips() {
+        use msx_ast::{AnimatedProperty, Keyframe};
+        let mut s = scene_with(vec![], vec![rect(style())]);
+        let kfs: Vec<Keyframe> = (0..300).map(|i| Keyframe::linear(f64::from(i) * 0.01, (f64::from(i) * 0.37).sin())).collect();
+        s.animations = vec![AnimationTrack::new("r1", AnimatedProperty::TranslateY, kfs)];
+        let text = scene_to_msx(&s).unwrap();
+        let back = parse_scene(&text).unwrap();
+        assert_eq!(format!("{:?}", s.animations), format!("{:?}", back.animations));
     }
 }

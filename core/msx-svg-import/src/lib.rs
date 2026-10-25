@@ -20,6 +20,8 @@
 //! text on a path, spread methods other than pad, and a few gradient
 //! transforms.
 
+mod anim;
+mod animate;
 mod geom;
 mod markers;
 mod gradient;
@@ -136,6 +138,21 @@ pub(crate) struct Importer<'a, 'i> {
     keep_hidden: bool,
     /// Ids of the clip paths being resolved right now, to stop cycles.
     clip_stack: Vec<String>,
+    /// Animation elements that name their target with `href`, by target.
+    anim_by_href: HashMap<roxmltree::NodeId, Vec<Node<'a, 'i>>>,
+    /// Animation wrappers written so far, waiting for the scene timeline.
+    pending: Vec<animate::Pending>,
+    /// Counter for the ids of animation wrappers.
+    next_anim: usize,
+    /// The element whose own transform the walk leaves off, because an
+    /// animation wrapper carries it instead.
+    skip_transform: Option<roxmltree::NodeId>,
+    /// The element whose own opacity the walk leaves off, because an opacity
+    /// animation replaces it.
+    skip_opacity: Option<roxmltree::NodeId>,
+    /// Above zero while mask or marker content is walked: the resolver does
+    /// not reach animations there.
+    anim_off: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -504,6 +521,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 parse_stylesheet(&css, &mut sheet);
             }
         }
+        let anim_by_href = Self::index_animations(doc, &ids);
         let mut imp = Importer {
             ids,
             sheet,
@@ -523,6 +541,12 @@ impl<'a, 'i> Importer<'a, 'i> {
             keep_hidden,
             clip_stack: Vec::new(),
             emitted: 0,
+            anim_by_href,
+            pending: Vec::new(),
+            next_anim: 0,
+            skip_transform: None,
+            skip_opacity: None,
+            anim_off: 0,
         };
         if keyframes {
             imp.warn("CSS @keyframes animations are not supported; the static frame is drawn".to_string());
@@ -578,12 +602,6 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn check_unsupported(&mut self, node: &Node, props: &Props) {
         if self.clip_mode {
             return;
-        }
-        for child in node.children().filter(|c| c.is_element()) {
-            let tag = child.tag_name().name();
-            if matches!(tag, "animate" | "animateTransform" | "animateMotion" | "animateColor" | "set") {
-                self.warn(format!("{} has a <{tag}> animation, which is not supported; the static frame is drawn", Self::label(node)));
-            }
         }
         for key in ["animation", "animation-name"] {
             if props.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
@@ -665,7 +683,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         };
         let clips = self.resolve_clips(node, props, bbox);
         let mask = self.resolve_mask(node, props, bbox);
-        Comp { opacity: element_opacity(props), blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips, mask }
+        let opacity = if self.skip_opacity == Some(node.id()) { 1.0 } else { element_opacity(props) };
+        Comp { opacity, blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips, mask }
     }
 
     // ── Masks ─────────────────────────────────────────────────────────────────
@@ -734,9 +753,11 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         let inh = self.inh_chain(m);
         let mut content = Vec::new();
+        self.anim_off += 1;
         for child in m.children().filter(|c| c.is_element() && !is_foreign(c)) {
             self.walk(child, &inh, &mut content, true);
         }
+        self.anim_off -= 1;
         if m.attribute("maskContentUnits").is_some_and(|u| u.trim() == "objectBoundingBox") {
             let Some(b) = bbox else { return hidden };
             let t = Transform::Multiple(vec![Transform::Translate { x: b.x, y: b.y }, Transform::Scale { x: b.w, y: b.h }]);
@@ -903,6 +924,9 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// The element's transform. A CSS `transform` property beats the
     /// attribute, and `transform-origin` moves the point it turns around.
     fn node_transform(&mut self, node: Node) -> Option<Transform> {
+        if self.skip_transform == Some(node.id()) {
+            return None;
+        }
         let props = self.props_for(node);
         let parsed = match props.get("transform") {
             Some(css) => parse_css_transform(css),
@@ -970,6 +994,7 @@ impl<'a, 'i> Importer<'a, 'i> {
 
         scene.defs = std::mem::take(&mut self.defs);
         scene.elements = out;
+        self.finish_animations(&mut scene);
         Imported { scene, warnings: std::mem::take(&mut self.warnings) }
     }
 
@@ -991,6 +1016,14 @@ impl<'a, 'i> Importer<'a, 'i> {
     // ── Walk ──────────────────────────────────────────────────────────────────
 
     fn walk(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
+        if node.is_element() && !is_foreign(&node) && self.has_animation(node) && Self::passes_conditions(&node) {
+            self.walk_animated(node, parent, out, expanded);
+        } else {
+            self.walk_plain(node, parent, out, expanded);
+        }
+    }
+
+    fn walk_plain(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
         if !node.is_element() || is_foreign(&node) || !Self::passes_conditions(&node) {
             return;
         }
@@ -1102,9 +1135,11 @@ impl<'a, 'i> Importer<'a, 'i> {
         };
         let inh = self.inh_chain(m);
         let mut kids = Vec::new();
+        self.anim_off += 1;
         for child in m.children().filter(|c| c.is_element() && !is_foreign(c)) {
             self.walk(child, &inh, &mut kids, true);
         }
+        self.anim_off -= 1;
         let clip = self.viewport_clips(m) && reaches_outside(&kids, viewport_bounds(&view, width, height));
         Some(MarkerDef {
             kids,

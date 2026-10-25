@@ -61,7 +61,9 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `image` with PNG or JPEG | Expanded | From a data URI or a file, with `preserveAspectRatio`, a clip for `slice`, opacity, transform, clip and mask |
 | `image` with SVG, GIF or WebP | Gap | Reported. MSX holds only PNG and JPEG, and an SVG image would need the inner file imported into the scene |
 | `foreignObject` | Gap | Reported |
-| `animate`, `animateTransform`, `animateMotion`, `set`, CSS `animation` | Gap | Reported, the static frame is drawn. MSX has animation tracks, but the importer does not map to them yet and the writer refuses animated scenes |
+| `animateTransform` of `translate`, `scale` and `rotate`, `animate` of `opacity`, `x`, `y`, `cx` and `cy`, with `begin`, `dur`, repeats, `end`, `fill`, `values`, `keyTimes`, `calcMode` and `keySplines` | Expanded | Baked into MSX tracks on one scene timeline, with a wrapper group or layer per animation. See [Importing SVG](svg-import.md#animation) |
+| `animate` of colors, paths, sizes and dash offsets, `skewX` and `skewY`, `animateMotion`, `set`, `begin` on an event | Gap | Reported, the static frame is drawn. MSX tracks have only translate, scale, rotate, opacity and z-index channels |
+| CSS `animation` and `@keyframes` | Gap | Reported, the static frame is drawn |
 
 ## Text
 
@@ -97,3 +99,4 @@ The remaining gaps share a few causes, so they are closed in this order.
 6. Filter primitives mapped onto layer effects where an equivalent exists.
 7. Text styling, then `textPath`.
 8. A binary version bump with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`.
+9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. What is left is CSS `@keyframes`, `set`, `animateMotion` and the properties that have no track channel yet, such as fill color and dash offset.

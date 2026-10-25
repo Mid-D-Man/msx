@@ -147,6 +147,13 @@ fn json_escape(s: &str) -> String {
 /// - `element_count`: top level elements of the imported scene
 /// - `reparse_matches`: whether rendering the in-memory scene gives the same
 ///   SVG as rendering the reparsed source (a writer or parser gap shows here)
+/// - `animated`, `duration`, `loop_mode`: the timeline of the converted scene,
+///   read the same way `render_and_inspect` reads it. `svg` is the frame at
+///   time 0, which differs from the static scene when an animation starts away
+///   from its resting value.
+///
+/// The reparsed scene is kept for `render_frame` and `local_time`, so the
+/// converter page plays the animation without parsing the source again.
 ///
 /// Errors are plain strings: invalid XML, not an SVG, content the writer
 /// cannot express yet, or a written file that does not parse.
@@ -155,8 +162,11 @@ pub fn import_svg(svg: &str) -> Result<String, JsValue> {
     let imported = msx_svg_import::import_svg(svg).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let source = msx_parser::scene_to_msx(&imported.scene).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let reparsed = msx::parse_scene(&source).map_err(|e| JsValue::from_str(&format!("the converted source does not parse: {e}")))?;
-    let rendered = msx::render(&reparsed);
-    let reparse_matches = rendered == msx::render(&imported.scene);
+    let rendered = msx::render(&msx_anim::resolve_at_time(&reparsed, 0.0));
+    let reparse_matches = rendered == msx::render(&msx_anim::resolve_at_time(&imported.scene, 0.0));
+    let animated = !reparsed.animations.is_empty();
+    let duration = reparsed.effective_duration();
+    let loop_mode = reparsed.loop_mode.to_dixscript_str();
 
     let warnings = imported
         .warnings
@@ -165,8 +175,8 @@ pub fn import_svg(svg: &str) -> Result<String, JsValue> {
         .collect::<Vec<_>>()
         .join(",");
 
-    Ok(format!(
-        r#"{{"msx":"{msx}","svg":"{svg}","warnings":[{warnings}],"svg_bytes":{svg_bytes},"msx_bytes":{msx_bytes},"element_count":{element_count},"reparse_matches":{reparse_matches}}}"#,
+    let json = format!(
+        r#"{{"msx":"{msx}","svg":"{svg}","warnings":[{warnings}],"svg_bytes":{svg_bytes},"msx_bytes":{msx_bytes},"element_count":{element_count},"reparse_matches":{reparse_matches},"animated":{animated},"duration":{duration},"loop_mode":"{loop_mode}"}}"#,
         msx = json_escape(&source),
         svg = json_escape(&rendered),
         warnings = warnings,
@@ -174,7 +184,12 @@ pub fn import_svg(svg: &str) -> Result<String, JsValue> {
         msx_bytes = source.len(),
         element_count = imported.scene.elements.len(),
         reparse_matches = reparse_matches,
-    ))
+        animated = animated,
+        duration = duration,
+        loop_mode = loop_mode,
+    );
+    LOADED.with(|cell| *cell.borrow_mut() = Some(reparsed));
+    Ok(json)
 }
 
 /// Compiles `.msx` source to the compressed binary form, the same call
@@ -265,6 +280,34 @@ mod tests {
         let json = import_svg(svg).expect("the masked file imports");
         assert!(json.contains("mask"), "{json}");
         assert!(json.contains("\\\"r\\\""), "the quotes in the warning label are escaped: {json}");
+    }
+
+    const SPINNER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><rect x="10" y="10" width="40" height="40" fill="#f00">
+  <animateTransform attributeName="transform" type="rotate" from="0 30 30" to="360 30 30" dur="2s" repeatCount="indefinite"/></rect></svg>"##;
+
+    #[test]
+    fn a_still_svg_reports_no_timeline() {
+        let json = import_svg(BADGE).expect("the badge imports");
+        assert!(json.contains("\"animated\":false"), "{json}");
+        assert!(json.contains("\"duration\":0,"), "{json}");
+        assert!(json.contains("\"loop_mode\":\"once\""), "{json}");
+    }
+
+    #[test]
+    fn an_animated_svg_reports_its_timeline_and_plays_back() {
+        let json = import_svg(SPINNER).expect("the spinner imports");
+        assert!(json.contains("\"animated\":true"), "{json}");
+        assert!(json.contains("\"duration\":2,"), "{json}");
+        assert!(json.contains("\"loop_mode\":\"loop\""), "{json}");
+        assert!(json.contains("\"reparse_matches\":true"), "{json}");
+        assert!(json.contains("\"warnings\":[]"), "{json}");
+        // The import loaded the scene, so frames can be drawn without another parse.
+        let start = render_frame(0.0).expect("frame at 0");
+        let quarter = render_frame(0.5).expect("frame at 0.5");
+        let wrapped = render_frame(2.5).expect("frame at 2.5");
+        assert_ne!(start, quarter, "the rotation moves the rect");
+        assert_eq!(quarter, wrapped, "a loop scene wraps");
+        assert!((local_time(2.5) - 0.5).abs() < 1e-9);
     }
 
     #[test]
