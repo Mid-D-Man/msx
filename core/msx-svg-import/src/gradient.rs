@@ -276,7 +276,7 @@ impl<'a, 'i> Importer<'a, 'i> {
 
     /// An id for a new gradient def: the SVG id when free, a numbered
     /// variant otherwise. Characters that would break `url(#...)` are replaced.
-    fn fresh_gradient_id(&mut self, base: &str) -> String {
+    pub(crate) fn fresh_gradient_id(&mut self, base: &str) -> String {
         let clean: String = base.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
         let clean = if clean.is_empty() { "gradient".to_string() } else { clean };
         let mut candidate = clean.clone();

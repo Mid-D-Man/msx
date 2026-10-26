@@ -124,9 +124,22 @@ fn style_element_may_be_cdata() {
 
 #[test]
 fn unsupported_selectors_are_reported_not_misapplied() {
-    let i = imp(&doc("<style>g rect { fill: #ff0000 }</style><g><rect width=\"1\" height=\"1\"/></g>"));
-    assert!(has_warning(&i, "g rect"));
+    let i = imp(&doc("<style>rect:hover { fill: #ff0000 } g + g { fill: #ff0000 }</style><g><rect width=\"1\" height=\"1\"/></g>"));
+    assert!(has_warning(&i, "rect:hover") && has_warning(&i, "g + g"), "{:?}", i.warnings);
     assert_eq!(fill(&rect(&i.scene.elements[0]).style), Color::BLACK);
+}
+
+#[test]
+fn descendant_child_and_attribute_selectors_apply() {
+    let i = imp(&doc(r##"<style>g rect { fill: #ff0000 } svg > rect { fill: #00ff00 } [data-k] { stroke: #0000ff } g > rect:first-child { opacity: .5 }</style>
+        <g><rect width="1" height="1"/></g><rect width="1" height="1" data-k="x"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let first = rect(&i.scene.elements[0]);
+    assert_eq!(first.style.opacity, Some(0.5), ":first-child applied");
+    assert_eq!(fill(&first.style), Color::rgb(255, 0, 0), "descendant selector");
+    let second = rect(&i.scene.elements[1]);
+    assert_eq!(fill(&second.style), Color::rgb(0, 255, 0), "child selector");
+    assert_eq!(second.style.stroke, Some(Paint::Color(Color::rgb(0, 0, 255))), "attribute selector");
 }
 
 #[test]
@@ -1010,11 +1023,11 @@ fn nested_svg_viewport_clips_through_a_use_size() {
 
 #[test]
 fn animations_without_a_channel_are_reported_instead_of_dropped_silently() {
-    let i = imp(&doc(r##"<style>@keyframes spin { to { transform: rotate(360deg) } } .a { animation: spin 2s infinite }</style>
+    let i = imp(&doc(r##"<style>@keyframes spin { to { fill: red } } .a { animation: spin 2s infinite }</style>
         <rect width="5" height="5"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect>
         <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="skewX" to="30" dur="1s"/><rect width="1" height="1"/></g>
         <rect width="5" height="5"><set attributeName="fill" to="red"/></rect>"##));
-    for needle in ["@keyframes", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
+    for needle in ["keyframe property fill", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
         assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
     }
     assert!(i.scene.elements.len() >= 3, "the static frame is still drawn");
@@ -1760,4 +1773,625 @@ fn imported_animations_survive_write_and_parse() {
     for t in [0.0, 0.4, 1.1, 2.9, 3.7] {
         assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements), "frame at {t}");
     }
+}
+
+fn find_shape_matrix(el: &Element, acc: msx_ast::Matrix2D) -> Option<msx_ast::Matrix2D> {
+    let with = |t: &Option<Transform>| acc.concat(t.as_ref().map_or(msx_ast::Matrix2D::identity(), |t| t.to_matrix()));
+    match el {
+        Element::Group(g) => g.children.iter().find_map(|c| find_shape_matrix(c, with(&g.transform))),
+        Element::Layer(l) => l.children.iter().find_map(|c| find_shape_matrix(c, with(&l.transform))),
+        Element::Circle(c) => Some(with(&c.transform)),
+        Element::Rect(r) => Some(with(&r.transform)),
+        _ => None,
+    }
+}
+
+/// Where a local point of the first circle or rect lands at time `t`.
+fn shape_point(i: &Imported, t: f64, x: f64, y: f64) -> (f64, f64) {
+    let scene = msx_anim::resolve_at_time(&i.scene, t);
+    let m = scene.elements.iter().find_map(|e| find_shape_matrix(e, msx_ast::Matrix2D::identity())).expect("a shape in the frame");
+    geom::apply(m, x, y)
+}
+
+fn layer_opacity_at(i: &Imported, t: f64) -> f64 {
+    match &msx_anim::resolve_at_time(&i.scene, t).elements[0] {
+        Element::Layer(l) => l.opacity,
+        other => panic!("expected a layer, got {other:?}"),
+    }
+}
+
+#[test]
+fn fill_opacity_on_a_filled_shape_fades_the_whole_shape() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00"><animate attributeName="fill-opacity" values="1;.2;1" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(layer_opacity_at(&i, 0.0), 1.0) && close(layer_opacity_at(&i, 1.0), 0.2) && close(layer_opacity_at(&i, 0.5), 0.6));
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+}
+
+#[test]
+fn fill_opacity_animation_replaces_the_static_value() {
+    // Animating from .5 up to 1 is allowed: the static .5 is left off the shape
+    // and the layer carries the absolute value.
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00" fill-opacity=".5"><animate attributeName="fill-opacity" values=".5;1;.5" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(layer_opacity_at(&i, 0.0), 0.5) && close(layer_opacity_at(&i, 1.0), 1.0) && close(layer_opacity_at(&i, 0.5), 0.75));
+    let Element::Layer(l) = &i.scene.elements[0] else { panic!() };
+    let Element::Circle(c) = &l.children[0] else { panic!("{:?}", l.children[0]) };
+    let Some(Paint::Color(col)) = c.style.fill else { panic!("{:?}", c.style) };
+    assert_eq!(col.a, 255, "the shape paints at full alpha, the layer fades it");
+}
+
+#[test]
+fn a_static_fill_opacity_of_zero_is_a_valid_start() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill-opacity="0"><animate attributeName="fill-opacity" from="0" to="1" dur="1s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(layer_opacity_at(&i, 0.0), 0.0) && close(layer_opacity_at(&i, 1.0), 1.0));
+}
+
+#[test]
+fn fill_opacity_is_refused_where_it_would_not_be_exact() {
+    let both = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00" stroke="#000" stroke-width="2"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
+    assert!(has_warning(&both, "also paints its stroke"), "{:?}", both.warnings);
+    let inherited = imp(&doc(r##"<g stroke="#000"><circle cx="5" cy="5" r="4"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle></g>"##));
+    assert!(has_warning(&inherited, "also paints its stroke"), "a stroke inherited from the group counts: {:?}", inherited.warnings);
+    let none = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="none"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
+    assert!(has_warning(&none, "no fill to fade"), "{:?}", none.warnings);
+    for i in [&both, &inherited, &none] {
+        assert!(i.scene.animations.is_empty());
+    }
+}
+
+#[test]
+fn stroke_opacity_works_on_a_shape_that_only_strokes() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="none" stroke="#000" stroke-width="2"><animate attributeName="stroke-opacity" values="1;0;1" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(layer_opacity_at(&i, 1.0), 0.0));
+    let filled = imp(&doc(r##"<circle cx="5" cy="5" r="4" stroke="#000"><animate attributeName="stroke-opacity" values="1;0;1" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(has_warning(&filled, "also paints its fill"), "{:?}", filled.warnings);
+}
+
+#[test]
+fn circle_radius_scales_about_the_centre() {
+    let i = imp(&doc(r##"<circle cx="10" cy="10" r="4" fill="#00f"><animate attributeName="r" from="4" to="12" dur="1s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // The point on the right edge follows the radius, the centre stays put.
+    assert!(near(shape_point(&i, 0.0, 14.0, 10.0), (14.0, 10.0)));
+    assert!(near(shape_point(&i, 0.5, 14.0, 10.0), (18.0, 10.0)));
+    assert!(near(shape_point(&i, 1.0, 14.0, 10.0), (22.0, 10.0)));
+    assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (10.0, 10.0)));
+    assert!(near(shape_point(&i, 1.0, 10.0, 14.0), (10.0, 22.0)));
+}
+
+#[test]
+fn radius_combines_with_a_moving_centre_and_a_static_transform() {
+    let i = imp(&doc(r##"<g transform="translate(100 0)"><circle cx="10" cy="10" r="2" fill="#00f">
+        <animate attributeName="r" from="2" to="6" dur="1s" fill="freeze"/><animate attributeName="cx" from="10" to="30" dur="1s" fill="freeze"/></circle></g>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // At the end the centre is (30,10) and the radius 6, all inside translate(100 0).
+    assert!(near(shape_point(&i, 1.0, 12.0, 10.0), (136.0, 10.0)), "{:?}", shape_point(&i, 1.0, 12.0, 10.0));
+    assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (130.0, 10.0)));
+}
+
+#[test]
+fn radius_is_refused_where_it_would_not_be_exact() {
+    let stroked = imp(&doc(r##"<circle cx="10" cy="10" r="4" fill="#00f" stroke="#000" stroke-width="2"><animate attributeName="r" from="4" to="8" dur="1s"/></circle>"##));
+    assert!(has_warning(&stroked, "stroke, which would scale"), "{:?}", stroked.warnings);
+    let none = imp(&doc(r##"<circle cx="10" cy="10" r="0" fill="#00f"><animate attributeName="r" from="0" to="8" dur="1s"/></circle>"##));
+    assert!(has_warning(&none, "no static r"), "{:?}", none.warnings);
+    let ellipse = imp(&doc(r##"<ellipse cx="10" cy="10" rx="4" ry="2" fill="#00f"><animate attributeName="r" from="4" to="8" dur="1s"/></ellipse>"##));
+    assert!(has_warning(&ellipse, "r on <ellipse>"), "{:?}", ellipse.warnings);
+    for i in [&stroked, &none, &ellipse] {
+        assert!(i.scene.animations.is_empty());
+    }
+}
+
+#[test]
+fn geometry_animations_do_not_depend_on_their_order_in_the_file() {
+    let r_first = r##"<animate attributeName="r" from="2" to="6" dur="1s" fill="freeze"/><animate attributeName="cx" from="10" to="30" dur="1s" fill="freeze"/>"##;
+    let cx_first = r##"<animate attributeName="cx" from="10" to="30" dur="1s" fill="freeze"/><animate attributeName="r" from="2" to="6" dur="1s" fill="freeze"/>"##;
+    for body in [r_first, cx_first] {
+        let i = imp(&doc(&format!(r##"<circle cx="10" cy="10" r="2" fill="#00f">{body}</circle>"##)));
+        assert!(near(shape_point(&i, 1.0, 12.0, 10.0), (36.0, 10.0)), "{:?}", shape_point(&i, 1.0, 12.0, 10.0));
+        assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (30.0, 10.0)));
+        assert!(near(shape_point(&i, 0.5, 10.0, 10.0), (20.0, 10.0)));
+    }
+}
+
+#[test]
+fn opacity_layers_go_outside_transform_wrappers() {
+    let i = imp(&doc(r##"<rect width="4" height="4" fill="#000"><animateTransform attributeName="transform" type="translate" to="5 0" dur="1s" fill="freeze"/>
+        <animate attributeName="opacity" from="1" to="0" dur="1s" fill="freeze"/></rect>"##));
+    assert!(matches!(i.scene.elements[0], Element::Layer(_)), "the layer is outermost: {:?}", i.scene.elements[0]);
+}
+
+// ── CSS animation ────────────────────────────────────────────────────────────
+
+const SPIN_CSS: &str = "<style>@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+    .s { animation: spin 2s linear infinite; transform-origin: 20px 20px }</style>";
+
+#[test]
+fn a_css_spinner_becomes_a_looping_rotation_about_its_origin() {
+    let i = imp(&doc(&format!(r##"{SPIN_CSS}<rect class="s" x="10" y="10" width="20" height="20" fill="#f00"/>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.duration, 2.0);
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+    let t = track(&i, msx_ast::AnimatedProperty::Rotate);
+    assert_eq!(t.len(), 1);
+    let keys: Vec<(f64, f64)> = t[0].keyframes.iter().map(|k| (k.time, k.value)).collect();
+    assert_eq!(keys, vec![(0.0, 0.0), (2.0, 360.0)]);
+    assert!(near(frame_point(&i, 0.5, 30.0, 20.0), (20.0, 30.0)));
+    assert!(near(frame_point(&i, 1.0, 30.0, 20.0), (10.0, 20.0)));
+    assert!(near(frame_point(&i, 2.5, 30.0, 20.0), (20.0, 30.0)), "the loop wraps");
+}
+
+#[test]
+fn transform_box_fill_box_puts_the_origin_in_the_shape() {
+    let css = "<style>@keyframes spin { to { transform: rotate(360deg) } } .s { animation: spin 2s linear infinite; transform-box: fill-box; transform-origin: center }</style>";
+    let i = imp(&doc(&format!(r##"{css}<rect class="s" x="10" y="10" width="20" height="20" fill="#f00"/>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(frame_point(&i, 0.5, 30.0, 20.0), (20.0, 30.0)), "{:?}", frame_point(&i, 0.5, 30.0, 20.0));
+    let g = imp(&doc(&format!(r##"{css}<g class="s"><rect x="0" y="0" width="10" height="10"/><rect x="30" y="10" width="10" height="10"/></g>"##)));
+    // The box of the group is (0,0) to (40,20), so its centre is (20,10).
+    assert!(near(frame_point(&g, 0.5, 10.0, 10.0), (20.0, 0.0)), "{:?}", frame_point(&g, 0.5, 10.0, 10.0));
+}
+
+#[test]
+fn the_default_easing_is_ease_and_linear_is_honored() {
+    let ease = imp(&doc(r##"<style>@keyframes k { to { transform: translate(100px, 0) } } .e { animation: k 1s infinite }</style><rect class="e" width="5" height="5"/>"##));
+    let x = frame_point(&ease, 0.5, 0.0, 0.0).0;
+    assert!(x > 75.0 && x < 85.0, "ease is ahead of linear at the middle: {x}");
+    let lin = imp(&doc(r##"<style>@keyframes k { to { transform: translate(100px, 0) } } .e { animation: k 1s linear infinite }</style><rect class="e" width="5" height="5"/>"##));
+    assert!(close(frame_point(&lin, 0.5, 0.0, 0.0).0, 50.0));
+}
+
+#[test]
+fn alternate_runs_forward_then_back() {
+    let i = imp(&doc(r##"<style>@keyframes k { from { transform: translate(0, 0) } to { transform: translate(100px, 0) } } .e { animation: k 1s linear infinite alternate }</style><rect class="e" width="5" height="5"/>"##));
+    assert_eq!(i.scene.duration, 2.0);
+    for (t, want) in [(0.0, 0.0), (0.5, 50.0), (1.0, 100.0), (1.5, 50.0), (2.0, 0.0), (2.5, 50.0)] {
+        assert!(close(frame_point(&i, t, 0.0, 0.0).0, want), "t={t}: {:?}", frame_point(&i, t, 0.0, 0.0));
+    }
+}
+
+#[test]
+fn percent_stops_and_opacity_make_a_pulse() {
+    let i = imp(&doc(r##"<style>@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .2 } } .p { animation: pulse 2s linear infinite }</style><circle class="p" cx="5" cy="5" r="4"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(layer_opacity_at(&i, 0.0), 1.0) && close(layer_opacity_at(&i, 1.0), 0.2) && close(layer_opacity_at(&i, 0.5), 0.6) && close(layer_opacity_at(&i, 2.0), 1.0));
+}
+
+#[test]
+fn a_delay_without_fill_shows_the_static_frame_and_forwards_holds_the_end() {
+    let css = |fill: &str| format!(r##"<style>@keyframes k {{ from {{ transform: translate(5px, 0) }} to {{ transform: translate(15px, 0) }} }} .e {{ animation: k 1s linear 1s {fill} }}</style><rect class="e" width="5" height="5"/>"##);
+    let plain = imp(&doc(&css("")));
+    assert_eq!(plain.scene.loop_mode, msx_ast::LoopMode::Once);
+    assert!(close(plain.scene.duration, 2.001), "one millisecond longer, so the last frame is the static one: {}", plain.scene.duration);
+    assert!(close(frame_point(&plain, 0.5, 0.0, 0.0).0, 0.0), "before the delay: the static frame");
+    assert!(close(frame_point(&plain, 1.5, 0.0, 0.0).0, 10.0));
+    assert!((frame_point(&plain, 1.999, 0.0, 0.0).0 - 15.0).abs() < 0.02, "still at the end value a moment before");
+    assert!(close(frame_point(&plain, 2.001, 0.0, 0.0).0, 0.0), "after the end it goes back");
+    assert!(close(frame_point(&plain, 9.0, 0.0, 0.0).0, 0.0), "and stays there");
+    let both = imp(&doc(&css("both")));
+    assert!(close(frame_point(&both, 0.5, 0.0, 0.0).0, 5.0), "backwards holds the first keyframe: {:?}", frame_point(&both, 0.5, 0.0, 0.0));
+    assert!(close(frame_point(&both, 2.0, 0.0, 0.0).0, 15.0), "forwards holds the last");
+    assert!(close(frame_point(&both, 9.0, 0.0, 0.0).0, 15.0));
+}
+
+#[test]
+fn a_negative_delay_starts_part_way_in() {
+    let i = imp(&doc(&format!(r##"{}<rect class="s" x="10" y="10" width="20" height="20"/>"##, "<style>@keyframes spin { to { transform: rotate(360deg) } } .s { animation: spin 2s linear -0.5s infinite; transform-origin: 20px 20px }</style>")));
+    assert!(near(frame_point(&i, 0.0, 30.0, 20.0), (20.0, 30.0)), "a quarter turn in at time 0");
+    assert!(near(frame_point(&i, 0.5, 30.0, 20.0), (10.0, 20.0)));
+}
+
+#[test]
+fn transform_functions_apply_in_list_order() {
+    let tr_rot = imp(&doc(r##"<style>@keyframes k { to { transform: translate(10px, 0) rotate(90deg) } } .e { animation: k 1s linear forwards }</style><rect class="e" width="5" height="5"/>"##));
+    assert!(i_near(&tr_rot, 1.0, (1.0, 0.0), (10.0, 1.0)), "translate then rotate: T.R");
+    let rot_tr = imp(&doc(r##"<style>@keyframes k { to { transform: rotate(90deg) translate(10px, 0) } } .e { animation: k 1s linear forwards }</style><rect class="e" width="5" height="5"/>"##));
+    assert!(i_near(&rot_tr, 1.0, (1.0, 0.0), (0.0, 11.0)), "rotate then translate: R.T");
+    // Halfway the translation is 5 and the rotation 45 degrees.
+    let (x, y) = frame_point(&tr_rot, 0.5, 0.0, 0.0);
+    assert!(close(x, 5.0) && close(y, 0.0));
+}
+
+fn i_near(i: &Imported, t: f64, local: (f64, f64), want: (f64, f64)) -> bool {
+    near(frame_point(i, t, local.0, local.1), want)
+}
+
+#[test]
+fn two_css_animations_on_one_element_both_run() {
+    let i = imp(&doc(r##"<style>@keyframes spin { to { transform: rotate(360deg) } } @keyframes fade { 50% { opacity: .2 } }
+        .e { animation: spin 2s linear infinite, fade 1s linear infinite }</style><rect class="e" width="5" height="5"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.duration, 2.0);
+    assert_eq!(track(&i, msx_ast::AnimatedProperty::Rotate).len(), 1);
+    assert_eq!(track(&i, msx_ast::AnimatedProperty::Opacity).len(), 1);
+    assert!(matches!(i.scene.elements[0], Element::Layer(_)), "the opacity layer is outermost");
+}
+
+#[test]
+fn css_fill_opacity_follows_the_single_paint_rule() {
+    let css = "<style>@keyframes f { 50% { fill-opacity: .2 } } .c { animation: f 1s linear infinite }</style>";
+    let ok = imp(&doc(&format!(r##"{css}<circle class="c" cx="5" cy="5" r="4" fill="#00f"/>"##)));
+    assert!(ok.warnings.is_empty(), "{:?}", ok.warnings);
+    assert!(close(layer_opacity_at(&ok, 0.5), 0.2) && close(layer_opacity_at(&ok, 0.0), 1.0));
+    let stroked = imp(&doc(&format!(r##"{css}<circle class="c" cx="5" cy="5" r="4" fill="#00f" stroke="#000"/>"##)));
+    assert!(has_warning(&stroked, "also paints its stroke"), "{:?}", stroked.warnings);
+    assert!(stroked.scene.animations.is_empty());
+}
+
+#[test]
+fn css_animations_that_cannot_run_are_reported_and_left_static() {
+    let cases = [
+        (r##"@keyframes k { to { transform: skewX(20deg) } } .e { animation: k 1s }"##, "skewX() has no animation channel"),
+        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 1s steps(4) }"##, "step easing"),
+        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: ghost 1s }"##, "@keyframes ghost is not defined"),
+        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 1s paused }"##, "paused"),
+        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 0s }"##, "0 or too short"),
+        (r##"@keyframes k { from { transform: rotate(0deg) } to { transform: scale(2) } } .e { animation: k 1s }"##, "different functions"),
+        (r##"@keyframes k { to { transform: translate(50%, 0) } } .e { animation: k 1s }"##, "is not a length in px"),
+        (r##"@keyframes k { to { fill: red } } .e { animation: k 1s }"##, "keyframe property fill"),
+    ];
+    for (css, needle) in cases {
+        let i = imp(&doc(&format!(r##"<style>{css}</style><rect class="e" width="5" height="5"/>"##)));
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+        assert!(i.scene.animations.is_empty(), "{needle}");
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{needle}: the static frame stays");
+    }
+    let none = imp(&doc(r##"<style>.e { animation: k 1s }</style><rect class="e" width="5" height="5"/>"##));
+    assert!(has_warning(&none, "defines no @keyframes"), "{:?}", none.warnings);
+}
+
+#[test]
+fn css_animation_survives_write_and_parse() {
+    let i = imp(&doc(&format!(r##"{SPIN_CSS}<rect class="s" x="10" y="10" width="20" height="20" fill="#f00"/>
+        <style>@keyframes b {{ from {{ transform: translate(0, 0) }} 50% {{ transform: translate(30px, 0) }} to {{ transform: translate(0, 0) }} }} .b {{ animation: b 1.5s ease-in-out infinite alternate }}</style>
+        <circle class="b" cx="5" cy="50" r="4" fill="#00f"/>"##)));
+    assert!(i.scene.animations.len() >= 2, "{:?}", i.warnings);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("animated scenes are writable");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    assert_eq!(back.duration, i.scene.duration);
+    for t in [0.0, 0.7, 1.3, 2.9] {
+        assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements), "frame at {t}");
+    }
+}
+
+// ── context-fill and context-stroke ──────────────────────────────────────────
+
+/// Every circle in the tree, in order, with its fill and stroke.
+fn circles(el: &Element, out: &mut Vec<(Option<Paint>, Option<Paint>)>) {
+    match el {
+        Element::Group(g) => g.children.iter().for_each(|c| circles(c, out)),
+        Element::Layer(l) => l.children.iter().for_each(|c| circles(c, out)),
+        Element::Circle(c) => out.push((c.style.fill.clone(), c.style.stroke.clone())),
+        _ => {}
+    }
+}
+
+fn all_circles(i: &Imported) -> Vec<(Option<Paint>, Option<Paint>)> {
+    let mut v = Vec::new();
+    i.scene.elements.iter().for_each(|e| circles(e, &mut v));
+    v
+}
+
+fn paint_rgb(p: &Option<Paint>) -> (u8, u8, u8) {
+    match p {
+        Some(Paint::Color(c)) => (c.r, c.g, c.b),
+        other => panic!("expected a color, got {other:?}"),
+    }
+}
+
+#[test]
+fn context_paint_in_a_use_takes_the_paint_of_the_use() {
+    let i = imp(&doc(r##"<defs><circle id="p" r="3" fill="context-stroke" stroke="context-fill" stroke-width="1"/></defs>
+        <use href="#p" fill="#ff0000" stroke="#0000ff"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let c = all_circles(&i);
+    assert_eq!(c.len(), 1);
+    assert_eq!(paint_rgb(&c[0].0), (0, 0, 255), "fill is the use's stroke");
+    assert_eq!(paint_rgb(&c[0].1), (255, 0, 0), "stroke is the use's fill");
+}
+
+#[test]
+fn each_use_has_its_own_context() {
+    let i = imp(&doc(r##"<defs><circle id="p" r="3" fill="context-fill"/></defs>
+        <use href="#p" fill="#ff0000"/><use href="#p" fill="#00ff00" x="10"/>"##));
+    let c = all_circles(&i);
+    assert_eq!((paint_rgb(&c[0].0), paint_rgb(&c[1].0)), ((255, 0, 0), (0, 255, 0)));
+}
+
+#[test]
+fn a_context_paint_on_a_nested_use_refers_to_the_enclosing_context() {
+    let i = imp(&doc(r##"<defs><circle id="p" r="3" fill="context-fill"/><g id="outer"><use href="#p" fill="context-stroke"/></g></defs>
+        <use href="#outer" fill="#ff0000" stroke="#00ff00"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let c = all_circles(&i);
+    assert_eq!(paint_rgb(&c[0].0), (0, 255, 0), "the inner use's fill is the outer use's stroke, and the circle takes that");
+}
+
+#[test]
+fn context_paint_takes_the_opacity_of_the_context() {
+    let i = imp(&doc(r##"<defs><circle id="p" r="3" fill="context-fill"/></defs><use href="#p" fill="#ff0000" fill-opacity=".5"/>"##));
+    let Some(Paint::Color(col)) = &all_circles(&i)[0].0 else { panic!() };
+    assert!(col.a == 127 || col.a == 128, "{col:?}");
+}
+
+const CTX_MARKER: &str = r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="2" refY="2" markerUnits="userSpaceOnUse"><circle cx="2" cy="2" r="2" fill="context-stroke"/></marker></defs>"##;
+
+#[test]
+fn context_paint_in_a_marker_takes_the_paint_of_the_marked_shape() {
+    let i = imp(&doc(&format!(r##"{CTX_MARKER}<path d="M0 0 L 20 0" stroke="#00ff00" marker-end="url(#m)"/>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let c = all_circles(&i);
+    assert_eq!(c.len(), 1);
+    assert_eq!(paint_rgb(&c[0].0), (0, 255, 0));
+}
+
+#[test]
+fn one_marker_is_built_for_each_context_it_is_used_in() {
+    let i = imp(&doc(&format!(
+        r##"{CTX_MARKER}<path d="M0 0 L 20 0" stroke="#00ff00" marker-end="url(#m)"/><path d="M0 10 L 20 10" stroke="#ff0000" marker-end="url(#m)"/><path d="M0 20 L 20 20" stroke="#00ff00" marker-end="url(#m)"/>"##
+    )));
+    let c = all_circles(&i);
+    let colors: Vec<_> = c.iter().map(|x| paint_rgb(&x.0)).collect();
+    assert_eq!(colors, vec![(0, 255, 0), (255, 0, 0), (0, 255, 0)]);
+}
+
+#[test]
+fn a_marker_without_context_paint_is_still_shared() {
+    let i = imp(&doc(
+        r##"<defs><marker id="m" markerWidth="4" markerHeight="4" refX="2" refY="2" markerUnits="userSpaceOnUse"><circle cx="2" cy="2" r="2" fill="#123456"/></marker></defs>
+        <path d="M0 0 L 20 0" stroke="#00ff00" marker-end="url(#m)"/><path d="M0 10 L 20 10" stroke="#ff0000" marker-end="url(#m)"/>"##,
+    ));
+    let colors: Vec<_> = all_circles(&i).iter().map(|x| paint_rgb(&x.0)).collect();
+    assert_eq!(colors, vec![(0x12, 0x34, 0x56), (0x12, 0x34, 0x56)]);
+    assert_eq!(i.warnings.len(), 0);
+}
+
+#[test]
+fn a_marker_in_a_use_sees_the_marked_shape_not_the_use() {
+    let i = imp(&doc(&format!(
+        r##"{CTX_MARKER}<defs><path id="p" d="M0 0 L 20 0" stroke="#0000ff" marker-end="url(#m)"/></defs><use href="#p" stroke="#ff0000"/>"##
+    )));
+    // The path sets its own stroke, which is what the marker is for.
+    assert_eq!(paint_rgb(&all_circles(&i)[0].0), (0, 0, 255));
+}
+
+#[test]
+fn context_paint_without_a_context_is_reported_and_painted_as_none() {
+    let i = imp(&doc(r##"<circle r="3" fill="context-fill"/>"##));
+    assert!(has_warning(&i, "no context"), "{:?}", i.warnings);
+    assert_eq!(all_circles(&i)[0].0, Some(Paint::None));
+}
+
+// ── SVG images ───────────────────────────────────────────────────────────────
+
+fn svg_uri(svg: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg))
+}
+
+const INNER_50: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect width="50" height="50" fill="#f00"/></svg>"##;
+const INNER_WIDE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="25"><rect width="50" height="25" fill="#f00"/></svg>"##;
+
+fn image_doc(inner: &str, attrs: &str) -> Imported {
+    imp(&doc(&format!(r##"<image {attrs} href="{}"/>"##, svg_uri(inner))))
+}
+
+#[test]
+fn an_svg_image_is_imported_and_placed_in_its_box() {
+    let i = image_doc(INNER_50, r#"x="10" y="20" width="100" height="100""#);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // The 50 by 50 canvas is scaled to 100 by 100 and moved to (10,20).
+    assert!(near(shape_point(&i, 0.0, 0.0, 0.0), (10.0, 20.0)));
+    assert!(near(shape_point(&i, 0.0, 50.0, 50.0), (110.0, 120.0)));
+    assert!(near(shape_point(&i, 0.0, 25.0, 25.0), (60.0, 70.0)));
+}
+
+#[test]
+fn a_missing_size_comes_from_the_inner_canvas() {
+    let i = image_doc(INNER_WIDE, r#"x="5" y="5""#);
+    assert!(near(shape_point(&i, 0.0, 50.0, 25.0), (55.0, 30.0)), "natural size 50 by 25");
+    let only_w = image_doc(INNER_WIDE, r#"width="100""#);
+    assert!(near(shape_point(&only_w, 0.0, 50.0, 25.0), (100.0, 50.0)), "height follows the ratio");
+}
+
+#[test]
+fn preserve_aspect_ratio_applies_to_svg_images() {
+    // A 50 by 25 canvas in a 100 by 100 box.
+    let meet = image_doc(INNER_WIDE, r#"width="100" height="100""#);
+    assert!(near(shape_point(&meet, 0.0, 0.0, 0.0), (0.0, 25.0)), "centred: {:?}", shape_point(&meet, 0.0, 0.0, 0.0));
+    assert!(near(shape_point(&meet, 0.0, 50.0, 25.0), (100.0, 75.0)));
+    let min = image_doc(INNER_WIDE, r#"width="100" height="100" preserveAspectRatio="xMinYMin meet""#);
+    assert!(near(shape_point(&min, 0.0, 0.0, 0.0), (0.0, 0.0)));
+    let max = image_doc(INNER_WIDE, r#"width="100" height="100" preserveAspectRatio="xMaxYMax meet""#);
+    assert!(near(shape_point(&max, 0.0, 0.0, 0.0), (0.0, 50.0)));
+    let none = image_doc(INNER_WIDE, r#"width="100" height="100" preserveAspectRatio="none""#);
+    assert!(near(shape_point(&none, 0.0, 50.0, 25.0), (100.0, 100.0)), "stretched to the box");
+    let slice = image_doc(INNER_WIDE, r#"width="100" height="100" preserveAspectRatio="xMidYMid slice""#);
+    assert!(near(shape_point(&slice, 0.0, 0.0, 0.0), (-50.0, 0.0)), "scaled by 4 and centred: {:?}", shape_point(&slice, 0.0, 0.0, 0.0));
+    assert!(has_clip(&slice.scene.elements[0]), "the part outside the box is cut off");
+    assert!(!has_clip(&meet.scene.elements[0]), "a meet that fits needs no clip");
+}
+
+fn has_clip(el: &Element) -> bool {
+    match el {
+        Element::Layer(l) => l.clip_path.is_some() || l.children.iter().any(has_clip),
+        Element::Group(g) => g.children.iter().any(has_clip),
+        _ => false,
+    }
+}
+
+#[test]
+fn what_an_svg_image_draws_outside_its_canvas_is_cut_off() {
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect x="-20" width="60" height="10" fill="#f00"/></svg>"##;
+    let i = image_doc(inner, r#"width="10" height="10""#);
+    assert!(has_clip(&i.scene.elements[0]));
+    let contained = image_doc(INNER_50, r#"width="50" height="50""#);
+    assert!(!has_clip(&contained.scene.elements[0]), "nothing to cut off, so no clip");
+}
+
+#[test]
+fn opacity_and_transform_on_an_svg_image_apply_to_the_whole_picture() {
+    let i = image_doc(INNER_50, r#"width="50" height="50" opacity=".5" transform="translate(100 0)""#);
+    let Element::Layer(l) = &i.scene.elements[0] else { panic!("{:?}", i.scene.elements[0]) };
+    assert_eq!(l.opacity, 0.5);
+    assert!(near(shape_point(&i, 0.0, 0.0, 0.0), (100.0, 0.0)));
+}
+
+#[test]
+fn an_svg_image_keeps_its_ids_styles_and_gradients_to_itself() {
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>rect { fill: #00ff00 }</style><defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs><rect id="r" width="10" height="10"/><circle id="c" cx="5" cy="5" r="2" fill="url(#g)"/></svg>"##;
+    let i = imp(&doc(&format!(
+        r##"<style>rect {{ fill: #ff0000 }}</style><linearGradient id="g"><stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+        <image width="10" height="10" href="{}"/><rect id="r" width="5" height="5" style="fill: url(#g)"/>"##,
+        svg_uri(inner)
+    )));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // The inner rect and circle sit directly in the scene, then the outer rect.
+    let Element::Rect(inner_rect) = &i.scene.elements[0] else { panic!("{:?}", i.scene.elements[0]) };
+    assert_eq!(inner_rect.style.fill, Some(Paint::Color(Color::rgb(0, 255, 0))), "the image's own style applies inside it");
+    let Element::Circle(inner_circle) = &i.scene.elements[1] else { panic!("{:?}", i.scene.elements[1]) };
+    let outer = rect(&i.scene.elements[2]);
+    let (Some(Paint::Ref(inner_ref)), Some(Paint::Ref(outer_ref))) = (&inner_circle.style.fill, &outer.style.fill) else { panic!("{:?} {:?}", inner_circle.style.fill, outer.style.fill) };
+    assert_ne!(inner_ref, outer_ref, "both documents call their gradient g, so one of them got another id");
+    let stops_of = |reference: &str| -> Vec<u8> {
+        let id = reference.trim_start_matches("url(#").trim_end_matches(')');
+        match i.scene.defs.iter().find(|d| d.id() == id) {
+            Some(msx_ast::Def::LinearGradient(g)) => g.stops.iter().map(|s| s.color.r).collect(),
+            other => panic!("no gradient {id}: {other:?}"),
+        }
+    };
+    assert_eq!(stops_of(inner_ref), vec![255, 0], "the circle got the inner gradient, red to blue");
+    assert_eq!(stops_of(outer_ref), vec![0, 255], "the outer rect still has its own, black to white");
+    assert_eq!(i.scene.defs.len(), 2);
+    let ids: Vec<&str> = i.scene.defs.iter().map(|d| d.id()).collect();
+    assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), ids.len(), "{ids:?}");
+}
+
+#[test]
+fn warnings_of_an_svg_image_are_reported_with_the_image() {
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect></svg>"##;
+    let i = image_doc(inner, r#"id="pic" width="10" height="10""#);
+    assert!(i.warnings.iter().any(|w| w.contains("<image id=\"pic\">") && w.contains("<animate>")), "{:?}", i.warnings);
+}
+
+#[test]
+fn an_svg_image_can_hold_a_bitmap() {
+    let inner = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><image width="20" height="20" href="{}"/></svg>"##, png_uri(4, 4));
+    let i = image_doc(&inner, r#"width="40" height="40""#);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    fn find_image(el: &Element) -> Option<&msx_ast::Image> {
+        match el {
+            Element::Image(im) => Some(im),
+            Element::Group(g) => g.children.iter().find_map(find_image),
+            Element::Layer(l) => l.children.iter().find_map(find_image),
+            _ => None,
+        }
+    }
+    assert!(find_image(&i.scene.elements[0]).is_some());
+}
+
+#[test]
+fn a_document_that_cannot_be_read_is_reported_and_skipped() {
+    let i = imp(&doc(&format!(r##"<image width="10" height="10" href="{}"/><rect width="5" height="5"/>"##, svg_uri("<svg><oops></svg>"))));
+    assert!(has_warning(&i, "could not be read"), "{:?}", i.warnings);
+    assert_eq!(i.scene.elements.len(), 1, "only the rect is left");
+    let not_svg = imp(&doc(&format!(r##"<image width="10" height="10" href="{}"/>"##, svg_uri("<html xmlns='http://www.w3.org/1999/xhtml'/>"))));
+    assert!(not_svg.scene.elements.is_empty());
+}
+
+static IMG_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let n = IMG_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("msx-svgimg-{}-{tag}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn an_external_svg_image_is_read_from_the_base_directory_and_reads_its_own_files_from_its_folder() {
+    let dir = temp_dir("ext");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/pic.png"), raster::tests_support::fake_png(4, 4)).unwrap();
+    std::fs::write(dir.join("sub/inner.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#f00"/><image width="20" height="20" href="pic.png"/></svg>"##).unwrap();
+    let outer = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><image x="10" y="10" width="40" height="40" href="sub/inner.svg"/></svg>"##;
+    let i = import_svg_with(outer, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(shape_point(&i, 0.0, 20.0, 20.0), (50.0, 50.0)));
+    fn embedded(el: &Element) -> bool {
+        match el {
+            Element::Image(im) => matches!(im.source, msx_ast::MediaSource::Embedded(_)),
+            Element::Group(g) => g.children.iter().any(embedded),
+            Element::Layer(l) => l.children.iter().any(embedded),
+            _ => false,
+        }
+    }
+    assert!(i.scene.elements.iter().any(embedded), "the bitmap next to the inner file was read and embedded");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_svg_image_that_embeds_itself_is_skipped_at_the_first_repeat() {
+    let dir = temp_dir("rec");
+    std::fs::write(dir.join("a.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/><image width="10" height="10" href="a.svg"/></svg>"##).unwrap();
+    let outer = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="a.svg"/></svg>"##;
+    let i = import_svg_with(outer, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert!(i.warnings.iter().any(|w| w.contains("already contains it")), "{:?}", i.warnings);
+    assert_eq!(i.scene.elements.len(), 1, "a.svg is drawn once, without the copy of itself");
+    // The document that is the top level is part of the chain too.
+    std::fs::write(dir.join("top.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="b.svg"/></svg>"##).unwrap();
+    std::fs::write(dir.join("b.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="4" height="4"/><image width="10" height="10" href="top.svg"/></svg>"##).unwrap();
+    let top = std::fs::read_to_string(dir.join("top.svg")).unwrap();
+    let j = import_svg_with(&top, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert!(j.warnings.iter().any(|w| w.contains("already contains it")), "{:?}", j.warnings);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_long_chain_of_different_svg_images_stops_at_the_depth_limit() {
+    let dir = temp_dir("chain");
+    for n in 0..8 {
+        let next = if n < 7 { format!(r##"<image width="10" height="10" href="f{}.svg"/>"##, n + 1) } else { String::new() };
+        std::fs::write(dir.join(format!("f{n}.svg")), format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="{}" height="1"/>{next}</svg>"##, n + 1)).unwrap();
+    }
+    let outer = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="f0.svg"/></svg>"##;
+    let i = import_svg_with(outer, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert!(i.warnings.iter().any(|w| w.contains("nested") && w.contains("deep")), "{:?}", i.warnings);
+    assert_eq!(i.scene.elements.len(), MAX_IMAGE_DEPTH, "{:?}", i.scene.elements.len());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_data_uri_svg_has_no_directory_to_read_files_from() {
+    let dir = temp_dir("data");
+    std::fs::write(dir.join("pic.png"), raster::tests_support::fake_png(4, 4)).unwrap();
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="pic.png"/></svg>"##;
+    let outer = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="{}"/></svg>"##, svg_uri(inner));
+    let i = import_svg_with(&outer, &ImportOptions { base_dir: Some(dir.clone()) }).unwrap();
+    assert!(i.warnings.iter().any(|w| w.contains("pic.png") && w.contains("no base directory")), "{:?}", i.warnings);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_inner_gradient_is_renamed_when_the_outer_id_is_already_taken() {
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs><circle cx="5" cy="5" r="4" fill="url(#g)"/></svg>"##;
+    let i = imp(&doc(&format!(
+        r##"<linearGradient id="g"><stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+        <rect id="r" width="5" height="5" fill="url(#g)"/><image width="10" height="10" href="{}"/>"##,
+        svg_uri(inner)
+    )));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let outer = rect(&i.scene.elements[0]);
+    let Element::Circle(c) = &i.scene.elements[1] else { panic!("{:?}", i.scene.elements[1]) };
+    let (Some(Paint::Ref(o)), Some(Paint::Ref(n))) = (&outer.style.fill, &c.style.fill) else { panic!() };
+    assert_eq!(o, "url(#g)");
+    assert_ne!(n, "url(#g)", "the inner gradient was moved to a free id: {n}");
+    let first_stop = |reference: &str| match i.scene.defs.iter().find(|d| d.id() == reference.trim_start_matches("url(#").trim_end_matches(')')) {
+        Some(msx_ast::Def::LinearGradient(g)) => g.stops[0].color.r,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((first_stop(o), first_stop(n)), (0, 255));
 }

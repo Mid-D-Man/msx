@@ -32,6 +32,10 @@ pub enum PaintSpec {
     /// `currentColor`, resolved against the element's `color` when used.
     Current,
     Color(Color),
+    /// `context-fill` and `context-stroke`: the paint of the element that a
+    /// `use` or a marker is drawn for.
+    ContextFill,
+    ContextStroke,
     /// `url(#id)` with an optional fallback: `Some(None)` is a fallback of
     /// `none`. `fallback_current` is a fallback of `currentColor`.
     Url { id: String, fallback: Option<Option<Color>>, fallback_current: bool },
@@ -107,7 +111,8 @@ pub fn parse_paint(v: &str) -> Option<PaintSpec> {
     match lower.as_str() {
         "none" => return Some(PaintSpec::None),
         "currentcolor" => return Some(PaintSpec::Current),
-        "context-fill" | "context-stroke" => return Some(PaintSpec::None),
+        "context-fill" => return Some(PaintSpec::ContextFill),
+        "context-stroke" => return Some(PaintSpec::ContextStroke),
         _ => {}
     }
     if lower.starts_with("url(") {

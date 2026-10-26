@@ -568,25 +568,122 @@ pub struct Decl {
     pub important: bool,
 }
 
-/// A compound selector: optional type, optional id, any number of classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttrOp {
+    Exists,
+    Equals,
+    Includes,
+    Dash,
+    Prefix,
+    Suffix,
+    Substring,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct Selector {
+struct AttrSel {
+    name: String,
+    op: AttrOp,
+    value: String,
+}
+
+impl AttrSel {
+    fn matches(&self, node: &roxmltree::Node) -> bool {
+        let Some(have) = node.attribute(self.name.as_str()) else { return false };
+        let want = self.value.as_str();
+        match self.op {
+            AttrOp::Exists => true,
+            AttrOp::Equals => have == want,
+            AttrOp::Includes => have.split_whitespace().any(|w| w == want),
+            AttrOp::Dash => have == want || have.strip_prefix(want).is_some_and(|r| r.starts_with('-')),
+            AttrOp::Prefix => !want.is_empty() && have.starts_with(want),
+            AttrOp::Suffix => !want.is_empty() && have.ends_with(want),
+            AttrOp::Substring => !want.is_empty() && have.contains(want),
+        }
+    }
+}
+
+/// A compound selector: optional type, optional id, classes, attribute
+/// selectors and `:first-child`.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    attrs: Vec<AttrSel>,
+    first_child: bool,
+}
+
+impl Compound {
+    fn matches(&self, node: &roxmltree::Node) -> bool {
+        node.is_element()
+            && self.tag.as_deref().is_none_or(|t| t == node.tag_name().name())
+            && self.id.as_deref().is_none_or(|want| node.attribute("id") == Some(want))
+            && (self.classes.is_empty() || {
+                let have: Vec<&str> = node.attribute("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+                self.classes.iter().all(|c| have.contains(&c.as_str()))
+            })
+            && self.attrs.iter().all(|a| a.matches(node))
+            && (!self.first_child || !node.prev_siblings().skip(1).any(|n| n.is_element()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    Descendant,
+    Child,
+}
+
+/// A complex selector: compounds joined by descendant or child combinators.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Selector {
+    /// Left to right. At least one.
+    compounds: Vec<Compound>,
+    /// `combinators[i]` joins `compounds[i]` and `compounds[i + 1]`.
+    combinators: Vec<Combinator>,
 }
 
 impl Selector {
-    /// `(ids, classes, types)`, compared lexicographically.
+    /// `(ids, classes plus attributes plus pseudo-classes, types)` summed over
+    /// the compounds and compared lexicographically.
     pub fn specificity(&self) -> (u32, u32, u32) {
-        (self.id.is_some() as u32, self.classes.len() as u32, self.tag.is_some() as u32)
+        self.compounds.iter().fold((0, 0, 0), |(a, b, c), k| {
+            (a + k.id.is_some() as u32, b + (k.classes.len() + k.attrs.len()) as u32 + k.first_child as u32, c + k.tag.is_some() as u32)
+        })
     }
 
-    pub fn matches(&self, tag: &str, id: Option<&str>, classes: &[&str]) -> bool {
-        self.tag.as_deref().is_none_or(|t| t == tag)
-            && self.id.as_deref().is_none_or(|want| id == Some(want))
-            && self.classes.iter().all(|c| classes.contains(&c.as_str()))
+    /// Whether the selector matches `node`, looking at its ancestors and
+    /// previous siblings where the selector asks for them.
+    pub fn matches_node(&self, node: &roxmltree::Node) -> bool {
+        self.matches_from(self.compounds.len() - 1, node)
     }
+
+    fn matches_from(&self, idx: usize, node: &roxmltree::Node) -> bool {
+        if !self.compounds[idx].matches(node) {
+            return false;
+        }
+        if idx == 0 {
+            return true;
+        }
+        match self.combinators[idx - 1] {
+            Combinator::Child => node.parent().is_some_and(|p| self.matches_from(idx - 1, &p)),
+            Combinator::Descendant => node.ancestors().skip(1).any(|a| self.matches_from(idx - 1, &a)),
+        }
+    }
+
+    /// The last compound only, from the parts a plain element name, id and
+    /// class list carry. Ancestors and attributes are not looked at.
+    #[cfg(test)]
+    pub fn matches(&self, tag: &str, id: Option<&str>, classes: &[&str]) -> bool {
+        let k = &self.compounds[self.compounds.len() - 1];
+        k.tag.as_deref().is_none_or(|t| t == tag) && k.id.as_deref().is_none_or(|want| id == Some(want)) && k.classes.iter().all(|c| classes.contains(&c.as_str()))
+    }
+}
+
+/// One stop of an `@keyframes` rule: an offset in `0..=1` and its declarations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframeStop {
+    pub offset: f64,
+    pub decls: Vec<Decl>,
 }
 
 #[derive(Debug, Default)]
@@ -595,6 +692,9 @@ pub struct Stylesheet {
     pub rules: Vec<(Selector, Vec<Decl>, usize)>,
     /// Selectors this importer cannot match, for a warning.
     pub unsupported: Vec<String>,
+    /// `@keyframes` rules by name, stops sorted by offset. A later rule of the
+    /// same name replaces an earlier one.
+    pub keyframes: std::collections::HashMap<String, Vec<KeyframeStop>>,
 }
 
 fn strip_comments(s: &str) -> String {
@@ -652,37 +752,160 @@ pub fn parse_declarations(body: &str) -> Vec<Decl> {
         .collect()
 }
 
-fn parse_selector(text: &str) -> Option<Selector> {
-    let t = text.trim();
-    if t.is_empty() {
-        return None;
-    }
-    let ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-    let mut sel = Selector { tag: None, id: None, classes: Vec::new() };
-    let mut rest = t;
-    let tag_end = rest.find(['.', '#']).unwrap_or(rest.len());
+fn is_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// One attribute selector, the text between the brackets.
+fn parse_attr_selector(inner: &str) -> Option<AttrSel> {
+    let inner = inner.trim();
+    let Some(eq) = inner.find('=') else {
+        return is_ident(inner).then(|| AttrSel { name: inner.to_string(), op: AttrOp::Exists, value: String::new() });
+    };
+    let (op, name_end) = match inner[..eq].chars().last() {
+        Some('~') => (AttrOp::Includes, eq - 1),
+        Some('|') => (AttrOp::Dash, eq - 1),
+        Some('^') => (AttrOp::Prefix, eq - 1),
+        Some('$') => (AttrOp::Suffix, eq - 1),
+        Some('*') => (AttrOp::Substring, eq - 1),
+        _ => (AttrOp::Equals, eq),
+    };
+    let name = inner[..name_end].trim();
+    let raw = inner[eq + 1..].trim();
+    let value = match raw.chars().next() {
+        Some(q @ ('"' | '\'')) => raw.strip_prefix(q)?.strip_suffix(q)?,
+        _ if raw.contains(char::is_whitespace) => return None,
+        _ => raw,
+    };
+    (is_ident(name) && !value.contains(['"', '\''])).then(|| AttrSel { name: name.to_string(), op, value: value.to_string() })
+}
+
+fn parse_compound(text: &str) -> Option<Compound> {
+    let mut k = Compound::default();
+    let mut rest = text;
+    let tag_end = rest.find(['.', '#', '[', ':']).unwrap_or(rest.len());
     let tag = &rest[..tag_end];
     if tag == "*" {
-    } else if ident(tag) {
-        sel.tag = Some(tag.to_string());
+    } else if is_ident(tag) {
+        k.tag = Some(tag.to_string());
     } else if !tag.is_empty() {
         return None;
     }
     rest = &rest[tag_end..];
     while !rest.is_empty() {
         let kind = rest.as_bytes()[0];
-        let end = rest[1..].find(['.', '#']).map(|i| i + 1).unwrap_or(rest.len());
-        let name = &rest[1..end];
-        if !ident(name) {
-            return None;
+        if kind == b'[' {
+            let close = rest.find(']')?;
+            k.attrs.push(parse_attr_selector(&rest[1..close])?);
+            rest = &rest[close + 1..];
+            continue;
         }
+        let end = rest[1..].find(['.', '#', '[', ':']).map(|i| i + 1).unwrap_or(rest.len());
+        let name = &rest[1..end];
         match kind {
-            b'.' => sel.classes.push(name.to_string()),
-            _ => sel.id = Some(name.to_string()),
+            b'.' if is_ident(name) => k.classes.push(name.to_string()),
+            b'#' if is_ident(name) => k.id = Some(name.to_string()),
+            b':' if name == "first-child" => k.first_child = true,
+            _ => return None,
         }
         rest = &rest[end..];
     }
-    Some(sel)
+    Some(k)
+}
+
+/// A selector of compounds joined by whitespace (descendant) or `>` (child).
+/// Sibling combinators, other pseudo-classes and pseudo-elements are not supported.
+fn parse_selector(text: &str) -> Option<Selector> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let mut compounds = Vec::new();
+    let mut combinators = Vec::new();
+    let mut cur = String::new();
+    let mut sep: Option<Combinator> = None;
+    let mut in_bracket = false;
+    let mut quote: Option<char> = None;
+    let flush = |cur: &mut String, sep: &mut Option<Combinator>, compounds: &mut Vec<Compound>, combinators: &mut Vec<Combinator>| -> Option<()> {
+        if cur.is_empty() {
+            return Some(());
+        }
+        if !compounds.is_empty() {
+            combinators.push(sep.take().unwrap_or(Combinator::Descendant));
+        }
+        compounds.push(parse_compound(cur)?);
+        cur.clear();
+        *sep = None;
+        Some(())
+    };
+    for c in t.chars() {
+        if in_bracket {
+            cur.push(c);
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (None, '"') | (None, '\'') => quote = Some(c),
+                (None, ']') => in_bracket = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '[' => {
+                in_bracket = true;
+                cur.push(c);
+            }
+            '>' => {
+                if cur.is_empty() && sep == Some(Combinator::Child) {
+                    return None;
+                }
+                flush(&mut cur, &mut sep, &mut compounds, &mut combinators)?;
+                if compounds.is_empty() {
+                    return None;
+                }
+                sep = Some(Combinator::Child);
+            }
+            '+' | '~' => return None,
+            c if c.is_whitespace() => {
+                flush(&mut cur, &mut sep, &mut compounds, &mut combinators)?;
+                if !compounds.is_empty() && sep.is_none() {
+                    sep = Some(Combinator::Descendant);
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    flush(&mut cur, &mut sep, &mut compounds, &mut combinators)?;
+    // A dangling `>` has no compound after it.
+    if compounds.is_empty() || sep == Some(Combinator::Child) {
+        return None;
+    }
+    Some(Selector { compounds, combinators })
+}
+
+/// The stops of an `@keyframes` body: `from`, `to` and percentages, in lists.
+fn parse_keyframe_stops(body: &str) -> Vec<KeyframeStop> {
+    let mut stops = Vec::new();
+    let mut rest = body;
+    loop {
+        rest = rest.trim_start();
+        let Some(open) = rest.find('{') else { break };
+        let Some(close) = rest[open..].find('}') else { break };
+        let decls = parse_declarations(&rest[open + 1..open + close]);
+        for sel in rest[..open].split(',') {
+            let offset = match sel.trim().to_ascii_lowercase().as_str() {
+                "from" => Some(0.0),
+                "to" => Some(1.0),
+                other => other.strip_suffix('%').and_then(|p| p.trim().parse::<f64>().ok()).filter(|p| (0.0..=100.0).contains(p)).map(|p| p / 100.0),
+            };
+            if let Some(offset) = offset {
+                stops.push(KeyframeStop { offset, decls: decls.clone() });
+            }
+        }
+        rest = &rest[open + close + 1..];
+    }
+    // A stable sort keeps source order among equal offsets, so the later one wins.
+    stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    stops
 }
 
 /// Add the rules of one `<style>` element's text to `sheet`.
@@ -695,6 +918,34 @@ pub fn parse_stylesheet(css: &str, sheet: &mut Stylesheet) {
             break;
         }
         if rest.starts_with('@') {
+            let keyword_end = rest.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(rest.len());
+            let keyword = rest[..keyword_end].to_ascii_lowercase();
+            if keyword == "@keyframes" || keyword == "@-webkit-keyframes" {
+                if let Some(open) = rest.find('{') {
+                    let mut depth = 0;
+                    let mut end = None;
+                    for (i, c) in rest[open..].char_indices() {
+                        match c {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(open + i);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let end = end.unwrap_or(rest.len());
+                    let name = rest[keyword_end..open].trim().trim_matches(['"', '\'']).to_string();
+                    if !name.is_empty() {
+                        sheet.keyframes.insert(name, parse_keyframe_stops(&rest[open + 1..end]));
+                    }
+                    rest = rest.get(end + 1..).unwrap_or("");
+                    continue;
+                }
+            }
             // Skip an at-rule: either up to `;` or a balanced `{...}` block.
             let semi = rest.find(';');
             let brace = rest.find('{');
@@ -744,6 +995,35 @@ pub fn parse_stylesheet(css: &str, sheet: &mut Stylesheet) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_are_collected_by_name_with_sorted_stops() {
+        let mut sheet = Stylesheet::default();
+        parse_stylesheet(
+            "@keyframes spin { to { transform: rotate(360deg) } from { transform: rotate(0deg); opacity: 1 } }
+             @-webkit-keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .2 } }
+             @media (min-width: 1px) { .x { fill: red } }
+             .a { animation: spin 2s infinite }",
+            &mut sheet,
+        );
+        let spin = &sheet.keyframes["spin"];
+        assert_eq!(spin.iter().map(|s| s.offset).collect::<Vec<_>>(), vec![0.0, 1.0]);
+        assert_eq!(spin[0].decls.len(), 2);
+        let pulse = &sheet.keyframes["pulse"];
+        assert_eq!(pulse.iter().map(|s| s.offset).collect::<Vec<_>>(), vec![0.0, 0.5, 1.0]);
+        assert_eq!(pulse[1].decls[0].value, ".2");
+        assert_eq!(sheet.rules.len(), 1, "the rule after the at-rules is still read");
+        assert!(sheet.unsupported.is_empty());
+    }
+
+    #[test]
+    fn a_later_keyframes_rule_replaces_an_earlier_one_and_bad_stops_are_dropped() {
+        let mut sheet = Stylesheet::default();
+        parse_stylesheet("@keyframes k { from { opacity: 0 } to { opacity: 1 } } @keyframes k { 50%, 150%, bogus { opacity: .5 } }", &mut sheet);
+        let k = &sheet.keyframes["k"];
+        assert_eq!(k.len(), 1);
+        assert_eq!(k[0].offset, 0.5);
+    }
 
     #[test]
     fn numbers_follow_the_svg_grammar() {
@@ -891,8 +1171,8 @@ mod tests {
             "@import url(x.css);\n.a, #b, rect.c.d { fill: red } @media print { .z { fill: blue } } * { stroke: none } g .nested { fill: green } path:hover { fill: pink }",
             &mut sheet,
         );
-        assert_eq!(sheet.rules.len(), 4);
-        assert_eq!(sheet.unsupported, vec!["g .nested".to_string(), "path:hover".to_string()]);
+        assert_eq!(sheet.rules.len(), 5);
+        assert_eq!(sheet.unsupported, vec!["path:hover".to_string()]);
         let (sel, ..) = &sheet.rules[2];
         assert!(sel.matches("rect", None, &["c", "d", "x"]));
         assert!(!sel.matches("rect", None, &["c"]));
@@ -904,5 +1184,86 @@ mod tests {
         let (star, ..) = &sheet.rules[3];
         assert!(star.matches("g", None, &[]));
         assert_eq!(star.specificity(), (0, 0, 0));
+        let (nested, ..) = &sheet.rules[4];
+        assert_eq!(nested.specificity(), (0, 1, 1));
+    }
+
+    /// The ids of the elements of `xml` that `selector` matches, in document order.
+    fn matched(xml: &str, selector: &str) -> Vec<String> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sel = parse_selector(selector).unwrap_or_else(|| panic!("{selector} should parse"));
+        doc.descendants().filter(|n| n.is_element() && sel.matches_node(n)).filter_map(|n| n.attribute("id").map(String::from)).collect()
+    }
+
+    const TREE: &str = r#"<svg id="root" xmlns="http://www.w3.org/2000/svg">
+        <g id="g1" class="a b"><g id="g2"><rect id="r1" x="1" lang="en-US"/><rect id="r2" class="k" data-n="foo bar"/></g><rect id="r3"/></g>
+        <rect id="r4" x="2" data-n="foobar"/>
+    </svg>"#;
+
+    #[test]
+    fn child_and_descendant_combinators() {
+        assert_eq!(matched(TREE, "svg > rect"), vec!["r4"]);
+        assert_eq!(matched(TREE, "svg rect"), vec!["r1", "r2", "r3", "r4"]);
+        assert_eq!(matched(TREE, "g > rect"), vec!["r1", "r2", "r3"]);
+        assert_eq!(matched(TREE, "g > g > rect"), vec!["r1", "r2"]);
+        assert_eq!(matched(TREE, "g>g>rect.k"), vec!["r2"]);
+        assert_eq!(matched(TREE, ".a rect"), vec!["r1", "r2", "r3"]);
+        assert_eq!(matched(TREE, "#g1 * rect"), vec!["r1", "r2"]);
+        // Two elements must sit between g#g1 and the rect, which only a deeper tree has.
+        assert_eq!(matched(TREE, "g#g1 *  *  rect"), Vec::<String>::new());
+        let deep = r#"<svg xmlns="http://www.w3.org/2000/svg"><g id="g1"><g id="g2"><g id="g3"><rect id="r"/></g></g></g></svg>"#;
+        assert_eq!(matched(deep, "g#g1 * * rect"), vec!["r"]);
+        assert_eq!(matched(deep, "g#g1 * g * * rect"), Vec::<String>::new());
+        assert_eq!(matched(TREE, "svg g g rect"), vec!["r1", "r2"]);
+    }
+
+    #[test]
+    fn descendant_matching_backtracks() {
+        // The nearest `g` is g2, which has no `g` above it matching `.a > g` only through g1.
+        assert_eq!(matched(TREE, ".a g rect"), vec!["r1", "r2"]);
+        assert_eq!(matched(TREE, "g g > rect"), vec!["r1", "r2"]);
+        assert_eq!(matched(TREE, "g > g rect"), vec!["r1", "r2"]);
+    }
+
+    #[test]
+    fn attribute_selectors() {
+        assert_eq!(matched(TREE, "[x]"), vec!["r1", "r4"]);
+        assert_eq!(matched(TREE, "rect[x]"), vec!["r1", "r4"]);
+        assert_eq!(matched(TREE, "[x=2]"), vec!["r4"]);
+        assert_eq!(matched(TREE, "[x=\"2\"]"), vec!["r4"]);
+        assert_eq!(matched(TREE, "[x='1']"), vec!["r1"]);
+        assert_eq!(matched(TREE, "[data-n~=foo]"), vec!["r2"]);
+        assert_eq!(matched(TREE, "[data-n^=foo]"), vec!["r2", "r4"]);
+        assert_eq!(matched(TREE, "[data-n$=bar]"), vec!["r2", "r4"]);
+        assert_eq!(matched(TREE, "[data-n*=oba]"), vec!["r4"]);
+        assert_eq!(matched(TREE, "[lang|=en]"), vec!["r1"]);
+        assert_eq!(matched(TREE, "[x][lang]"), vec!["r1"]);
+        assert_eq!(matched(TREE, "g > rect[x]"), vec!["r1"]);
+        assert_eq!(matched(TREE, "[data-n^=\"\"]"), Vec::<String>::new(), "an empty prefix matches nothing");
+    }
+
+    #[test]
+    fn first_child() {
+        assert_eq!(matched(TREE, "rect:first-child"), vec!["r1"]);
+        assert_eq!(matched(TREE, "g:first-child"), vec!["g1", "g2"]);
+        assert_eq!(matched(TREE, "g > :first-child"), vec!["g2", "r1"]);
+    }
+
+    #[test]
+    fn specificity_sums_over_the_chain() {
+        let spec = |s: &str| parse_selector(s).unwrap().specificity();
+        assert_eq!(spec("g#g1 * g * * rect"), (1, 0, 3));
+        assert_eq!(spec("g#g1 * * rect"), (1, 0, 2));
+        assert_eq!(spec("svg > rect"), (0, 0, 2));
+        assert_eq!(spec("[x]"), (0, 1, 0));
+        assert_eq!(spec("rect.a[x]:first-child"), (0, 3, 1));
+        assert!(spec("g#g1 * g * * rect") > spec("g#g1 * * rect"));
+    }
+
+    #[test]
+    fn selectors_that_are_not_supported_are_refused_whole() {
+        for bad in ["a + b", "a ~ b", "> a", "a >", "a > > b", "a:hover", "a::before", "a:not(.b)", "[x", "[x=]b", "[=y]", "a[x=y i]", "rect:nth-child(2)", ".", "#", "a..b"] {
+            assert!(parse_selector(bad).is_none(), "{bad}");
+        }
     }
 }

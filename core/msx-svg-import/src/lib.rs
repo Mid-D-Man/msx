@@ -22,6 +22,7 @@
 
 mod anim;
 mod animate;
+mod cssanim;
 mod geom;
 mod markers;
 mod gradient;
@@ -93,6 +94,27 @@ pub fn import_svg(source: &str) -> Result<Imported, ImportError> {
 
 /// Import SVG source text with `options`.
 pub fn import_svg_with(source: &str, options: &ImportOptions) -> Result<Imported, ImportError> {
+    import_at_depth(source, options.base_dir.clone(), 0, Vec::new())
+}
+
+/// Deepest chain of SVG images inside SVG images. A chain of different
+/// documents stops here; a document that is already in the chain is skipped
+/// at its first repeat.
+const MAX_IMAGE_DEPTH: usize = 4;
+/// Largest SVG document taken as an image, in bytes.
+const MAX_IMAGE_SVG_BYTES: usize = 8 * 1024 * 1024;
+
+/// A fingerprint of a document's text, to tell when an image holds a document
+/// that already contains it.
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// `chain` holds the hashes of the documents that this one sits inside.
+fn import_at_depth(source: &str, base_dir: Option<std::path::PathBuf>, depth: usize, mut chain: Vec<u64>) -> Result<Imported, ImportError> {
     // A byte order mark or blank lines before `<?xml` make an XML parser
     // reject the file, and real SVG exports have both.
     let source = source.trim_start_matches('\u{feff}').trim_start();
@@ -103,7 +125,10 @@ pub fn import_svg_with(source: &str, options: &ImportOptions) -> Result<Imported
         return Err(ImportError::NotSvg(format!("the root element is <{}>", root.tag_name().name())));
     }
     let mut imp = Importer::new(&doc);
-    imp.base_dir = options.base_dir.clone();
+    imp.base_dir = base_dir;
+    imp.image_depth = depth;
+    chain.push(text_hash(source));
+    imp.image_chain = chain;
     Ok(imp.run(root))
 }
 
@@ -150,9 +175,101 @@ pub(crate) struct Importer<'a, 'i> {
     /// The element whose own opacity the walk leaves off, because an opacity
     /// animation replaces it.
     skip_opacity: Option<roxmltree::NodeId>,
+    /// The elements whose own fill-opacity or stroke-opacity the walk leaves
+    /// off, for the same reason.
+    skip_fill_opacity: Option<roxmltree::NodeId>,
+    skip_stroke_opacity: Option<roxmltree::NodeId>,
     /// Above zero while mask or marker content is walked: the resolver does
     /// not reach animations there.
     anim_off: usize,
+    /// The elements that `context-fill` and `context-stroke` refer to, the
+    /// innermost last: the `use` being expanded or the shape a marker is for.
+    context: Vec<PaintContext>,
+    /// How many SVG images this document sits inside.
+    image_depth: usize,
+    /// Fingerprints of this document and of the ones it sits inside.
+    image_chain: Vec<u64>,
+    /// Whether any stylesheet rule mentions a context paint.
+    sheet_uses_context: bool,
+    /// Whether a marker's content uses a context paint, by marker id.
+    marker_uses_context: HashMap<String, bool>,
+}
+
+fn set_def_id(def: &mut msx_ast::Def, id: &str) {
+    match def {
+        msx_ast::Def::LinearGradient(g) => g.id = id.to_string(),
+        msx_ast::Def::RadialGradient(g) => g.id = id.to_string(),
+        msx_ast::Def::ConicGradient(g) => g.id = id.to_string(),
+        msx_ast::Def::Shader(g) => g.id = id.to_string(),
+        msx_ast::Def::Audio(g) => g.id = id.to_string(),
+    }
+}
+
+fn remap_style(style: &mut Style, renamed: &HashMap<String, String>) {
+    for paint in [&mut style.fill, &mut style.stroke] {
+        if let Some(Paint::Ref(r)) = paint {
+            if let Some(new) = renamed.get(r.as_str()) {
+                *r = new.clone();
+            }
+        }
+    }
+}
+
+/// Rewrites the `url(#…)` paints of `els` and everything inside them.
+fn remap_refs(els: &mut [Element], renamed: &HashMap<String, String>) {
+    if renamed.is_empty() {
+        return;
+    }
+    for el in els {
+        match el {
+            Element::Rect(e) => remap_style(&mut e.style, renamed),
+            Element::Circle(e) => remap_style(&mut e.style, renamed),
+            Element::Ellipse(e) => remap_style(&mut e.style, renamed),
+            Element::Line(e) => remap_style(&mut e.style, renamed),
+            Element::Polyline(e) | Element::Polygon(e) => remap_style(&mut e.style, renamed),
+            Element::Path(e) => remap_style(&mut e.style, renamed),
+            Element::Text(e) => remap_style(&mut e.style, renamed),
+            Element::Image(e) => remap_style(&mut e.style, renamed),
+            Element::Group(g) => {
+                if let Some(style) = g.style.as_mut() {
+                    remap_style(style, renamed);
+                }
+                remap_refs(&mut g.children, renamed);
+            }
+            Element::Layer(l) => {
+                remap_refs(&mut l.children, renamed);
+                if let Some(clip) = l.clip_path.as_mut() {
+                    remap_refs(clip, renamed);
+                }
+                if let Some(mask) = l.mask.as_mut() {
+                    remap_refs(mask, renamed);
+                }
+            }
+            Element::Use(_) | Element::Sdf(_) | Element::Splat(_) => {}
+        }
+    }
+}
+
+/// What an `<image>` refers to.
+enum Loaded {
+    Raster(msx_ast::MediaSource, Option<(u32, u32)>),
+    Svg { text: String, dir: Option<std::path::PathBuf> },
+}
+
+/// What an `<image>` is drawn from, once it is loaded.
+enum ImageBody {
+    Raster(msx_ast::MediaSource),
+    Svg(Vec<Element>),
+}
+
+/// The paint of the element a context paint refers to.
+#[derive(Debug, Clone, PartialEq)]
+struct PaintContext {
+    fill: PaintSpec,
+    stroke: PaintSpec,
+    fill_opacity: f64,
+    stroke_opacity: f64,
+    color: Color,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -507,7 +624,6 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn new(doc: &'a Document<'i>) -> Self {
         let mut ids = HashMap::new();
         let mut sheet = Stylesheet::default();
-        let mut keyframes = false;
         let mut keep_hidden = false;
         for n in doc.descendants().filter(|n| n.is_element()) {
             if let Some(id) = n.attribute("id") {
@@ -517,7 +633,6 @@ impl<'a, 'i> Importer<'a, 'i> {
                 || (n.tag_name().name() == "mask" && n.attribute("maskUnits").is_none_or(|u| u.trim() != "userSpaceOnUse"));
             if n.tag_name().name() == "style" && n.attribute("type").is_none_or(|t| t.is_empty() || t == "text/css") {
                 let css: String = n.descendants().filter(|c| c.is_text()).filter_map(|c| c.text()).collect();
-                keyframes |= css.contains("@keyframes");
                 parse_stylesheet(&css, &mut sheet);
             }
         }
@@ -546,11 +661,16 @@ impl<'a, 'i> Importer<'a, 'i> {
             next_anim: 0,
             skip_transform: None,
             skip_opacity: None,
+            skip_fill_opacity: None,
+            skip_stroke_opacity: None,
             anim_off: 0,
+            context: Vec::new(),
+            image_depth: 0,
+            image_chain: Vec::new(),
+            sheet_uses_context: false,
+            marker_uses_context: HashMap::new(),
         };
-        if keyframes {
-            imp.warn("CSS @keyframes animations are not supported; the static frame is drawn".to_string());
-        }
+        imp.sheet_uses_context = imp.sheet.rules.iter().any(|(_, decls, _)| decls.iter().any(|d| d.value.contains("context-")));
         let skipped = std::mem::take(&mut imp.sheet.unsupported);
         for s in skipped {
             imp.warn(format!("CSS selector \"{s}\" is not supported and its rule was skipped"));
@@ -575,10 +695,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
         }
 
-        let tag = node.tag_name().name();
-        let id = node.attribute("id");
-        let classes: Vec<&str> = node.attribute("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
-        let mut matched: Vec<_> = self.sheet.rules.iter().filter(|(sel, ..)| sel.matches(tag, id, &classes)).collect();
+        let mut matched: Vec<_> = self.sheet.rules.iter().filter(|(sel, ..)| sel.matches_node(&node)).collect();
         matched.sort_by_key(|(sel, _, order)| (sel.specificity(), *order));
 
         let inline: Vec<Decl> = node.attribute("style").map(parse::parse_declarations).unwrap_or_default();
@@ -603,9 +720,13 @@ impl<'a, 'i> Importer<'a, 'i> {
         if self.clip_mode {
             return;
         }
-        for key in ["animation", "animation-name"] {
-            if props.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
-                self.warn(format!("{} uses a CSS {key}, which is not supported; the static frame is drawn", Self::label(node)));
+        // With @keyframes defined, the element is walked as an animated one and
+        // its animations are reported there. Without any, the name points nowhere.
+        if self.sheet.keyframes.is_empty() {
+            for key in ["animation", "animation-name"] {
+                if props.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
+                    self.warn(format!("{} uses a CSS {key}, but the SVG defines no @keyframes; the static frame is drawn", Self::label(node)));
+                }
             }
         }
         for key in ["filter"] {
@@ -615,10 +736,12 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
         }
-        for key in ["fill", "stroke"] {
-            if let Some(v) = props.get(key) {
-                if v.trim().starts_with("context-") {
-                    self.warn(format!("{} uses {key}: {}, which is not supported; painted as none", Self::label(node), v.trim()));
+        if self.context.is_empty() {
+            for key in ["fill", "stroke"] {
+                if let Some(v) = props.get(key) {
+                    if v.trim().starts_with("context-") {
+                        self.warn(format!("{} uses {key}: {} outside a marker or a use, so there is no context; painted as none", Self::label(node), v.trim()));
+                    }
                 }
             }
         }
@@ -639,7 +762,8 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
         }
-        if let Some(b) = props.get("transform-box") {
+        // An animated element resolves transform-box itself.
+        if let Some(b) = props.get("transform-box").filter(|_| self.skip_transform != Some(node.id())) {
             if !matches!(b.trim(), "view-box" | "") {
                 self.warn(format!("{} uses transform-box: {}, which is not supported; view-box is used", Self::label(node), b.trim()));
             }
@@ -917,6 +1041,14 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         let mut inh = parent.clone();
         apply(&mut inh, &props, self.vp);
+        // An animation of fill-opacity or stroke-opacity replaces the value, so
+        // the layer around the shape carries it and the shape paints at full alpha.
+        if self.skip_fill_opacity == Some(node.id()) {
+            inh.fill_opacity = 1.0;
+        }
+        if self.skip_stroke_opacity == Some(node.id()) {
+            inh.stroke_opacity = 1.0;
+        }
         self.check_unsupported(&node, &props);
         Some((inh, props))
     }
@@ -1053,6 +1185,14 @@ impl<'a, 'i> Importer<'a, 'i> {
         if self.clip_mode || inh.hidden {
             return Vec::new();
         }
+        let ctx = self.context_from(inh);
+        self.context.push(ctx);
+        let out = self.marker_elements_in_context(node, inh, cmds);
+        self.context.pop();
+        out
+    }
+
+    fn marker_elements_in_context(&mut self, node: &Node, inh: &Inh, cmds: &[PathCommand]) -> Vec<Element> {
         let label = Self::label(node);
         let mut defs: [Option<std::rc::Rc<MarkerDef>>; 3] = [None, None, None];
         for (slot, spec) in defs.iter_mut().zip([&inh.marker_start, &inh.marker_mid, &inh.marker_end]) {
@@ -1092,7 +1232,10 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// The marker `id`, built once and then reused. An unusable reference is
     /// reported and the marker is left out.
     fn marker_def(&mut self, label: &str, id: &str) -> Option<std::rc::Rc<MarkerDef>> {
-        if let Some(found) = self.marker_cache.get(id) {
+        // A marker whose content paints with the context is built for each
+        // distinct context. Any other marker is built once.
+        let key = if self.marker_needs_context(id) { format!("{id}\u{0}{:?}", self.context.last()) } else { id.to_string() };
+        if let Some(found) = self.marker_cache.get(&key) {
             return found.clone();
         }
         if self.marker_stack.iter().any(|s| s == id) {
@@ -1114,8 +1257,21 @@ impl<'a, 'i> Importer<'a, 'i> {
         let def = self.build_marker(m).map(std::rc::Rc::new);
         self.marker_stack.pop();
         self.use_stack = outer_uses;
-        self.marker_cache.insert(id.to_string(), def.clone());
+        self.marker_cache.insert(key, def.clone());
         def
+    }
+
+    /// Whether the marker `id` has a context paint anywhere in its content.
+    fn marker_needs_context(&mut self, id: &str) -> bool {
+        if self.sheet_uses_context {
+            return true;
+        }
+        if let Some(known) = self.marker_uses_context.get(id) {
+            return *known;
+        }
+        let uses = self.ids.get(id).is_some_and(|m| m.descendants().filter(|n| n.is_element()).any(|n| n.attributes().any(|a| a.value().contains("context-"))));
+        self.marker_uses_context.insert(id.to_string(), uses);
+        uses
     }
 
     fn build_marker(&mut self, m: Node<'a, 'i>) -> Option<MarkerDef> {
@@ -1188,13 +1344,20 @@ impl<'a, 'i> Importer<'a, 'i> {
         if href.is_empty() {
             return;
         }
-        let Some((source, intrinsic)) = self.load_image(&label, href) else { return };
+        let Some(loaded) = self.load_image(&label, href) else { return };
+        let (body, known) = match loaded {
+            Loaded::Raster(source, size) => (ImageBody::Raster(source), size.map(|(iw, ih)| (f64::from(iw), f64::from(ih)))),
+            Loaded::Svg { text, dir } => {
+                let Some(inner) = self.import_nested_svg(&label, &text, dir) else { return };
+                let size = (inner.scene.canvas.width, inner.scene.canvas.height);
+                (ImageBody::Svg(inner.scene.elements), Some(size))
+            }
+        };
 
         let (fs, vp) = (inh.font_size, self.vp);
         let x = self.length(node, "x", fs, vp.0).unwrap_or(0.0);
         let y = self.length(node, "y", fs, vp.1).unwrap_or(0.0);
         let (w, h) = (self.length(node, "width", fs, vp.0), self.length(node, "height", fs, vp.1));
-        let known = intrinsic.map(|(iw, ih)| (iw as f64, ih as f64));
         // A missing size comes from the image, the other side keeping its ratio.
         let (w, h) = match (w, h, known) {
             (Some(w), Some(h), _) => (w, h),
@@ -1225,17 +1388,86 @@ impl<'a, 'i> Importer<'a, 'i> {
                 self.warn(format!("{label} uses image-rendering: {v}, which is not supported; smooth scaling is used"));
             }
         }
-        let mut image = msx_ast::Image::new(source, ix, iy, iw, ih);
-        image.id = if expanded { None } else { node.attribute("id").map(String::from) };
-        image.transform = self.node_transform(node);
-        image.style = Style { opacity: Some(element_opacity(&props)), ..Style::default() };
-        self.push_leaf(Element::Image(image), Vec::new(), &inh, comp, out);
+        let id = if expanded { None } else { node.attribute("id").map(String::from) };
+        match body {
+            ImageBody::Raster(source) => {
+                let mut image = msx_ast::Image::new(source, ix, iy, iw, ih);
+                image.id = id;
+                image.transform = self.node_transform(node);
+                image.style = Style { opacity: Some(element_opacity(&props)), ..Style::default() };
+                self.push_leaf(Element::Image(image), Vec::new(), &inh, comp, out);
+            }
+            ImageBody::Svg(kids) => {
+                // The inner document is drawn in its own canvas, which is
+                // fitted into the box like a bitmap of that size. What it draws
+                // outside its canvas is cut off.
+                let (cw, ch) = known.unwrap_or((iw, ih));
+                let mut inner = Comp::NONE;
+                if reaches_outside(&kids, (0.0, 0.0, cw, ch)) {
+                    inner.clips.push(vec![plain_rect(0.0, 0.0, cw, ch)]);
+                }
+                let (sx, sy) = (iw / cw, ih / ch);
+                let fit = compose(vec![translate(ix, iy), ((sx - 1.0).abs() > 1e-12 || (sy - 1.0).abs() > 1e-12).then_some(Transform::Scale { x: sx, y: sy })]);
+                let mut placed = Vec::new();
+                self.emit(kids, inner, fit, None, &mut placed);
+                let transform = self.node_transform(node);
+                self.emit(placed, comp, transform, id, out);
+            }
+        }
+    }
+
+    /// Imports an SVG document that an `<image>` holds. Its ids, styles and
+    /// warnings stay its own. A document that nests images too deeply, as one
+    /// that embeds itself does, is reported and skipped.
+    fn import_nested_svg(&mut self, label: &str, text: &str, dir: Option<std::path::PathBuf>) -> Option<Imported> {
+        let source = text.trim_start_matches('\u{feff}').trim_start();
+        if self.image_chain.contains(&text_hash(source)) {
+            self.warn(format!("{label} holds an SVG that already contains it (a recursive image); skipped"));
+            return None;
+        }
+        if self.image_depth >= MAX_IMAGE_DEPTH {
+            self.warn(format!("{label} sits in SVG images nested {MAX_IMAGE_DEPTH} deep; skipped"));
+            return None;
+        }
+        if text.len() > MAX_IMAGE_SVG_BYTES {
+            self.warn(format!("{label} holds an SVG larger than {MAX_IMAGE_SVG_BYTES} bytes; skipped"));
+            return None;
+        }
+        match import_at_depth(text, dir, self.image_depth + 1, self.image_chain.clone()) {
+            Ok(mut inner) => {
+                for w in &inner.warnings {
+                    self.warn(format!("{label}: {w}"));
+                }
+                if !inner.scene.animations.is_empty() {
+                    self.warn(format!("{label} holds an animated SVG; its animation is not imported and the static frame is drawn"));
+                }
+                // The inner document's gradients move into this scene under
+                // ids that nothing here uses, and its references follow them.
+                let mut renamed = HashMap::new();
+                for mut def in std::mem::take(&mut inner.scene.defs) {
+                    let old = def.id().to_string();
+                    let new = self.fresh_gradient_id(&old);
+                    set_def_id(&mut def, &new);
+                    renamed.insert(format!("url(#{old})"), format!("url(#{new})"));
+                    self.defs.push(def);
+                }
+                remap_refs(&mut inner.scene.elements, &renamed);
+                Some(inner)
+            }
+            Err(e) => {
+                self.warn(format!("{label} holds an SVG that could not be read ({e}); skipped"));
+                None
+            }
+        }
     }
 
     /// The embedded bytes or the file reference for `href`, and the size in
-    /// pixels when it is known. Only PNG and JPEG can be held; anything else is
-    /// reported and skipped.
-    fn load_image(&mut self, label: &str, href: &str) -> Option<(msx_ast::MediaSource, Option<(u32, u32)>)> {
+    /// pixels when it is known, or the text of an SVG document. Only PNG, JPEG
+    /// and SVG can be held; anything else is reported and skipped.
+    fn load_image(&mut self, label: &str, href: &str) -> Option<Loaded> {
+        // The directory that references inside an SVG image are read from: none
+        // for a data URI, the folder of the file for a file.
+        let mut svg_dir: Option<std::path::PathBuf> = None;
         let bytes = match raster::decode_data_uri(href) {
             Some(Ok(bytes)) => bytes,
             Some(Err(e)) => {
@@ -1252,7 +1484,10 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let path = String::from_utf8_lossy(&raster::percent_decode(path)).into_owned();
                 match &self.base_dir {
                     Some(dir) => match std::fs::read(dir.join(&path)) {
-                        Ok(bytes) => bytes,
+                        Ok(bytes) => {
+                            svg_dir = dir.join(&path).parent().map(std::path::Path::to_path_buf);
+                            bytes
+                        }
                         Err(e) => {
                             self.warn(format!("{label} could not read {path} ({e}); skipped"));
                             return None;
@@ -1260,7 +1495,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     },
                     None => {
                         self.warn(format!("{label} refers to the file {path}, which is kept as a path and not embedded because no base directory is known; its size is unknown"));
-                        return Some((msx_ast::MediaSource::FileRef(path), None));
+                        return Some(Loaded::Raster(msx_ast::MediaSource::FileRef(path), None));
                     }
                 }
             }
@@ -1268,8 +1503,9 @@ impl<'a, 'i> Importer<'a, 'i> {
         match raster::sniff(&bytes) {
             f @ (raster::Format::Png | raster::Format::Jpeg) => {
                 let size = raster::dimensions(&bytes, f);
-                Some((msx_ast::MediaSource::Embedded(bytes), size))
+                Some(Loaded::Raster(msx_ast::MediaSource::Embedded(bytes), size))
             }
+            raster::Format::Svg => Some(Loaded::Svg { text: String::from_utf8_lossy(&bytes).into_owned(), dir: svg_dir }),
             raster::Format::Other(name) => {
                 self.warn(format!("{label} holds an image MSX cannot embed ({name}; only PNG and JPEG); skipped"));
                 None
@@ -1357,11 +1593,14 @@ impl<'a, 'i> Importer<'a, 'i> {
         let mut kids = Vec::new();
         self.depth += 1;
         self.use_stack.push(target_id.to_string());
+        let ctx = self.context_from(&inh);
+        self.context.push(ctx);
         match target.tag_name().name() {
             "symbol" => self.walk_symbol(target, &inh, size, &mut kids),
             "svg" => self.walk_nested_svg(target, &inh, (use_w, use_h), &mut kids),
             _ => self.walk(target, &inh, &mut kids, true),
         }
+        self.context.pop();
         self.use_stack.pop();
         self.depth -= 1;
 
@@ -1597,8 +1836,31 @@ impl<'a, 'i> Importer<'a, 'i> {
         st
     }
 
+    /// The context an element offers to what it contains. A paint that is
+    /// itself a context paint takes the paint of the enclosing context.
+    fn context_from(&self, inh: &Inh) -> PaintContext {
+        let outer = self.context.last();
+        let flatten = |spec: &PaintSpec, own: f64| -> (PaintSpec, f64) {
+            match spec {
+                PaintSpec::ContextFill => outer.map_or((PaintSpec::None, own), |c| (c.fill.clone(), c.fill_opacity)),
+                PaintSpec::ContextStroke => outer.map_or((PaintSpec::None, own), |c| (c.stroke.clone(), c.stroke_opacity)),
+                other => (other.clone(), own),
+            }
+        };
+        let (fill, fill_opacity) = flatten(&inh.fill, inh.fill_opacity);
+        let (stroke, stroke_opacity) = flatten(&inh.stroke, inh.stroke_opacity);
+        PaintContext { fill, stroke, fill_opacity, stroke_opacity, color: inh.color }
+    }
+
     fn resolve_paint(&mut self, spec: &PaintSpec, inh: &Inh, opacity: f64, bbox: Option<BBox>) -> Paint {
         match spec {
+            PaintSpec::ContextFill | PaintSpec::ContextStroke => {
+                let Some(c) = self.context.last().cloned() else { return Paint::None };
+                let (spec, opacity) = if matches!(spec, PaintSpec::ContextFill) { (c.fill, c.fill_opacity) } else { (c.stroke, c.stroke_opacity) };
+                let mut tmp = inh.clone();
+                tmp.color = c.color;
+                self.resolve_paint(&spec, &tmp, opacity, bbox)
+            }
             PaintSpec::None => Paint::None,
             PaintSpec::Current => Paint::Color(with_alpha(inh.color, opacity)),
             PaintSpec::Color(c) => Paint::Color(with_alpha(*c, opacity)),

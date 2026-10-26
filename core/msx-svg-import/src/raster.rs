@@ -10,6 +10,8 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 pub(crate) enum Format {
     Png,
     Jpeg,
+    /// An SVG document, which is imported rather than embedded.
+    Svg,
     /// A format MSX cannot hold, named for the warning.
     Other(&'static str),
 }
@@ -64,7 +66,7 @@ pub(crate) fn sniff(b: &[u8]) -> Format {
     } else if b.starts_with(&[0x1F, 0x8B]) {
         Format::Other("compressed SVG")
     } else if String::from_utf8_lossy(&b[..b.len().min(2048)]).contains("<svg") {
-        Format::Other("SVG")
+        Format::Svg
     } else {
         Format::Other("unknown")
     }
@@ -88,7 +90,7 @@ pub(crate) fn dimensions(b: &[u8], format: Format) -> Option<(u32, u32)> {
             (be32(&b[16..20]), be32(&b[20..24]))
         }
         Format::Jpeg => jpeg_size(b)?,
-        Format::Other(_) => return None,
+        Format::Svg | Format::Other(_) => return None,
     };
     (w > 0 && h > 0).then_some((w, h))
 }
@@ -215,7 +217,7 @@ mod tests {
         assert_eq!(sniff(&fake_jpeg(1, 1)), Format::Jpeg);
         assert_eq!(sniff(b"GIF89a...."), Format::Other("GIF"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Format::Other("WebP"));
-        assert_eq!(sniff(b"<?xml version='1.0'?><svg xmlns='x'/>"), Format::Other("SVG"));
+        assert_eq!(sniff(b"<?xml version='1.0'?><svg xmlns='x'/>"), Format::Svg);
         assert_eq!(sniff(&[0x1F, 0x8B, 8]), Format::Other("compressed SVG"));
         assert_eq!(sniff(b"hello"), Format::Other("unknown"));
     }

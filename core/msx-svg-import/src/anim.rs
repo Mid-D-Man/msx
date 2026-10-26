@@ -92,6 +92,9 @@ pub(crate) struct Timing {
     pub active: Option<f64>,
     /// `fill="freeze"`: hold the last value after the end instead of going back.
     pub freeze: bool,
+    /// CSS `animation-fill-mode: backwards`: hold the first value during the
+    /// delay instead of the value without the animation.
+    pub fill_before: bool,
 }
 
 impl Timing {
@@ -134,7 +137,7 @@ impl Timing {
                 Err(_) => notes.push(format!("end=\"{raw}\" waits for an event or another animation and was ignored")),
             }
         }
-        Ok(Timing { begin, dur, active, freeze: get("fill").is_some_and(|f| f.trim() == "freeze") })
+        Ok(Timing { begin, dur, active, freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false })
     }
 
     /// Where the animation stops on the scene timeline: infinite when it repeats forever.
@@ -338,8 +341,9 @@ pub(crate) fn bake(curve: &Curve, timing: &Timing, base: &[f64], total: f64) -> 
 
     let mut pts: Vec<(f64, Vec<f64>)> = Vec::new();
     if !periodic && first > EPS {
-        pts.push((0.0, base.to_vec()));
-        pts.push((first - EPS, base.to_vec()));
+        let before = if timing.fill_before { poly[0].1.clone() } else { base.to_vec() };
+        pts.push((0.0, before.clone()));
+        pts.push((first - EPS, before));
     }
     let mut a = first;
     while a < stop - 1e-12 {
@@ -350,17 +354,20 @@ pub(crate) fn bake(curve: &Curve, timing: &Timing, base: &[f64], total: f64) -> 
             // Another iteration follows: end this one a hair early so the next
             // starts at exactly `b` and the jump back is a short ramp.
             let continues = b < stop - 1e-9;
+            // The early end carries the value the animation has at that moment, so
+            // the stretch stays on its line.
+            let uend = if continues { uhi - EPS / dur } else { uhi };
             pts.push((lo, eval(&poly, ulo)));
             for (u, v) in &poly {
-                if *u > ulo + 1e-12 && *u < uhi - 1e-12 {
+                if *u > ulo + 1e-12 && *u < uend - 1e-12 {
                     pts.push((a + u * dur, v.clone()));
                 }
             }
-            pts.push((if continues { hi - EPS } else { hi }, eval(&poly, uhi)));
+            pts.push((if continues { hi - EPS } else { hi }, eval(&poly, uend)));
         }
         a = b;
     }
-    if !periodic && timing.end() < total - EPS && !timing.freeze && !pts.is_empty() {
+    if !periodic && !timing.freeze && timing.end() + EPS <= total + 1e-9 && !pts.is_empty() {
         pts.push((timing.end() + EPS, base.to_vec()));
     }
 
@@ -380,6 +387,9 @@ pub(crate) struct Span {
     pub indefinite: bool,
     /// For a finite animation, where it stops.
     pub end: f64,
+    /// A finite animation that goes back to the value without it after its
+    /// end. The scene has to last a moment longer for the last frame to show that.
+    pub removes: bool,
 }
 
 /// The scene timeline that holds every animation.
@@ -407,10 +417,12 @@ pub(crate) fn plan(spans: &[Span]) -> Plan {
     if spans.is_empty() {
         return Plan { duration: 0.0, looping: false, notes };
     }
-    let finite_end = spans.iter().filter(|s| !s.indefinite).map(|s| s.end).fold(0.0, f64::max);
+    // A play-once scene lasts a moment longer for the return to the base value.
+    // A looping one is back at the start anyway.
+    let finite_end = |room: bool| spans.iter().filter(|s| !s.indefinite).map(|s| if room && s.removes { s.end + EPS } else { s.end }).fold(0.0, f64::max);
     let periods: Vec<u64> = spans.iter().filter(|s| s.indefinite).map(|s| ((s.period * 1000.0).round() as u64).max(1)).collect();
     if periods.is_empty() {
-        return Plan { duration: finite_end, looping: false, notes };
+        return Plan { duration: finite_end(true), looping: false, notes };
     }
     let cap = (MAX_LOOP_SECS * 1000.0) as u64;
     let mut lcm: u64 = 1;
@@ -429,6 +441,7 @@ pub(crate) fn plan(spans: &[Span]) -> Plan {
     } else {
         lcm
     };
+    let finite_end = finite_end(false);
     let need = (finite_end * 1000.0).ceil() as u64;
     if need > ms {
         let rounded = need.div_ceil(ms) * ms;
@@ -584,7 +597,7 @@ mod tests {
         let times: Vec<f64> = pts.iter().map(|p| p.0).collect();
         assert_eq!(pts.len(), 4);
         assert!(close(times[1], 1.0 - EPS) && close(times[2], 1.0) && close(times[3], 2.0));
-        assert!(close(pts[1].1[0], 360.0) && close(pts[2].1[0], 0.0));
+        assert!(close(pts[1].1[0], 360.0 * (1.0 - EPS)) && close(pts[2].1[0], 0.0));
     }
 
     #[test]
@@ -596,6 +609,17 @@ mod tests {
         for (p, w) in pts.iter().zip(want) {
             assert!(close(p.0, w.0) && close(p.1[0], w.1), "{p:?} vs {w:?}");
         }
+    }
+
+    #[test]
+    fn a_backwards_fill_holds_the_first_value_during_the_delay() {
+        let mut t = timing(&[("dur", "2s"), ("begin", "1s")]).unwrap();
+        t.fill_before = true;
+        let pts = bake(&lin(&[10.0, 20.0]), &t, &[5.0], 5.0).unwrap();
+        assert!(close(pts[0].1[0], 10.0) && close(pts[1].1[0], 10.0), "{pts:?}");
+        t.fill_before = false;
+        let pts = bake(&lin(&[10.0, 20.0]), &t, &[5.0], 5.0).unwrap();
+        assert!(close(pts[0].1[0], 5.0));
     }
 
     #[test]
@@ -616,7 +640,7 @@ mod tests {
         let last = pts.last().unwrap();
         assert!(close(last.0, 2.0) && close(last.1[0], 270.0));
         assert!(pts.iter().any(|p| close(p.0, 0.5) && close(p.1[0], 0.0)));
-        assert!(pts.iter().any(|p| close(p.0, 0.5 - EPS) && close(p.1[0], 360.0)));
+        assert!(pts.iter().any(|p| close(p.0, 0.5 - EPS) && close(p.1[0], 360.0 * (1.0 - EPS / 2.0))));
     }
 
     #[test]
@@ -678,28 +702,51 @@ mod tests {
 
     #[test]
     fn plan_without_repeats_plays_once() {
-        let p = plan(&[Span { period: 1.0, indefinite: false, end: 3.0 }, Span { period: 1.0, indefinite: false, end: 2.0 }]);
+        let p = plan(&[Span { period: 1.0, indefinite: false, end: 3.0, removes: false }, Span { period: 1.0, indefinite: false, end: 2.0, removes: false }]);
         assert_eq!(p, Plan { duration: 3.0, looping: false, notes: vec![] });
         assert_eq!(plan(&[]).duration, 0.0);
     }
 
     #[test]
+    fn plan_leaves_a_moment_for_the_return_to_the_base_value() {
+        let p = plan(&[Span { period: 1.0, indefinite: false, end: 3.0, removes: true }, Span { period: 1.0, indefinite: false, end: 2.0, removes: false }]);
+        assert!(close(p.duration, 3.0 + EPS) && !p.looping);
+        let frozen = plan(&[Span { period: 1.0, indefinite: false, end: 3.0, removes: false }]);
+        assert!(close(frozen.duration, 3.0));
+    }
+
+    #[test]
+    fn a_finite_animation_without_fill_ends_on_the_base_value_on_the_last_frame() {
+        let t = timing(&[("dur", "2s"), ("begin", "1s")]).unwrap();
+        let total = plan(&[Span { period: 2.0, indefinite: false, end: t.end(), removes: true }]).duration;
+        let pts = bake(&lin(&[10.0, 20.0]), &t, &[5.0], total).unwrap();
+        let last = pts.last().unwrap();
+        assert!(close(last.0, 3.0 + EPS) && close(last.1[0], 5.0), "{last:?}");
+    }
+
+    #[test]
     fn plan_loops_at_the_common_period() {
-        let p = plan(&[Span { period: 1.0, indefinite: true, end: f64::INFINITY }, Span { period: 1.5, indefinite: true, end: f64::INFINITY }]);
+        let p = plan(&[Span { period: 1.0, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 1.5, indefinite: true, end: f64::INFINITY, removes: false }]);
         assert!(p.looping && close(p.duration, 3.0) && p.notes.is_empty());
-        let one = plan(&[Span { period: 1.2, indefinite: true, end: f64::INFINITY }]);
+        let one = plan(&[Span { period: 1.2, indefinite: true, end: f64::INFINITY, removes: false }]);
         assert!(close(one.duration, 1.2));
     }
 
     #[test]
+    fn a_looping_scene_does_not_grow_for_the_return_to_the_base_value() {
+        let p = plan(&[Span { period: 2.0, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 2.0, indefinite: false, end: 2.0, removes: true }]);
+        assert!(p.looping && close(p.duration, 2.0), "{p:?}");
+    }
+
+    #[test]
     fn plan_stretches_the_loop_over_a_long_finite_animation() {
-        let p = plan(&[Span { period: 2.0, indefinite: true, end: f64::INFINITY }, Span { period: 5.0, indefinite: false, end: 5.0 }]);
+        let p = plan(&[Span { period: 2.0, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 5.0, indefinite: false, end: 5.0, removes: false }]);
         assert!(p.looping && close(p.duration, 6.0));
     }
 
     #[test]
     fn plan_caps_unrelated_periods() {
-        let p = plan(&[Span { period: 1.013, indefinite: true, end: f64::INFINITY }, Span { period: 1.017, indefinite: true, end: f64::INFINITY }, Span { period: 1.019, indefinite: true, end: f64::INFINITY }]);
+        let p = plan(&[Span { period: 1.013, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 1.017, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 1.019, indefinite: true, end: f64::INFINITY, removes: false }]);
         assert!(p.looping && close(p.duration, 1.019));
         assert_eq!(p.notes.len(), 1);
     }
