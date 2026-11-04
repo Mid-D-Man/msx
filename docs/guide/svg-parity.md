@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched all 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji) and 820 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, and of the 56 `image` tests 31. The rest of the `image` tests use SVG, GIF or WebP images. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched 53 of the 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji), the last being close, and 871 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, of the 56 `image` tests 49, of the 33 `pattern` tests 24 (6 more agree with `rsvg-convert` and not with the resvg picture), and all 18 `style` tests. The rest of the `image` tests use GIF, WebP or compressed SVG. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -32,7 +32,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `spreadMethod` `reflect` and `repeat` | Gap | Imported as `pad` |
 | Focal point outside the circle, `fr` | Gap | Clamped onto the circle, `fr` ignored |
 | Conic gradient | Native, MSX only | CPU and GPU draw it, the SVG output cannot |
-| `pattern` | Gap | Fallback color if given |
+| `pattern` on a fill | Expanded | Tiles clipped to the shape, with units, `viewBox`, `patternTransform`, `href` inheritance and nesting. See [Importing SVG](svg-import.md) |
+| `pattern` on a stroke | Gap | Fallback color if given. The outline of a stroke is not available to clip tiles with |
 
 ## Compositing and effects
 
@@ -61,7 +62,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `image` with PNG or JPEG | Expanded | From a data URI or a file, with `preserveAspectRatio`, a clip for `slice`, opacity, transform, clip and mask |
 | `image` with SVG | Expanded | The inner document is imported with its own ids, styles and gradients and placed like a bitmap, with `preserveAspectRatio`, a clip to its canvas and a clip for `slice`. Animation inside it is drawn as the static frame |
 | `image` with GIF, WebP or `.svgz` | Gap | Reported. MSX holds PNG and JPEG, and these would need a decoder and a PNG transcode |
-| `context-fill`, `context-stroke` | Partial | Colors, opacity and nesting through `use` and markers work. A gradient is fitted to the shape painted, not to the context element, and a pattern is a gap |
+| `context-fill`, `context-stroke` | Partial | Colors, opacity and nesting through `use` and markers work. A gradient is fitted to the shape painted, not to the context element, and a pattern on a stroke is a gap |
 | `foreignObject` | Gap | Reported |
 | `animateTransform` of `translate`, `scale` and `rotate`, `animate` of `opacity`, `x`, `y`, `cx`, `cy`, `r` on an unstroked circle and the opacity of a single paint, with `begin`, `dur`, repeats, `end`, `fill`, `values`, `keyTimes`, `calcMode` and `keySplines` | Expanded | Baked into MSX tracks on one scene timeline, with a wrapper group or layer per animation. See [Importing SVG](svg-import.md#animation) |
 | `animate` of colors, paths, sizes and dash offsets, `skewX` and `skewY`, `animateMotion`, `set`, `begin` on an event | Gap | Reported, the static frame is drawn. MSX tracks have only translate, scale, rotate, opacity and z-index channels |
@@ -96,7 +97,7 @@ The remaining gaps share a few causes, so they are closed in this order.
 
 1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks followed on the same layer machinery and are done too.
 2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
-3. Patterns, as a tiled group with its own transform.
+3. Patterns. Done for fills by tile expansion in the importer. What is left is a real pattern def in the format, which would also give strokes and avoid one group per tile.
 4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.
 6. Filter primitives mapped onto layer effects where an equivalent exists.

@@ -25,6 +25,7 @@ mod animate;
 mod cssanim;
 mod geom;
 mod markers;
+mod pattern;
 mod gradient;
 mod parse;
 mod raster;
@@ -185,6 +186,10 @@ pub(crate) struct Importer<'a, 'i> {
     /// The elements that `context-fill` and `context-stroke` refer to, the
     /// innermost last: the `use` being expanded or the shape a marker is for.
     context: Vec<PaintContext>,
+    /// The patterns being expanded right now, to stop one that uses itself.
+    pattern_stack: Vec<String>,
+    /// True while a fill is resolved: only a fill can be a pattern.
+    pattern_fill_ok: bool,
     /// How many SVG images this document sits inside.
     image_depth: usize,
     /// Fingerprints of this document and of the ones it sits inside.
@@ -205,12 +210,34 @@ fn set_def_id(def: &mut msx_ast::Def, id: &str) {
     }
 }
 
-fn remap_style(style: &mut Style, renamed: &HashMap<String, String>) {
-    for paint in [&mut style.fill, &mut style.stroke] {
-        if let Some(Paint::Ref(r)) = paint {
-            if let Some(new) = renamed.get(r.as_str()) {
-                *r = new.clone();
+/// Calls `f` on the style of every element of `els` and of everything inside them.
+fn visit_styles(els: &mut [Element], f: &mut dyn FnMut(&mut Style)) {
+    for el in els {
+        match el {
+            Element::Rect(e) => f(&mut e.style),
+            Element::Circle(e) => f(&mut e.style),
+            Element::Ellipse(e) => f(&mut e.style),
+            Element::Line(e) => f(&mut e.style),
+            Element::Polyline(e) | Element::Polygon(e) => f(&mut e.style),
+            Element::Path(e) => f(&mut e.style),
+            Element::Text(e) => f(&mut e.style),
+            Element::Image(e) => f(&mut e.style),
+            Element::Group(g) => {
+                if let Some(style) = g.style.as_mut() {
+                    f(style);
+                }
+                visit_styles(&mut g.children, f);
             }
+            Element::Layer(l) => {
+                visit_styles(&mut l.children, f);
+                if let Some(clip) = l.clip_path.as_mut() {
+                    visit_styles(clip, f);
+                }
+                if let Some(mask) = l.mask.as_mut() {
+                    visit_styles(mask, f);
+                }
+            }
+            Element::Use(_) | Element::Sdf(_) | Element::Splat(_) => {}
         }
     }
 }
@@ -220,34 +247,15 @@ fn remap_refs(els: &mut [Element], renamed: &HashMap<String, String>) {
     if renamed.is_empty() {
         return;
     }
-    for el in els {
-        match el {
-            Element::Rect(e) => remap_style(&mut e.style, renamed),
-            Element::Circle(e) => remap_style(&mut e.style, renamed),
-            Element::Ellipse(e) => remap_style(&mut e.style, renamed),
-            Element::Line(e) => remap_style(&mut e.style, renamed),
-            Element::Polyline(e) | Element::Polygon(e) => remap_style(&mut e.style, renamed),
-            Element::Path(e) => remap_style(&mut e.style, renamed),
-            Element::Text(e) => remap_style(&mut e.style, renamed),
-            Element::Image(e) => remap_style(&mut e.style, renamed),
-            Element::Group(g) => {
-                if let Some(style) = g.style.as_mut() {
-                    remap_style(style, renamed);
-                }
-                remap_refs(&mut g.children, renamed);
-            }
-            Element::Layer(l) => {
-                remap_refs(&mut l.children, renamed);
-                if let Some(clip) = l.clip_path.as_mut() {
-                    remap_refs(clip, renamed);
-                }
-                if let Some(mask) = l.mask.as_mut() {
-                    remap_refs(mask, renamed);
+    visit_styles(els, &mut |style| {
+        for paint in [&mut style.fill, &mut style.stroke] {
+            if let Some(Paint::Ref(r)) = paint {
+                if let Some(new) = renamed.get(r.as_str()) {
+                    *r = new.clone();
                 }
             }
-            Element::Use(_) | Element::Sdf(_) | Element::Splat(_) => {}
         }
-    }
+    });
 }
 
 /// What an `<image>` refers to.
@@ -665,6 +673,8 @@ impl<'a, 'i> Importer<'a, 'i> {
             skip_stroke_opacity: None,
             anim_off: 0,
             context: Vec::new(),
+            pattern_stack: Vec::new(),
+            pattern_fill_ok: false,
             image_depth: 0,
             image_chain: Vec::new(),
             sheet_uses_context: false,
@@ -1127,6 +1137,19 @@ impl<'a, 'i> Importer<'a, 'i> {
         scene.defs = std::mem::take(&mut self.defs);
         scene.elements = out;
         self.finish_animations(&mut scene);
+        // A pattern marker that no shape turned into tiles must not reach the scene.
+        let mut stray = false;
+        visit_styles(&mut scene.elements, &mut |style| {
+            for paint in [&mut style.fill, &mut style.stroke] {
+                if pattern::is_mark(paint) {
+                    *paint = Some(Paint::None);
+                    stray = true;
+                }
+            }
+        });
+        if stray {
+            self.warn("a pattern fill could not be drawn and was left out".to_string());
+        }
         Imported { scene, warnings: std::mem::take(&mut self.warnings) }
     }
 
@@ -1777,8 +1800,19 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         self.emitted += 1;
+        let mut el = el;
+        let pattern = self.expand_pattern(&mut el);
+        let pattern_drawn = pattern.is_some();
         let mut parts = if inh.stroke_first && !matches!(el, Element::Image(_)) { split_paint_order(el) } else { vec![el] };
-        let with_extras = !extras.is_empty();
+        if let Some(layer) = pattern {
+            // The fill goes under the stroke, or over it when the stroke is painted first.
+            if inh.stroke_first {
+                parts.push(layer);
+            } else {
+                parts.insert(0, layer);
+            }
+        }
+        let with_extras = !extras.is_empty() || pattern_drawn;
         if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() || with_extras {
             // A clip, a mask or markers live in the element's own space, so the
             // element's transform moves from the shape to the layer.
@@ -1812,7 +1846,10 @@ impl<'a, 'i> Importer<'a, 'i> {
         } else if kind == Kind::Line {
             Paint::None
         } else {
-            self.resolve_paint(&inh.fill, inh, inh.fill_opacity, bbox)
+            self.pattern_fill_ok = true;
+            let f = self.resolve_paint(&inh.fill, inh, inh.fill_opacity, bbox);
+            self.pattern_fill_ok = false;
+            f
         };
         let stroke = if clip { Paint::None } else { self.resolve_paint(&inh.stroke, inh, inh.stroke_opacity, bbox) };
         let rule = if clip { inh.clip_rule } else { inh.fill_rule };

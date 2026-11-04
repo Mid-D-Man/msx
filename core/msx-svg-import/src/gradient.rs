@@ -104,6 +104,14 @@ impl<'a, 'i> Importer<'a, 'i> {
             return fallback_paint();
         };
         if !is_gradient(&node) {
+            if node.tag_name().name() == "pattern" {
+                // A fill is drawn as tiles once the shape exists. A stroke is not.
+                if self.pattern_fill_ok {
+                    return Some(crate::pattern::mark(id, opacity, bbox));
+                }
+                self.warn(format!("paint #{id} is a <pattern> used on a stroke, which is not supported; patterns work on fills only"));
+                return fallback_paint();
+            }
             self.warn(format!("paint #{id} is a <{}>, which is not supported; only gradients are imported", node.tag_name().name()));
             return fallback_paint();
         }

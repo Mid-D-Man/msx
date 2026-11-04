@@ -248,7 +248,7 @@ fn unsupported_features_are_reported() {
             <foreignObject width="5" height="5"/>
             <pattern id="p"/><rect width="1" height="1" fill="url(#p)"/>"##,
     ));
-    for needle in ["clip path", "filter", "mask", "<foreignObject", "pattern"] {
+    for needle in ["clip path", "filter", "mask", "<foreignObject"] {
         assert!(has_warning(&i, needle), "missing a warning about {needle}: {:?}", i.warnings);
     }
     assert_eq!(i.scene.elements.len(), 4, "shapes are still imported, the foreignObject is not");
@@ -2394,4 +2394,171 @@ fn an_inner_gradient_is_renamed_when_the_outer_id_is_already_taken() {
         other => panic!("{other:?}"),
     };
     assert_eq!((first_stop(o), first_stop(n)), (0, 255));
+}
+
+// ── patterns ─────────────────────────────────────────────────────────────────
+
+fn pattern_parts(i: &Imported) -> (&msx_ast::Layer, &msx_ast::Layer, &Element) {
+    let Element::Layer(outer) = &i.scene.elements[0] else { panic!("{:?}", i.scene.elements[0]) };
+    let Element::Layer(pat) = &outer.children[0] else { panic!("{:?}", outer.children[0]) };
+    (outer, pat, &outer.children[1])
+}
+
+fn tile_matrix(el: &Element) -> msx_ast::Matrix2D {
+    let t = match el {
+        Element::Group(g) => &g.transform,
+        Element::Layer(l) => &l.transform,
+        other => panic!("{other:?}"),
+    };
+    t.as_ref().map_or(msx_ast::Matrix2D::identity(), |t| t.to_matrix())
+}
+
+fn tile_origins(pat: &msx_ast::Layer) -> Vec<(f64, f64)> {
+    pat.children.iter().map(|t| geom::apply(tile_matrix(t), 0.0, 0.0)).collect()
+}
+
+const PAT10: &str = r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#ff0000"/></pattern></defs>"##;
+
+#[test]
+fn a_pattern_fill_becomes_tiles_clipped_to_the_shape() {
+    let i = imp(&doc(&format!(r##"{PAT10}<rect width="30" height="20" fill="url(#p)" stroke="#0000ff"/>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let (_, pat, shape) = pattern_parts(&i);
+    let mut origins = tile_origins(pat);
+    origins.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(origins, vec![(0.0, 0.0), (0.0, 10.0), (10.0, 0.0), (10.0, 10.0), (20.0, 0.0), (20.0, 10.0)], "a 3 by 2 grid, none for the edge that only touches");
+    let clip = pat.clip_path.as_ref().expect("clipped to the shape");
+    assert_eq!(clip.len(), 1);
+    assert!(matches!(&clip[0], Element::Rect(r) if r.width == 30.0 && r.height == 20.0 && r.transform.is_none()));
+    let r = rect(shape);
+    assert_eq!(r.style.fill, Some(Paint::None), "the shape keeps no fill");
+    assert_eq!(r.style.stroke, Some(Paint::Color(Color::rgb(0, 0, 255))), "and keeps its stroke");
+}
+
+#[test]
+fn object_bounding_box_units_are_shares_of_the_shape() {
+    let i = imp(&doc(r##"<defs><pattern id="p" x=".1" y="0" width=".5" height=".5"><rect width="5" height="5"/></pattern></defs><rect x="10" y="10" width="40" height="20" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&i);
+    // Tiles are 20 by 10 and start at (10 + 4, 10): so one column starts left of the shape.
+    let mut origins = tile_origins(pat);
+    origins.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(origins, vec![(-6.0, 10.0), (-6.0, 20.0), (14.0, 10.0), (14.0, 20.0), (34.0, 10.0), (34.0, 20.0)], "{origins:?}");
+}
+
+#[test]
+fn content_units_view_box_and_pattern_transform_shape_the_tiles() {
+    // objectBoundingBox content units: the content is scaled by the box.
+    let c = imp(&doc(r##"<defs><pattern id="p" width="20" height="20" patternUnits="userSpaceOnUse" patternContentUnits="objectBoundingBox"><rect width=".25" height=".5"/></pattern></defs><rect width="40" height="40" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&c);
+    let m = tile_matrix(&pat.children[0]);
+    assert!(near(geom::apply(m, 1.0, 1.0), (40.0, 40.0)), "content (1,1) is the far corner of the 40 by 40 box");
+    // A viewBox maps the content into the tile.
+    let v = imp(&doc(r##"<defs><pattern id="p" width="20" height="20" viewBox="0 0 10 10" patternUnits="userSpaceOnUse"><rect width="10" height="10"/></pattern></defs><rect x="20" y="0" width="20" height="20" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&v);
+    assert_eq!(pat.children.len(), 1);
+    assert!(near(geom::apply(tile_matrix(&pat.children[0]), 10.0, 10.0), (40.0, 20.0)), "viewBox 10 wide becomes 20 wide");
+    // patternTransform scales the grid.
+    let t = imp(&doc(r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(2)"><rect width="5" height="5"/></pattern></defs><rect width="40" height="40" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&t);
+    assert_eq!(pat.children.len(), 4, "20 user units per tile");
+    let mut o = tile_origins(pat);
+    o.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(o, vec![(0.0, 0.0), (0.0, 20.0), (20.0, 0.0), (20.0, 20.0)]);
+    assert!(near(geom::apply(tile_matrix(&pat.children[0]), 5.0, 5.0), (10.0, 10.0)), "and the content with it");
+}
+
+#[test]
+fn a_rotated_pattern_covers_the_shape() {
+    let i = imp(&doc(r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5"/></pattern></defs><rect width="30" height="30" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&i);
+    // The bounds of the shape, seen from the pattern, are a diamond that needs more tiles than 3 by 3.
+    assert!(pat.children.len() > 9 && pat.children.len() < 40, "{}", pat.children.len());
+}
+
+#[test]
+fn content_that_reaches_past_the_tile_is_clipped_to_it() {
+    let i = imp(&doc(r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="15" height="5"/></pattern></defs><rect width="20" height="10" fill="url(#p)"/>"##));
+    let (_, pat, _) = pattern_parts(&i);
+    assert_eq!(pat.children.len(), 2);
+    assert!(pat.children.iter().all(|t| matches!(t, Element::Layer(l) if l.clip_path.is_some())));
+    let ok = imp(&doc(&format!(r##"{PAT10}<rect width="20" height="10" fill="url(#p)"/>"##)));
+    assert!(pattern_parts(&ok).1.children.iter().all(|t| matches!(t, Element::Group(_))), "no layers when the content fits");
+}
+
+#[test]
+fn opacity_transform_and_fill_opacity_cover_tiles_and_shape_together() {
+    let i = imp(&doc(&format!(r##"{PAT10}<rect width="20" height="10" fill="url(#p)" fill-opacity=".5" opacity=".25" transform="translate(7 3)"/>"##)));
+    let (outer, pat, shape) = pattern_parts(&i);
+    assert_eq!(outer.opacity, 0.25, "element opacity sits on the layer that holds both");
+    assert_eq!(pat.opacity, 0.5, "fill-opacity fades the tiles");
+    assert!(near(geom::apply(outer.transform.as_ref().unwrap().to_matrix(), 0.0, 0.0), (7.0, 3.0)));
+    assert!(rect(shape).transform.is_none() && pat.clip_path.as_ref().unwrap().iter().all(|c| matches!(c, Element::Rect(r) if r.transform.is_none())));
+    assert_eq!(rect(shape).style.opacity, Some(1.0), "not faded twice");
+}
+
+#[test]
+fn patterns_inherit_through_href_and_can_nest() {
+    let i = imp(&doc(r##"<defs><pattern id="a" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5"/></pattern>
+        <pattern id="b" href="#a" width="20" height="20"/></defs><rect width="40" height="20" fill="url(#b)"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(pattern_parts(&i).1.children.len(), 2, "b has its own size and a's content");
+    let nested = imp(&doc(&format!(r##"{PAT10}<defs><pattern id="outer" width="20" height="20" patternUnits="userSpaceOnUse"><rect width="20" height="20" fill="url(#p)"/></pattern></defs><rect width="20" height="20" fill="url(#outer)"/>"##)));
+    assert!(nested.warnings.is_empty(), "{:?}", nested.warnings);
+    let (_, pat, _) = pattern_parts(&nested);
+    fn has_layer(el: &Element) -> bool {
+        match el {
+            Element::Group(g) => g.children.iter().any(has_layer),
+            Element::Layer(l) => l.clip_path.is_some() || l.children.iter().any(has_layer),
+            _ => false,
+        }
+    }
+    assert!(pat.children.iter().any(has_layer), "the inner pattern is expanded inside the tile");
+}
+
+#[test]
+fn a_pattern_that_uses_itself_is_cut_at_the_repeat() {
+    let i = imp(&doc(r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="url(#p)"/><circle r="2" fill="#f00"/></pattern></defs><rect width="10" height="10" fill="url(#p)"/>"##));
+    assert!(has_warning(&i, "uses itself"), "{:?}", i.warnings);
+    assert!(!i.scene.elements.is_empty());
+}
+
+#[test]
+fn a_pattern_that_needs_too_many_tiles_is_left_out_and_reported() {
+    let i = imp(&doc(r##"<defs><pattern id="p" width="1" height="1" patternUnits="userSpaceOnUse"><rect width=".5" height=".5"/></pattern></defs><rect width="100" height="100" fill="url(#p)" stroke="#000"/>"##));
+    assert!(has_warning(&i, "tiles for this shape"), "{:?}", i.warnings);
+    let r = rect(&i.scene.elements[0]);
+    assert_eq!(r.style.fill, Some(Paint::None));
+    assert_eq!(i.scene.elements.len(), 1, "no layer, just the shape with its stroke");
+}
+
+#[test]
+fn a_pattern_on_a_stroke_is_reported_and_a_degenerate_pattern_draws_nothing() {
+    let s = imp(&doc(&format!(r##"{PAT10}<rect width="20" height="10" fill="none" stroke="url(#p)" stroke-width="3"/>"##)));
+    assert!(has_warning(&s, "used on a stroke"), "{:?}", s.warnings);
+    let zero = imp(&doc(r##"<defs><pattern id="p" width="0" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5"/></pattern></defs><rect width="20" height="10" fill="url(#p)"/>"##));
+    assert_eq!(rect(&zero.scene.elements[0]).style.fill, Some(Paint::None));
+    let empty = imp(&doc(r##"<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"/></defs><rect width="20" height="10" fill="url(#p)"/>"##));
+    assert_eq!(rect(&empty.scene.elements[0]).style.fill, Some(Paint::None));
+}
+
+#[test]
+fn circles_and_paths_get_pattern_fills_and_text_is_clipped_by_its_glyphs() {
+    let c = imp(&doc(&format!(r##"{PAT10}<circle cx="10" cy="10" r="10" fill="url(#p)"/>"##)));
+    let (_, pat, _) = pattern_parts(&c);
+    assert_eq!(pat.children.len(), 4);
+    assert!(matches!(&pat.clip_path.as_ref().unwrap()[0], Element::Circle(_)));
+    let p = imp(&doc(&format!(r##"{PAT10}<path d="M0 0 L20 0 L10 20 Z" fill="url(#p)"/>"##)));
+    assert!(matches!(&pattern_parts(&p).1.clip_path.as_ref().unwrap()[0], Element::Path(_)));
+    let t = imp(&doc(&format!(r##"{PAT10}<text x="5" y="30" font-size="20" fill="url(#p)">Hi</text>"##)));
+    assert!(t.warnings.iter().all(|w| !w.contains("pattern")), "{:?}", t.warnings);
+    assert!(matches!(&pattern_parts(&t).1.clip_path.as_ref().unwrap()[0], Element::Text(_)));
+}
+
+#[test]
+fn pattern_fills_survive_write_and_parse_without_markers() {
+    let i = imp(&doc(&format!(r##"{PAT10}<rect width="30" height="20" fill="url(#p)" stroke="#00f"/>"##)));
+    let text = msx_parser::scene_to_msx(&i.scene).expect("writable");
+    assert!(!text.contains("pattern:"), "the marker never reaches the source");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert_eq!(format!("{:?}", back.elements), format!("{:?}", i.scene.elements));
 }
