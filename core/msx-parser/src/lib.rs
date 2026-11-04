@@ -200,6 +200,27 @@ mod tests {
     }
 
     #[test]
+    fn every_blend_mode_name_parses() {
+        let names = [
+            ("normal", BlendMode::Normal), ("multiply", BlendMode::Multiply), ("screen", BlendMode::Screen),
+            ("overlay", BlendMode::Overlay), ("add", BlendMode::Add), ("soft_light", BlendMode::SoftLight),
+            ("hard_light", BlendMode::HardLight), ("difference", BlendMode::Difference),
+            ("exclusion", BlendMode::Exclusion), ("darken", BlendMode::Darken), ("lighten", BlendMode::Lighten),
+            ("subtract", BlendMode::Subtract), ("divide", BlendMode::Divide), ("color_dodge", BlendMode::ColorDodge),
+            ("color_burn", BlendMode::ColorBurn), ("hue", BlendMode::Hue), ("saturation", BlendMode::Saturation),
+            ("color", BlendMode::Color), ("luminosity", BlendMode::Luminosity), ("plus_lighter", BlendMode::PlusLighter),
+        ];
+        for (name, mode) in names {
+            let src = format!(
+                "@CONFIG( version -> \"1.0.0\" )\n@DATA(\n  scene = {{ width = 10, height = 10, background = #ffffff }}\n  elements::\n    {{ type = \"layer\", blend_mode = \"{name}\", elements = [] }}\n)\n"
+            );
+            let scene = parse_scene(&src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let Element::Layer(l) = &scene.elements[0] else { panic!("{name}: expected Layer") };
+            assert_eq!(l.blend_mode, mode, "{name}");
+        }
+    }
+
+    #[test]
     fn animation_tracks_duration_and_loop_mode() {
         let src = r#"
 @CONFIG( version -> "1.0.0" )

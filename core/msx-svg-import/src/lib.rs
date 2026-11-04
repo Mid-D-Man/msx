@@ -639,7 +639,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
             keep_hidden |= (n.tag_name().name() == "clipPath" && n.attribute("clipPathUnits").is_some_and(|u| u.trim() == "objectBoundingBox"))
                 || (n.tag_name().name() == "mask" && n.attribute("maskUnits").is_none_or(|u| u.trim() != "userSpaceOnUse"));
-            if n.tag_name().name() == "style" && n.attribute("type").is_none_or(|t| t.is_empty() || t == "text/css") {
+            if n.tag_name().name() == "style" && n.attribute("type").is_none_or(|t| t.is_empty() || t.eq_ignore_ascii_case("text/css")) {
                 let css: String = n.descendants().filter(|c| c.is_text()).filter_map(|c| c.text()).collect();
                 parse_stylesheet(&css, &mut sheet);
             }
@@ -799,21 +799,12 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
             return Comp::NONE;
         }
-        let blend = match props.get("mix-blend-mode").map(|v| v.trim()) {
+                let blend = match props.get("mix-blend-mode").map(|v| v.trim()) {
             None | Some("normal") | Some("") => BlendMode::Normal,
-            Some("multiply") => BlendMode::Multiply,
-            Some("screen") => BlendMode::Screen,
-            Some("overlay") => BlendMode::Overlay,
-            Some("darken") => BlendMode::Darken,
-            Some("lighten") => BlendMode::Lighten,
-            Some("hard-light") => BlendMode::HardLight,
-            Some("soft-light") => BlendMode::SoftLight,
-            Some("difference") => BlendMode::Difference,
-            Some("exclusion") => BlendMode::Exclusion,
-            Some(other) => {
+            Some(other) => BlendMode::from_css_name(other).unwrap_or_else(|| {
                 self.warn(format!("{} uses mix-blend-mode: {other}, which is not supported; drawn normally", Self::label(node)));
                 BlendMode::Normal
-            }
+            }),
         };
         let clips = self.resolve_clips(node, props, bbox);
         let mask = self.resolve_mask(node, props, bbox);

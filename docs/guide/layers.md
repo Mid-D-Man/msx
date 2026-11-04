@@ -69,9 +69,15 @@ The SVG renderer writes a `mask` element with a region far larger than the canva
 | `overlay` | `add` | `soft_light` |
 | `hard_light` | `difference` | `exclusion` |
 | `darken` | `lighten` | `subtract` |
-| `divide` | | |
+| `divide` | `color_dodge` | `color_burn` |
+| `hue` | `saturation` | `color` |
+| `luminosity` | `plus_lighter` | |
 
-`subtract` and `divide` need a signed intermediate buffer, which CSS blending cannot express. The CPU and GPU renderers implement them. The SVG renderer maps them to `normal`. The SVG renderer writes `add` as the CSS mode `plus-lighter`.
+`subtract` and `divide` need a signed intermediate buffer, which CSS blending cannot express. The CPU and GPU renderers implement them. The SVG renderer maps them to `normal`.
+
+`hue`, `saturation`, `color` and `luminosity` work on all three color channels together and follow the W3C Compositing and Blending formulas. `color_dodge` and `color_burn` are per channel and follow the same specification.
+
+`plus_lighter` is the CSS `plus-lighter` operator. It adds premultiplied color and alpha and clamps the sum, so it differs from `add` wherever alpha is below one. The SVG renderer writes both `add` and `plus_lighter` as the CSS mode `plus-lighter`.
 
 ## Effects
 

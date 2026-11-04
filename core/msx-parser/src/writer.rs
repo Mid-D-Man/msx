@@ -327,6 +327,13 @@ fn blend_mode_text(b: BlendMode) -> &'static str {
         BlendMode::Lighten => "lighten",
         BlendMode::Subtract => "subtract",
         BlendMode::Divide => "divide",
+        BlendMode::ColorDodge => "color_dodge",
+        BlendMode::ColorBurn => "color_burn",
+        BlendMode::Hue => "hue",
+        BlendMode::Saturation => "saturation",
+        BlendMode::Color => "color",
+        BlendMode::Luminosity => "luminosity",
+        BlendMode::PlusLighter => "plus_lighter",
     }
 }
 
@@ -659,6 +666,19 @@ mod tests {
         layer.id = Some("lay".into());
         let outer = Element::Group(Group { children: vec![inner, Element::Layer(layer)], id: None, transform: None, style: Some(style()) });
         assert_roundtrip(&scene_with(vec![], vec![outer]));
+    }
+
+    #[test]
+    fn every_blend_mode_roundtrips_through_text() {
+        let layers = BlendMode::ALL
+            .iter()
+            .map(|m| {
+                let mut l = Layer::new(vec![rect(style())]);
+                l.blend_mode = *m;
+                Element::Layer(l)
+            })
+            .collect();
+        assert_roundtrip(&scene_with(vec![], layers));
     }
 
     #[test]

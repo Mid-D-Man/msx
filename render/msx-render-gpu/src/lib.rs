@@ -456,6 +456,61 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         assert_eq!(px[3], 255);
     }
 
+    /// The seven modes added after `Divide`, drawn on the GPU over an opaque
+    /// backdrop at 80% layer opacity and compared with
+    /// `msx_render_core::composite`, the reference the CPU renderer uses.
+    /// The tolerance covers 8-bit rounding in the offscreen buffers.
+    #[test]
+    fn new_blend_modes_match_the_core_reference_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+
+        let backdrop = [180u8, 100, 60];
+        let source = [60u8, 200, 120];
+        let opacity = 0.8f32;
+        let unit = |c: [u8; 3]| (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+
+        for mode in [
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+            BlendMode::PlusLighter,
+        ] {
+            let style = Style {
+                fill: Some(Paint::Color(Color::rgb(source[0], source[1], source[2]))),
+                stroke: Some(Paint::None),
+                stroke_width: Some(0.0),
+                opacity: Some(1.0),
+                ..Default::default()
+            };
+            let rect = Element::Rect(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0, rx: None, ry: None, id: None, transform: None, style });
+            let mut layer = Layer::new(vec![rect]);
+            layer.blend_mode = mode;
+            layer.opacity = opacity as f64;
+
+            let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::rgb(backdrop[0], backdrop[1], backdrop[2])));
+            scene.elements.push(Element::Layer(layer));
+
+            let mut target = RenderTarget::new(20, 20);
+            renderer.render(&scene, &mut target);
+
+            let (br, bg, bb) = unit(backdrop);
+            let (sr, sg, sb) = unit(source);
+            let want = msx_render_core::composite(mode, (br, bg, bb, 1.0), (sr, sg, sb, opacity));
+            let px = target.get_pixel(10, 10);
+            for (i, w) in [want.0, want.1, want.2].into_iter().enumerate() {
+                let w = (w * 255.0).round() as i32;
+                assert!((px[i] as i32 - w).abs() <= 4, "{mode:?} channel {i}: gpu {} vs reference {w}", px[i]);
+            }
+            assert_eq!(px[3], 255, "{mode:?}");
+        }
+    }
+
     /// The core fix this session: `render_layer` used to call the plain
     /// `tessellate_elements` with an empty `Defs`, so a shader-ref fill on
     /// a shape inside a `Layer` could never resolve its `Def::Shader` and

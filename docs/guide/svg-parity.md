@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched 53 of the 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji), the last being close, and 871 of the 954 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, of the 56 `image` tests 49, of the 33 `pattern` tests 24 (6 more agree with `rsvg-convert` and not with the resvg picture), and all 18 `style` tests. The rest of the `image` tests use GIF, WebP or compressed SVG. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched 53 of the 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji), the last being close, and 884 of the 960 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, of the 56 `image` tests 49, of the 34 `pattern` tests 26 (4 more agree with `rsvg-convert` and not with the resvg picture), and all 21 `style` tests and all 21 `mix-blend-mode` tests. The rest of the `image` tests use GIF, WebP or compressed SVG. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -40,7 +40,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | SVG feature | State | Notes |
 |---|---|---|
 | Group `opacity` | Expanded | An isolated layer |
-| `mix-blend-mode` | Expanded | Nine modes, others draw normally |
+| `mix-blend-mode` | Expanded | All sixteen CSS keywords |
 | `isolation` | Expanded | A layer |
 | `clip-path` with `url(#id)` | Expanded | A layer with a clip path. Both units, `clip-rule`, `transform` and nested clip paths work on all three renderers |
 | `clip-path` as a basic shape such as `circle()` | Gap | Reported |

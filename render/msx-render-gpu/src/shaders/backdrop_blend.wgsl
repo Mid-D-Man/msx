@@ -133,7 +133,75 @@ fn blend_channel(cb: f32, cs: f32, mode: u32) -> f32 {
             if (cs <= 0.0) { return 1.0; }
             return min(cb / cs, 1.0);
         }
+        case 13u: {                                           // ColorDodge
+            if (cb <= 0.0) { return 0.0; }
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb / (1.0 - cs), 1.0);
+        }
+        case 14u: {                                           // ColorBurn
+            if (cb >= 1.0) { return 1.0; }
+            if (cs <= 0.0) { return 0.0; }
+            return 1.0 - min((1.0 - cb) / cs, 1.0);
+        }
         default: { return cs; }
+    }
+}
+
+// Non-separable helpers. They mirror `lum`, `clip_color`, `set_lum` and
+// `set_sat` in msx-render-core/src/blend.rs (the W3C formulas).
+fn lum(c: vec3<f32>) -> f32 {
+    return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+}
+
+fn sat(c: vec3<f32>) -> f32 {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(c.r, min(c.g, c.b));
+    let x = max(c.r, max(c.g, c.b));
+    var out = c;
+    if (n < 0.0) {
+        out = vec3<f32>(l) + (out - vec3<f32>(l)) * l / (l - n);
+    }
+    if (x > 1.0) {
+        out = vec3<f32>(l) + (out - vec3<f32>(l)) * (1.0 - l) / (x - l);
+    }
+    return out;
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let d = l - lum(c);
+    return clip_color(c + vec3<f32>(d));
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    if (mx > mn) {
+        let k = s / (mx - mn);
+        return (c - vec3<f32>(mn)) * k;
+    }
+    return vec3<f32>(0.0);
+}
+
+// The blend function on all three channels. Modes 15 to 18 (Hue,
+// Saturation, Color, Luminosity) need the whole color, everything else
+// goes channel by channel through `blend_channel`.
+fn blend_rgb(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
+    switch mode {
+        case 15u: { return set_lum(set_sat(cs, sat(cb)), lum(cb)); }   // Hue
+        case 16u: { return set_lum(set_sat(cb, sat(cs)), lum(cb)); }   // Saturation
+        case 17u: { return set_lum(cs, lum(cb)); }                     // Color
+        case 18u: { return set_lum(cb, lum(cs)); }                     // Luminosity
+        default: {
+            return vec3<f32>(
+                blend_channel(cb.r, cs.r, mode),
+                blend_channel(cb.g, cs.g, mode),
+                blend_channel(cb.b, cs.b, mode),
+            );
+        }
     }
 }
 
@@ -165,14 +233,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // scaled back down by that same near-zero factor in the final blend
     // term (`asrc*ab*blended`) or isn't used at all (`cb` only appears
     // there), so the clamp can't meaningfully perturb the result.
+    // Mode 19 (PlusLighter) is not a blend function. It adds premultiplied
+    // color and alpha and clamps, which replaces the whole formula below.
+    if (params.blend_mode == 19u) {
+        return min(backdrop + source, vec4<f32>(1.0));
+    }
+
     let cs = source.rgb / max(asrc, 0.0001);
     let cb = backdrop.rgb / max(ab, 0.0001);
 
-    let blended = vec3<f32>(
-        blend_channel(cb.r, cs.r, params.blend_mode),
-        blend_channel(cb.g, cs.g, params.blend_mode),
-        blend_channel(cb.b, cs.b, params.blend_mode),
-    );
+    let blended = blend_rgb(cb, cs, params.blend_mode);
 
     let result_rgb = (1.0 - asrc) * backdrop.rgb + (1.0 - ab) * source.rgb + asrc * ab * blended;
     let result_a = asrc + ab * (1.0 - asrc);

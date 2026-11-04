@@ -603,6 +603,22 @@ mod tests {
     }
 
     #[test]
+    fn every_blend_mode_survives_compile_and_decode() {
+        use msx_ast::BlendMode;
+
+        let mut scene = Scene::new(Canvas::new(10.0, 10.0, Color::WHITE));
+        for mode in BlendMode::ALL {
+            scene.elements.push(Element::Layer(Layer::new(vec![]).with_blend(mode)));
+        }
+        let decoded = crate::decode(&compile(&scene, true).unwrap()).unwrap();
+        assert_eq!(decoded.elements.len(), BlendMode::ALL.len());
+        for (el, mode) in decoded.elements.iter().zip(BlendMode::ALL) {
+            let Element::Layer(l) = el else { panic!("expected Layer") };
+            assert_eq!(l.blend_mode, mode);
+        }
+    }
+
+    #[test]
     fn layer_clip_paths_survive_compile_and_decode() {
         use msx_ast::{Circle, FillRule, Rect};
 

@@ -32,6 +32,17 @@ pub enum BlendMode {
     Lighten    = 10,
     Subtract   = 11,  // Requires signed buffer — mirrors GP's subtract blend
     Divide     = 12,  // Requires signed buffer — mirrors GP's divide blend
+    ColorDodge = 13,
+    ColorBurn  = 14,
+    Hue        = 15,
+    Saturation = 16,
+    Color      = 17,
+    Luminosity = 18,
+    /// Porter-Duff plus: premultiplied color and alpha are added and clamped.
+    /// This is the CSS `plus-lighter` compositing operator. It differs from
+    /// `Add` wherever alpha is below one, because `Add` is a blend function
+    /// and `PlusLighter` replaces the whole compositing formula.
+    PlusLighter = 19,
 }
 
 /// What a layer mask measures. Matches the SVG `mask-type` property.
@@ -74,8 +85,54 @@ impl BlendMode {
             10 => BlendMode::Lighten,
             11 => BlendMode::Subtract,
             12 => BlendMode::Divide,
+            13 => BlendMode::ColorDodge,
+            14 => BlendMode::ColorBurn,
+            15 => BlendMode::Hue,
+            16 => BlendMode::Saturation,
+            17 => BlendMode::Color,
+            18 => BlendMode::Luminosity,
+            19 => BlendMode::PlusLighter,
             _  => BlendMode::Normal,
         }
+    }
+
+    /// Every mode in byte order. Handy for tests and tables.
+    pub const ALL: [BlendMode; 20] = [
+        BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay,
+        BlendMode::Add, BlendMode::SoftLight, BlendMode::HardLight, BlendMode::Difference,
+        BlendMode::Exclusion, BlendMode::Darken, BlendMode::Lighten, BlendMode::Subtract,
+        BlendMode::Divide, BlendMode::ColorDodge, BlendMode::ColorBurn, BlendMode::Hue,
+        BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity, BlendMode::PlusLighter,
+    ];
+
+    /// The mode for a CSS `mix-blend-mode` keyword, `None` for anything else
+    /// (`normal` included, which callers handle as the absence of a mode).
+    pub fn from_css_name(name: &str) -> Option<Self> {
+        Some(match name.trim() {
+            "multiply" => BlendMode::Multiply,
+            "screen" => BlendMode::Screen,
+            "overlay" => BlendMode::Overlay,
+            "darken" => BlendMode::Darken,
+            "lighten" => BlendMode::Lighten,
+            "color-dodge" => BlendMode::ColorDodge,
+            "color-burn" => BlendMode::ColorBurn,
+            "hard-light" => BlendMode::HardLight,
+            "soft-light" => BlendMode::SoftLight,
+            "difference" => BlendMode::Difference,
+            "exclusion" => BlendMode::Exclusion,
+            "hue" => BlendMode::Hue,
+            "saturation" => BlendMode::Saturation,
+            "color" => BlendMode::Color,
+            "luminosity" => BlendMode::Luminosity,
+            "plus-lighter" => BlendMode::PlusLighter,
+            _ => return None,
+        })
+    }
+
+    /// Whether the mode works on the three channels together (hue, saturation,
+    /// color, luminosity) instead of one channel at a time.
+    pub fn is_non_separable(self) -> bool {
+        matches!(self, BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity)
     }
 
     pub fn to_byte(self) -> u8 { self as u8 }
@@ -96,6 +153,13 @@ impl BlendMode {
             BlendMode::Lighten    => Some("lighten"),
             BlendMode::Subtract   => None, // No SVG 1.1 equivalent
             BlendMode::Divide     => None,
+            BlendMode::ColorDodge => Some("color-dodge"),
+            BlendMode::ColorBurn  => Some("color-burn"),
+            BlendMode::Hue        => Some("hue"),
+            BlendMode::Saturation => Some("saturation"),
+            BlendMode::Color      => Some("color"),
+            BlendMode::Luminosity => Some("luminosity"),
+            BlendMode::PlusLighter => Some("plus-lighter"),
         }
     }
 
@@ -313,5 +377,47 @@ mod clip_path_tests {
     fn with_clip_path_keeps_an_empty_list_as_clip_everything() {
         let l = Layer::new(vec![]).with_clip_path(vec![]);
         assert_eq!(l.clip_path.as_ref().map(Vec::len), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_round_trip_for_every_mode() {
+        for (i, mode) in BlendMode::ALL.iter().enumerate() {
+            assert_eq!(mode.to_byte() as usize, i, "{mode:?} must sit at its own byte");
+            assert_eq!(BlendMode::from_byte(i as u8), *mode);
+        }
+    }
+
+    #[test]
+    fn unknown_bytes_read_as_normal() {
+        assert_eq!(BlendMode::from_byte(20), BlendMode::Normal);
+        assert_eq!(BlendMode::from_byte(255), BlendMode::Normal);
+    }
+
+    #[test]
+    fn css_names_round_trip() {
+        for mode in BlendMode::ALL {
+            if let Some(name) = mode.to_css_blend_mode() {
+                // Add shares plus-lighter with PlusLighter; it has no keyword of its own.
+                if mode == BlendMode::Add {
+                    assert_eq!(BlendMode::from_css_name(name), Some(BlendMode::PlusLighter));
+                } else {
+                    assert_eq!(BlendMode::from_css_name(name), Some(mode), "{name}");
+                }
+            }
+        }
+        assert_eq!(BlendMode::from_css_name("normal"), None);
+        assert_eq!(BlendMode::from_css_name("bogus"), None);
+        assert_eq!(BlendMode::from_css_name(" hue "), Some(BlendMode::Hue));
+    }
+
+    #[test]
+    fn only_the_four_color_space_modes_are_non_separable() {
+        let non_sep: Vec<_> = BlendMode::ALL.iter().copied().filter(|m| m.is_non_separable()).collect();
+        assert_eq!(non_sep, vec![BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity]);
     }
 }

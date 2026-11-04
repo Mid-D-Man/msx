@@ -59,6 +59,13 @@ fn blend_mode_from_str(s: &str) -> BlendMode {
         "lighten"    => BlendMode::Lighten,
         "subtract"   => BlendMode::Subtract,
         "divide"     => BlendMode::Divide,
+        "color_dodge" => BlendMode::ColorDodge,
+        "color_burn" => BlendMode::ColorBurn,
+        "hue"        => BlendMode::Hue,
+        "saturation" => BlendMode::Saturation,
+        "color"      => BlendMode::Color,
+        "luminosity" => BlendMode::Luminosity,
+        "plus_lighter" => BlendMode::PlusLighter,
         _            => BlendMode::Normal,
     }
 }

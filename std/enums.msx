@@ -39,6 +39,13 @@
     Lighten = 10
     Subtract = 11
     Divide = 12
+    ColorDodge = 13
+    ColorBurn = 14
+    Hue = 15
+    Saturation = 16
+    Color = 17
+    Luminosity = 18
+    PlusLighter = 19
   }
 
   LineCap {

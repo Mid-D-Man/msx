@@ -746,7 +746,7 @@ fn mix_blend_mode_becomes_a_layer_blend_and_isolation_an_isolated_layer() {
     let i = imp(&doc(
         r#"<rect width="1" height="1" style="mix-blend-mode:multiply"/>
            <g style="isolation:isolate"><rect width="1" height="1"/></g>
-           <rect width="1" height="1" style="mix-blend-mode:hue"/>"#,
+           <rect width="1" height="1" style="mix-blend-mode:no-such-mode"/>"#,
     ));
     let Element::Layer(l) = &i.scene.elements[0] else { panic!("a blended shape is wrapped in a layer") };
     assert_eq!(l.blend_mode, msx_ast::BlendMode::Multiply);
@@ -754,7 +754,32 @@ fn mix_blend_mode_becomes_a_layer_blend_and_isolation_an_isolated_layer() {
     let Element::Layer(iso) = &i.scene.elements[1] else { panic!("isolation creates a layer") };
     assert_eq!((iso.opacity, iso.blend_mode), (1.0, msx_ast::BlendMode::Normal));
     assert!(matches!(i.scene.elements[2], Element::Rect(_)), "an unsupported blend mode draws normally");
-    assert!(has_warning(&i, "mix-blend-mode: hue"));
+    assert!(has_warning(&i, "mix-blend-mode: no-such-mode"));
+}
+
+#[test]
+fn style_type_is_matched_without_regard_to_case() {
+    let i = imp(&doc("<style type=\"TEXT/CSS\"> .k { fill: #010203; } </style><rect class=\"k\" width=\"1\" height=\"1\"/>"));
+    assert_eq!(fill(&rect(&i.scene.elements[0]).style), Color::rgb(1, 2, 3));
+}
+
+#[test]
+fn every_css_blend_keyword_maps_to_its_mode_without_a_warning() {
+    use msx_ast::BlendMode as B;
+    let cases = [
+        ("multiply", B::Multiply), ("screen", B::Screen), ("overlay", B::Overlay),
+        ("darken", B::Darken), ("lighten", B::Lighten), ("color-dodge", B::ColorDodge),
+        ("color-burn", B::ColorBurn), ("hard-light", B::HardLight), ("soft-light", B::SoftLight),
+        ("difference", B::Difference), ("exclusion", B::Exclusion), ("hue", B::Hue),
+        ("saturation", B::Saturation), ("color", B::Color), ("luminosity", B::Luminosity),
+        ("plus-lighter", B::PlusLighter),
+    ];
+    for (name, mode) in cases {
+        let i = imp(&doc(&format!(r#"<rect width="1" height="1" style="mix-blend-mode:{name}"/>"#)));
+        let Element::Layer(l) = &i.scene.elements[0] else { panic!("{name}: a blended shape is wrapped in a layer") };
+        assert_eq!(l.blend_mode, mode, "{name}");
+        assert!(i.warnings.is_empty(), "{name}: {:?}", i.warnings);
+    }
 }
 
 #[test]

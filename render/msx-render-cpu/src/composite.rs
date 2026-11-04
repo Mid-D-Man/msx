@@ -133,6 +133,37 @@ mod tests {
         assert_eq!(direct.data(), via_layer.data());
     }
 
+    /// Every blend mode on an opaque backdrop at 70% layer opacity, against
+    /// `msx_render_core::composite`. Allows 2 levels for the 8-bit buffers.
+    #[test]
+    fn every_blend_mode_matches_the_core_reference() {
+        let backdrop = [180u8, 100, 60];
+        let source = [60u8, 200, 120];
+        let opacity = 0.7f64;
+        let unit = |c: [u8; 3]| (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+
+        for mode in BlendMode::ALL {
+            let mut pm = Pixmap::new(8, 8).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(backdrop[0], backdrop[1], backdrop[2], 255));
+            let defs = Defs::build(&[]);
+            let index = ElementIndex::build(&[]);
+            let layer = Layer::new(vec![rect_el(0.0, 0.0, 8.0, 8.0, Color::rgb(source[0], source[1], source[2]))])
+                .with_blend(mode)
+                .with_opacity(opacity);
+            render_layer(&mut pm, &layer, Matrix2D::identity(), &defs, &index, std::path::Path::new("."));
+
+            let (br, bg, bb) = unit(backdrop);
+            let (sr, sg, sb) = unit(source);
+            let want = msx_render_core::composite(mode, (br, bg, bb, 1.0), (sr, sg, sb, opacity as f32));
+            let px = pm.pixel(4, 4).unwrap();
+            for (got, w) in [(px.red(), want.0), (px.green(), want.1), (px.blue(), want.2)] {
+                let w = (w * 255.0).round() as i32;
+                assert!((got as i32 - w).abs() <= 2, "{mode:?}: cpu {got} vs reference {w}");
+            }
+            assert_eq!(px.alpha(), 255, "{mode:?}");
+        }
+    }
+
     fn rect_el(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {
         let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
         Element::Rect(msx_ast::Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style })

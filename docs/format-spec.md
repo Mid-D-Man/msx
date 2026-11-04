@@ -271,7 +271,8 @@ An isolated compositing group: children render into their own offscreen buffer (
   elements   = [ <element> ... ]
   blend_mode = "normal" | "multiply" | "screen" | "overlay" | "add" | "soft_light"
              | "hard_light" | "difference" | "exclusion" | "darken" | "lighten"
-             | "subtract" | "divide"                       // default "normal"
+             | "subtract" | "divide" | "color_dodge" | "color_burn" | "hue"
+             | "saturation" | "color" | "luminosity" | "plus_lighter"   // default "normal"
   opacity    = <float>?                                     // default 1.0
   clip       = <bool>?                                      // clip children to this layer's pixel footprint; default false
   z_index    = <float>?                                     // paint order among SIBLING top-level Layers only — see note below
@@ -666,7 +667,12 @@ A recursive node graph — combinators recurse into their own child node(s) inli
 | 3 | Overlay | 10 | Lighten |
 | 4 | Add | 11 | Subtract |
 | 5 | SoftLight | 12 | Divide |
-| 6 | HardLight | | |
+| 6 | HardLight | 13 | ColorDodge |
+| 14 | ColorBurn | 15 | Hue |
+| 16 | Saturation | 17 | Color |
+| 18 | Luminosity | 19 | PlusLighter |
+
+A decoder that does not know a byte reads it as `Normal`, so files that use bytes 13 to 19 still open in older readers and draw those layers without blending. The version byte stays at 2.
 
 ### Animation Section
 

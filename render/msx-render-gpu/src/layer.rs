@@ -1289,14 +1289,98 @@ mod tests {
             Divide => {
                 if cs <= 0.0 { 1.0 } else { (cb / cs).min(1.0) }
             }
-            Normal => cs,
+            ColorDodge => {
+                if cb <= 0.0 { 0.0 } else if cs >= 1.0 { 1.0 } else { (cb / (1.0 - cs)).min(1.0) }
+            }
+            ColorBurn => {
+                if cb >= 1.0 { 1.0 } else if cs <= 0.0 { 0.0 } else { 1.0 - ((1.0 - cb) / cs).min(1.0) }
+            }
+            // Handled by `wgsl_blend_rgb` and the early return in `wgsl_fs`, like the shader's default arm.
+            Hue | Saturation | Color | Luminosity | PlusLighter | Normal => cs,
         }
+    }
+
+    type V3 = [f32; 3];
+
+    fn wgsl_lum(c: V3) -> f32 {
+        0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+    }
+
+    fn wgsl_sat(c: V3) -> f32 {
+        c[0].max(c[1].max(c[2])) - c[0].min(c[1].min(c[2]))
+    }
+
+    fn wgsl_clip_color(c: V3) -> V3 {
+        let l = wgsl_lum(c);
+        let n = c[0].min(c[1].min(c[2]));
+        let x = c[0].max(c[1].max(c[2]));
+        let mut out = c;
+        if n < 0.0 {
+            out = [l + (out[0] - l) * l / (l - n), l + (out[1] - l) * l / (l - n), l + (out[2] - l) * l / (l - n)];
+        }
+        if x > 1.0 {
+            out = [
+                l + (out[0] - l) * (1.0 - l) / (x - l),
+                l + (out[1] - l) * (1.0 - l) / (x - l),
+                l + (out[2] - l) * (1.0 - l) / (x - l),
+            ];
+        }
+        out
+    }
+
+    fn wgsl_set_lum(c: V3, l: f32) -> V3 {
+        let d = l - wgsl_lum(c);
+        wgsl_clip_color([c[0] + d, c[1] + d, c[2] + d])
+    }
+
+    fn wgsl_set_sat(c: V3, s: f32) -> V3 {
+        let mx = c[0].max(c[1].max(c[2]));
+        let mn = c[0].min(c[1].min(c[2]));
+        if mx > mn {
+            let k = s / (mx - mn);
+            [(c[0] - mn) * k, (c[1] - mn) * k, (c[2] - mn) * k]
+        } else {
+            [0.0; 3]
+        }
+    }
+
+    fn wgsl_blend_rgb(cb: V3, cs: V3, mode: msx_ast::BlendMode) -> V3 {
+        use msx_ast::BlendMode::*;
+        match mode {
+            Hue => wgsl_set_lum(wgsl_set_sat(cs, wgsl_sat(cb)), wgsl_lum(cb)),
+            Saturation => wgsl_set_lum(wgsl_set_sat(cb, wgsl_sat(cs)), wgsl_lum(cb)),
+            Color => wgsl_set_lum(cs, wgsl_lum(cb)),
+            Luminosity => wgsl_set_lum(cb, wgsl_lum(cs)),
+            _ => [wgsl_blend_channel(cb[0], cs[0], mode), wgsl_blend_channel(cb[1], cs[1], mode), wgsl_blend_channel(cb[2], cs[2], mode)],
+        }
+    }
+
+    /// `fs_main` of `backdrop_blend.wgsl` on premultiplied RGBA values.
+    fn wgsl_fs(backdrop: [f32; 4], raw_source: [f32; 4], opacity: f32, mode: msx_ast::BlendMode) -> [f32; 4] {
+        let source = [raw_source[0] * opacity, raw_source[1] * opacity, raw_source[2] * opacity, raw_source[3] * opacity];
+        let (ab, asrc) = (backdrop[3], source[3]);
+        if asrc <= 0.0 {
+            return backdrop;
+        }
+        if mode == msx_ast::BlendMode::PlusLighter {
+            return [
+                (backdrop[0] + source[0]).min(1.0),
+                (backdrop[1] + source[1]).min(1.0),
+                (backdrop[2] + source[2]).min(1.0),
+                (ab + asrc).min(1.0),
+            ];
+        }
+        let cs = [source[0] / asrc.max(0.0001), source[1] / asrc.max(0.0001), source[2] / asrc.max(0.0001)];
+        let cb = [backdrop[0] / ab.max(0.0001), backdrop[1] / ab.max(0.0001), backdrop[2] / ab.max(0.0001)];
+        let b = wgsl_blend_rgb(cb, cs, mode);
+        let ch = |i: usize| (1.0 - asrc) * backdrop[i] + (1.0 - ab) * source[i] + asrc * ab * b[i];
+        [ch(0), ch(1), ch(2), asrc + ab * (1.0 - asrc)]
     }
 
     #[test]
     fn wgsl_blend_port_matches_real_rust_reference() {
         use msx_ast::BlendMode::*;
-        let modes = [Multiply, Screen, Overlay, Add, SoftLight, HardLight, Difference, Exclusion, Darken, Lighten, Subtract, Divide];
+        let modes = [Multiply, Screen, Overlay, Add, SoftLight, HardLight, Difference, Exclusion, Darken, Lighten, Subtract, Divide, ColorDodge, ColorBurn];
         let vals = [0.0f32, 0.1, 0.24, 0.25, 0.26, 0.5, 0.75, 0.9, 1.0];
 
         for mode in modes {
@@ -1315,7 +1399,9 @@ mod tests {
                         Lighten => msx_render_core::blend::lighten(cb, cs),
                         Subtract => msx_render_core::blend::subtract(cb, cs),
                         Divide => msx_render_core::blend::divide(cb, cs),
-                        Normal => cs,
+                        ColorDodge => msx_render_core::blend::color_dodge(cb, cs),
+                        ColorBurn => msx_render_core::blend::color_burn(cb, cs),
+                        _ => cs,
                     };
                     let ported = wgsl_blend_channel(cb, cs, mode);
                     assert!(
@@ -1376,6 +1462,54 @@ mod tests {
                 "{:?}: rgb mismatch: ported={} ref={} (cb={cb} ab={ab} cs={cs} a_src={a_src} opacity={opacity})",
                 mode, result_straight_rgb, ref_r
             );
+        }
+    }
+
+    /// The whole fragment path, premultiplied in and out, for every mode but
+    /// Normal, against `msx_render_core::composite` on colors whose channels
+    /// differ (the non-separable modes need that) and partial alphas.
+    #[test]
+    fn wgsl_fragment_path_matches_core_composite_for_every_mode() {
+        let backdrops: [([f32; 3], f32); 5] = [
+            ([0.6, 0.4, 0.3], 1.0),
+            ([0.1, 0.8, 0.5], 0.7),
+            ([0.9, 0.9, 0.2], 0.3),
+            ([0.0, 0.0, 0.0], 1.0),
+            ([1.0, 1.0, 1.0], 1.0),
+        ];
+        let sources: [([f32; 3], f32); 5] = [
+            ([0.2, 0.7, 0.5], 1.0),
+            ([0.9, 0.1, 0.3], 0.6),
+            ([0.5, 0.5, 0.5], 0.4),
+            ([1.0, 0.0, 0.0], 1.0),
+            ([0.3, 0.3, 0.9], 0.8),
+        ];
+        for mode in msx_ast::BlendMode::ALL.into_iter().filter(|m| *m != msx_ast::BlendMode::Normal) {
+            for (cb, ab) in backdrops {
+                for (cs, a_src) in sources {
+                    for opacity in [1.0f32, 0.5] {
+                        let want = msx_render_core::composite(mode, (cb[0], cb[1], cb[2], ab), (cs[0], cs[1], cs[2], a_src * opacity));
+                        let got = wgsl_fs(
+                            [cb[0] * ab, cb[1] * ab, cb[2] * ab, ab],
+                            [cs[0] * a_src, cs[1] * a_src, cs[2] * a_src, a_src],
+                            opacity,
+                            mode,
+                        );
+                        assert!((got[3] - want.3).abs() < 1e-4, "{mode:?}: alpha {} vs {}", got[3], want.3);
+                        let a = got[3];
+                        if a > 1e-3 {
+                            let straight = [got[0] / a, got[1] / a, got[2] / a];
+                            for (i, w) in [want.0, want.1, want.2].into_iter().enumerate() {
+                                assert!(
+                                    (straight[i] - w).abs() < 2e-3,
+                                    "{mode:?} ch{i} cb={cb:?} ab={ab} cs={cs:?} a={a_src} op={opacity}: wgsl {} core {w}",
+                                    straight[i]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

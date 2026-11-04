@@ -272,6 +272,28 @@ mod tests {
     }
 
     #[test]
+    fn new_blend_modes_emit_their_css_keywords() {
+        for (mode, css) in [
+            (BlendMode::ColorDodge, "color-dodge"),
+            (BlendMode::ColorBurn, "color-burn"),
+            (BlendMode::Hue, "hue"),
+            (BlendMode::Saturation, "saturation"),
+            (BlendMode::Color, "color"),
+            (BlendMode::Luminosity, "luminosity"),
+            (BlendMode::PlusLighter, "plus-lighter"),
+        ] {
+            let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::WHITE));
+            let mut layer = Layer::new(vec![Element::Circle(Circle {
+                cx: 10.0, cy: 10.0, r: 5.0,
+                id: None, transform: None, style: style_solid(Color::rgb(10, 20, 30)),
+            })]);
+            layer.blend_mode = mode;
+            scene.elements.push(Element::Layer(layer));
+            assert!(render(&scene).contains(&format!("mix-blend-mode:{css}")), "{mode:?}");
+        }
+    }
+
+    #[test]
     fn layer_clip_path_becomes_a_clip_path_element_with_clip_rule() {
         let mut even = style_solid(Color::rgb(0, 0, 0));
         even.fill_rule = Some(msx_ast::FillRule::EvenOdd);
