@@ -831,7 +831,9 @@ msx rasterize-gpu <file.msx>              → PNG via msx-render-gpu instead —
 msx animate       <source.msx>            Samples msx-anim's keyframe timeline,
                   [-o out.gif]            exports a looping GIF via msx-render-cpu.
                   [--fps <n>]             Errors if the scene has no animation
-                                          tracks — use `rasterize` for a static one.
+                  [--background <color>]  tracks, use `rasterize` for a static one.
+                                          A background keeps partial fades, which
+                                          a GIF cannot hold on a transparent canvas.
 
 msx animate-gpu   <source.msx>            GPU counterpart — samples BOTH clocks
                   [-o out.gif]            that can move at once (msx-anim's

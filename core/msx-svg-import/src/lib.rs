@@ -23,6 +23,7 @@
 mod anim;
 mod animate;
 mod cssanim;
+mod encoding;
 mod filter;
 mod geom;
 mod markers;
@@ -92,6 +93,15 @@ pub struct ImportOptions {
 /// Import SVG source text.
 pub fn import_svg(source: &str) -> Result<Imported, ImportError> {
     import_svg_with(source, &ImportOptions::default())
+}
+
+pub use encoding::{decode_xml, looks_like_xml};
+
+/// Import an SVG file given as bytes: UTF-8, UTF-16, or the encoding its XML
+/// declaration names (see `encoding.rs` for the supported ones).
+pub fn import_svg_bytes_with(bytes: &[u8], options: &ImportOptions) -> Result<Imported, ImportError> {
+    let source = decode_xml(bytes).map_err(ImportError::Xml)?;
+    import_svg_with(&source, options)
 }
 
 /// Import SVG source text with `options`.
@@ -1091,11 +1101,17 @@ impl<'a, 'i> Importer<'a, 'i> {
             root.attribute(name).and_then(parse_length).filter(|l| l.unit != Unit::Percent).map(|l| l.to_px(16.0, 0.0)).filter(|v| *v > 0.0)
         };
         let (w, h) = (size("width"), size("height"));
+        let mut sized_by_content = false;
         let (width, height) = match (w, h, &vb) {
             (Some(w), Some(h), _) => (w, h),
             (Some(w), None, Some(v)) => (w, w * v[3] / v[2]),
             (None, Some(h), Some(v)) => (h * v[2] / v[3], h),
             (None, None, Some(v)) => (v[2], v[3]),
+            (None, None, None) => {
+                // No size at all: the canvas is cut to the content once it is known.
+                sized_by_content = true;
+                (300.0, 150.0)
+            }
             (w, h, None) => {
                 self.warn("the SVG has no usable viewBox, or width and height; using 300 by 150".to_string());
                 (w.unwrap_or(300.0), h.unwrap_or(150.0))
@@ -1121,6 +1137,17 @@ impl<'a, 'i> Importer<'a, 'i> {
         let transform = compose(vec![root_transform, view]);
         let mut out = Vec::new();
         let bbox = elements_bbox(&kids);
+        if sized_by_content {
+            match bbox {
+                // Like resvg: from the origin to the far edge of what is drawn.
+                Some(b) => {
+                    scene.canvas.width = (b.x + b.w).ceil().max(1.0);
+                    scene.canvas.height = (b.y + b.h).ceil().max(1.0);
+                    self.warn(format!("the SVG has no size or viewBox; the canvas is {} by {}, the extent of its content", scene.canvas.width, scene.canvas.height));
+                }
+                None => self.warn("the SVG has no usable viewBox, or width and height; using 300 by 150".to_string()),
+            }
+        }
         let comp = self.composite(&root, &props, bbox);
         self.emit(kids, comp, transform, None, &mut out);
 

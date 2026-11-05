@@ -363,8 +363,18 @@ fn canvas_size_rules() {
     assert_eq!(c(&root(r#"height="10" viewBox="0 0 20 10""#)), (20.0, 10.0));
     assert_eq!(c(&root(r#"width="1in" height="72pt""#)), (96.0, 96.0));
     let none = root("");
-    assert_eq!(c(&none), (300.0, 150.0));
-    assert!(has_warning(&none, "300 by 150"));
+    assert_eq!(c(&none), (1.0, 1.0), "without any size the canvas is the extent of the content");
+    assert!(has_warning(&none, "extent of its content"));
+    let empty = imp(r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#);
+    assert_eq!((empty.scene.canvas.width, empty.scene.canvas.height), (300.0, 150.0));
+    assert!(has_warning(&empty, "300 by 150"));
+    let one = root(r#"width="40""#);
+    assert_eq!((one.scene.canvas.width, one.scene.canvas.height), (40.0, 150.0), "one given side keeps the 300 by 150 fallback");
+    for bad in [r#"width="-50" height="-100""#, r#"width="0" height="0""#] {
+        assert_eq!(c(&root(bad)), (1.0, 1.0), "{bad}");
+    }
+    let wide = imp(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect x="20" y="20" width="160.4" height="60"/></svg>"#);
+    assert_eq!((wide.scene.canvas.width, wide.scene.canvas.height), (181.0, 80.0));
     assert_eq!(root(r#"width="100%" height="100%" viewBox="0 0 8 8""#).scene.canvas.width, 8.0);
 }
 

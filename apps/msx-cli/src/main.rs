@@ -69,6 +69,12 @@ enum Command {
         /// Frames per second to sample the timeline at.
         #[arg(long, default_value_t = 24)]
         fps: u32,
+        /// Color of the canvas behind the frames, such as `#101010`. A GIF has
+        /// one bit of transparency, so on a transparent canvas a half faded
+        /// pixel turns fully opaque or fully clear. With a background the fade
+        /// is kept.
+        #[arg(long)]
+        background: Option<String>,
     },
     /// GPU counterpart to `Animate` — samples BOTH clocks that can move in
     /// this project at once (the msx-anim keyframe timeline AND a
@@ -145,7 +151,7 @@ fn main() {
         Command::Rasterize { input, output } => cmd_rasterize(input, output.as_deref()),
         #[cfg(feature = "gpu")]
         Command::RasterizeGpu { input, output, time } => cmd_rasterize_gpu(input, output.as_deref(), *time),
-        Command::Animate { input, output, fps } => cmd_animate(input, output.as_deref(), *fps),
+        Command::Animate { input, output, fps, background } => cmd_animate(input, output.as_deref(), *fps, background.as_deref()),
         #[cfg(feature = "gpu")]
         Command::AnimateGpu { input, output, fps, duration, no_loop } =>
             cmd_animate_gpu(input, output.as_deref(), *fps, *duration, *no_loop),
@@ -249,11 +255,17 @@ fn cmd_rasterize_gpu(input: &Path, output: Option<&Path>, time: f64) -> Result<(
     Ok(())
 }
 
-fn cmd_animate(input: &Path, output: Option<&Path>, fps: u32) -> Result<(), String> {
+fn cmd_animate(input: &Path, output: Option<&Path>, fps: u32, background: Option<&str>) -> Result<(), String> {
     if fps == 0 {
         return Err("--fps must be greater than 0".to_string());
     }
-    let scene = load_scene(input)?;
+    let background = background
+        .map(|b| msx_ast::Color::parse(b).ok_or_else(|| format!("--background: cannot read the color {b}")))
+        .transpose()?;
+    let mut scene = load_scene(input)?;
+    if let Some(color) = background {
+        scene.canvas.background = color;
+    }
     if !scene.is_animated() {
         return Err(
             "scene has no animation tracks (or an effective duration of 0) — nothing to \
@@ -471,9 +483,9 @@ fn cmd_info(input: &Path) -> Result<(), String> {
 }
 
 fn cmd_import(input: &Path, output: Option<&Path>) -> Result<(), String> {
-    let source = std::fs::read_to_string(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
+    let bytes = std::fs::read(input).map_err(|e| format!("failed to read {}: {}", input.display(), e))?;
     let options = msx_svg_import::ImportOptions { base_dir: input.parent().map(|d| d.to_path_buf()) };
-    let imported = msx_svg_import::import_svg_with(&source, &options).map_err(|e| format!("{}: {}", input.display(), e))?;
+    let imported = msx_svg_import::import_svg_bytes_with(&bytes, &options).map_err(|e| format!("{}: {}", input.display(), e))?;
     let text = msx_parser::scene_to_msx(&imported.scene).map_err(|e| e.to_string())?;
 
     let out = output.map(Path::to_path_buf).unwrap_or_else(|| input.with_extension("msx"));
@@ -687,17 +699,18 @@ fn load_scene_bytes_in(bytes: &[u8], base_dir: Option<&Path>) -> Result<Scene, S
     if bytes.len() >= 4 && &bytes[0..4] == b"MSX\0" {
         msx_binary::decode(bytes).map_err(|e| format!("binary decode failed: {}", e))
     } else {
-        let source = std::str::from_utf8(bytes).map_err(|_| "input is not valid UTF-8 DixScript source".to_string())?;
         // DixScript starts with `@CONFIG` or a `//` comment, never with `<`,
-        // so a leading `<` (XML declaration or root element) means SVG.
-        if source.trim_start_matches('\u{feff}').trim_start().starts_with('<') {
+        // so XML framing (a leading `<` or a UTF-16 mark) means SVG, whatever
+        // its encoding.
+        if msx_svg_import::looks_like_xml(bytes) {
             let options = msx_svg_import::ImportOptions { base_dir: base_dir.map(|d| d.to_path_buf()) };
-            let imported = msx_svg_import::import_svg_with(source, &options).map_err(|e| e.to_string())?;
+            let imported = msx_svg_import::import_svg_bytes_with(bytes, &options).map_err(|e| e.to_string())?;
             for w in &imported.warnings {
                 eprintln!("warning: {w}");
             }
             return Ok(imported.scene);
         }
+        let source = std::str::from_utf8(bytes).map_err(|_| "input is not valid UTF-8 DixScript source".to_string())?;
         msx_parser::parse_scene(source)
     }
 }
@@ -764,6 +777,49 @@ mod tests {
         let with_bom = format!("\u{feff}\n  {svg}");
         assert!(load_scene_bytes(with_bom.as_bytes()).is_ok(), "a BOM and leading whitespace are fine");
         assert!(load_scene_bytes(b"<html/>").is_err(), "XML that is not an SVG is rejected");
+    }
+
+    #[test]
+    fn load_scene_bytes_imports_svg_in_other_encodings() {
+        let cyrillic = b"<?xml version=\"1.0\" encoding=\"Windows-1251\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"50\" height=\"20\"><text x=\"1\" y=\"10\">\xCF\xF0\xE8\xE2\xE5\xF2</text></svg>";
+        let scene = load_scene_bytes(cyrillic).expect("a windows-1251 svg imports");
+        let msx_ast::Element::Text(t) = &scene.elements[0] else { panic!("a text element") };
+        assert_eq!(t.content, "Привет");
+
+        let utf16: Vec<u8> = std::iter::once(0xFEFFu16)
+            .chain("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"7\" height=\"3\"><rect width=\"1\" height=\"1\"/></svg>".encode_utf16())
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let scene = load_scene_bytes(&utf16).expect("a UTF-16 svg imports");
+        assert_eq!((scene.canvas.width, scene.canvas.height), (7.0, 3.0));
+
+        assert!(load_scene_bytes(b"<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>").is_err());
+    }
+
+    #[test]
+    fn animate_background_keeps_a_partial_fade_in_the_gif() {
+        let dir = std::env::temp_dir().join(format!("msx-cli-anim-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg = dir.join("fade.svg");
+        std::fs::write(
+            &svg,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ffffff"><animate attributeName="opacity" values="0.5;0.5" dur="1s" repeatCount="indefinite"/></rect></svg>"##,
+        )
+        .unwrap();
+        let first_pixel = |name: &str, background: Option<&str>| {
+            let out = dir.join(name);
+            cmd_animate(&svg, Some(&out), 4, background).expect("animates");
+            let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(std::fs::File::open(&out).unwrap())).unwrap();
+            use image::AnimationDecoder;
+            let frame = decoder.into_frames().next().unwrap().unwrap();
+            *frame.buffer().get_pixel(4, 4)
+        };
+        let with = first_pixel("with.gif", Some("#000000"));
+        assert!(with[3] == 255 && (100..160).contains(&with[0]), "white at half opacity over black is gray, got {with:?}");
+        let without = first_pixel("without.gif", None);
+        assert!(!((100..160).contains(&without[0]) && without[3] == 255), "no background cannot hold a gray fade, got {without:?}");
+        assert!(cmd_animate(&svg, None, 4, Some("not-a-color")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

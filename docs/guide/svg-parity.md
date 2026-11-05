@@ -57,6 +57,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 |---|---|---|
 | `g`, `defs`, `use`, `symbol`, nested `svg` | Expanded | Placement, `viewBox` and viewport clipping are kept, and `overflow` is honored |
 | `viewBox`, `preserveAspectRatio` | Expanded | One wrapper transform |
+| No `width`, `height` or `viewBox` | Expanded | The canvas is the extent of the content, as in resvg |
+| Files that are not UTF-8 | Expanded | UTF-16 and the encodings named in [Importing SVG](svg-import.md#encodings) |
 | `transform`, CSS `transform`, `transform-origin` | Expanded | `transform-box` other than `view-box` is a gap |
 | `switch`, `systemLanguage`, `requiredExtensions` | Expanded | The language is English |
 | `<style>` rules | Expanded | Types, ids, classes, attribute selectors and `:first-child`, joined by descendant and child combinators, with summed specificity. Sibling combinators and other pseudo-classes are skipped |

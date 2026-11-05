@@ -17,7 +17,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Style.** Presentation attributes, `<style>` rules, the `style` attribute and `!important` are cascaded in CSS order. Selectors may combine types, ids, classes, attribute selectors (`[a]`, `=`, `~=`, `|=`, `^=`, `$=` and `*=`) and `:first-child`, joined by descendant and child combinators, and the specificity adds up over the whole selector. Inheritance is resolved, so every shape carries explicit values and groups carry no style.
 - **Opacity and color.** `fill-opacity`, `stroke-opacity` and `currentColor` become plain colors and gradient stop alphas. The raster renderers do not read the opacity keys, so none are written.
 - **Reuse.** `use` is expanded in place with the style of the `use` element. A `symbol` and a nested `svg` keep their `viewBox` mapping. Ids stay on the original shape only.
-- **Size.** The canvas takes its size from `width`, `height` and `viewBox`. The mapping, including `preserveAspectRatio`, becomes one wrapper transform, so no `viewbox` block is written. The background is transparent.
+- **Size.** The canvas takes its size from `width`, `height` and `viewBox`. The mapping, including `preserveAspectRatio`, becomes one wrapper transform, so no `viewbox` block is written. The background is transparent. An SVG with no usable `width`, `height` or `viewBox` (missing, zero or negative) gets a canvas that reaches from the origin to the far edge of its content, as in resvg. When only one of `width` and `height` is given and there is no `viewBox`, the other side is 150 for the height and 300 for the width, and the importer says so. An empty SVG is 300 by 150.
 - **Gradients.** MSX gradients live in the bounding box of the shape and have no transform. The importer converts `userSpaceOnUse` coordinates and `gradientTransform` into that space for each shape. A linear gradient converts exactly under any transform. A radial gradient converts exactly under uniform scale, rotation and translation. Under a stretch or skew it is approximated by a circle of the same area, and a warning says so.
 - **Compositing.** `opacity` on a group becomes an isolated layer. `mix-blend-mode` becomes the blend mode of a layer for every CSS keyword: multiply, screen, overlay, darken, lighten, color-dodge, color-burn, hard-light, soft-light, difference, exclusion, hue, saturation, color, luminosity and plus-lighter. `isolation: isolate` becomes a layer. `paint-order: stroke` becomes two shapes, the stroke first.
 - **Clipping.** `clip-path: url(#id)` on any element becomes a layer with a `clip_path`. `clipPathUnits` of `userSpaceOnUse` and `objectBoundingBox`, the `transform` of the `clipPath`, `clip-rule` and a `clip-path` on the `clipPath` itself (the clips nest, so both apply) are honored. Only shapes with an area, text and a `use` of one of those count, and fill, stroke and opacity inside the clip path are ignored, as in SVG. A `symbol` and a nested `svg` clip to their viewport the same way, unless `overflow` is `visible` or `auto`. The clip is added only when the content can reach past the viewport, so a symbol that fits costs no extra layer.
@@ -109,6 +109,10 @@ An element is not drawn when its filter does not exist, is not a `filter`, has n
 
 What a layer effect cannot express is reported and the element is drawn without that filter: other primitives (`feFlood`, `feMerge`, `feComposite`, `feColorMatrix`, lighting and the rest), an input other than the previous result, a primitive region of its own, a blur with a different amount per axis, and the color functions (`grayscale()`, `hue-rotate()` and the others).
 
+## Encodings
+
+`import_svg_bytes_with` and the command line read an SVG file from bytes. It can be UTF-8 (with or without a byte order mark), UTF-16 in either byte order (with a mark, or starting with `<` in two bytes), or any encoding the XML declaration names among ASCII, ISO-8859-1, ISO-8859-15, windows-1252 and windows-1251. The text is turned into UTF-8 before it is read, and the declaration is rewritten to say so. A file that names another encoding is refused with an error that says which, instead of being read as if it were UTF-8. Text without a declaration must be valid UTF-8. `import_svg` and `import_svg_with` still take text that is already decoded.
+
 ## What is reported and not imported
 
 | SVG feature | Result |
@@ -140,7 +144,7 @@ What a layer effect cannot express is reported and the element is drawn without 
 | `text-decoration`, `letter-spacing`, `word-spacing`, `font-style`, `writing-mode`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
 | A user-space gradient on a shape with no bounding box area | The average color of its stops |
 
-Files that are not UTF-8 are rejected with an error. Elements are capped at 200,000 shapes, so an exponentially nested `use` chain cannot run away. A `use` that refers back to itself is skipped.
+See [Encodings](#encodings) for files that are not UTF-8. Elements are capped at 200,000 shapes, so an exponentially nested `use` chain cannot run away. A `use` that refers back to itself is skipped.
 
 ## In the browser
 
