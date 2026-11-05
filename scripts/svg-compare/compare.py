@@ -69,7 +69,11 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         if mode == "resvg":
             root = os.environ.get("RESVG_TESTS", "/tmp/resvg-tests/crates/resvg/tests/tests")
+            # RESVG_ONLY=filters,masking limits the run to those top level folders.
+            only = [d for d in os.environ.get("RESVG_ONLY", "").split(",") if d]
             for f in sorted(glob.glob(f"{root}/*/*/*.svg")):
+                if only and os.path.relpath(f, root).split("/")[0] not in only:
+                    continue
                 r = compare(f, f[:-4] + ".png", tmp)
                 rel = os.path.relpath(f, root).split("/")
                 r["group"] = rel[0] + "/" + rel[1]

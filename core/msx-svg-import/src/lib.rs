@@ -23,6 +23,7 @@
 mod anim;
 mod animate;
 mod cssanim;
+mod filter;
 mod geom;
 mod markers;
 mod pattern;
@@ -315,13 +316,17 @@ struct Comp {
     clips: Vec<Vec<Element>>,
     /// A mask that applies, as its elements and how it is read.
     mask: Option<(Vec<Element>, MaskType)>,
+    /// Filters that apply, the first one innermost (see `filter.rs`).
+    filter: Vec<filter::Step>,
+    /// The element is not drawn: its filter is missing or has nothing to draw.
+    hidden: bool,
 }
 
 impl Comp {
-    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false, clips: Vec::new(), mask: None };
+    const NONE: Comp = Comp { opacity: 1.0, blend: BlendMode::Normal, isolate: false, clips: Vec::new(), mask: None, filter: Vec::new(), hidden: false };
 
     fn needs_layer(&self) -> bool {
-        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate || !self.clips.is_empty() || self.mask.is_some()
+        self.opacity < 1.0 || self.blend != BlendMode::Normal || self.isolate || !self.clips.is_empty() || self.mask.is_some() || !self.filter.is_empty()
     }
 }
 
@@ -739,13 +744,6 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
         }
-        for key in ["filter"] {
-            if let Some(v) = props.get(key) {
-                if !v.is_empty() && v != "none" {
-                    self.warn(format!("{} uses {key}, which is not supported; drawn without it", Self::label(node)));
-                }
-            }
-        }
         if self.context.is_empty() {
             for key in ["fill", "stroke"] {
                 if let Some(v) = props.get(key) {
@@ -792,7 +790,7 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     /// Opacity, blend mode and isolation of one element.
-    fn composite(&mut self, node: &Node, props: &Props, bbox: Option<BBox>) -> Comp {
+    fn composite(&mut self, node: &Node<'a, 'i>, props: &Props, bbox: Option<BBox>) -> Comp {
         if self.clip_mode {
             if props.get("clip-path").is_some_and(|v| !v.trim().is_empty() && v.trim() != "none") {
                 self.warn(format!("{} uses clip-path inside a clip path, which is not supported; ignored", Self::label(node)));
@@ -809,7 +807,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         let clips = self.resolve_clips(node, props, bbox);
         let mask = self.resolve_mask(node, props, bbox);
         let opacity = if self.skip_opacity == Some(node.id()) { 1.0 } else { element_opacity(props) };
-        Comp { opacity, blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips, mask }
+        let filter = self.resolve_filter(node, props, bbox);
+        Comp { opacity, blend, isolate: props.get("isolation").is_some_and(|v| v.trim() == "isolate"), clips, mask, filter: filter.steps, hidden: filter.hidden }
     }
 
     // ── Masks ─────────────────────────────────────────────────────────────────
@@ -1147,10 +1146,11 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// Wrap `kids` as needed: an isolated layer for group opacity, a group
     /// for a transform or id, nothing at all otherwise.
     fn emit(&mut self, kids: Vec<Element>, comp: Comp, transform: Option<Transform>, id: Option<String>, out: &mut Vec<Element>) {
-        if kids.is_empty() {
+        if kids.is_empty() || comp.hidden {
             return;
         }
         if comp.needs_layer() {
+            let kids = filter::wrap_all(comp.filter, kids);
             out.push(layered(kids, comp.opacity, comp.blend, comp.clips, comp.mask, transform, id));
         } else if transform.is_some() || id.is_some() {
             out.push(Element::Group(Group { children: kids, id, transform, style: None }));
@@ -1803,7 +1803,19 @@ impl<'a, 'i> Importer<'a, 'i> {
                 parts.insert(0, layer);
             }
         }
-        let with_extras = !extras.is_empty() || pattern_drawn;
+        if comp.hidden {
+            return;
+        }
+        let filtered = !comp.filter.is_empty();
+        if filtered {
+            // The shape fades after the filter, so its opacity moves to the layer.
+            for part in parts.iter_mut() {
+                if let Some(style) = style_mut(part) {
+                    style.opacity = Some(1.0);
+                }
+            }
+        }
+        let with_extras = !extras.is_empty() || pattern_drawn || filtered;
         if comp.blend != BlendMode::Normal || !comp.clips.is_empty() || comp.mask.is_some() || with_extras {
             // A clip, a mask or markers live in the element's own space, so the
             // element's transform moves from the shape to the layer.
@@ -1817,6 +1829,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
             parts.extend(extras);
+            let parts = filter::wrap_all(comp.filter, parts);
             // The shape and its markers fade together, so the opacity that is
             // otherwise in the shape's style sits on the layer.
             let opacity = if with_extras { comp.opacity } else { 1.0 };

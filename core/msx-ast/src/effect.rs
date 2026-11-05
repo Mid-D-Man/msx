@@ -7,6 +7,7 @@
 //!   msx-render-gpu (dedicated render passes, ping-pong FBOs).
 
 use crate::color::Color;
+use crate::transform::Matrix2D;
 
 /// Discriminant for binary encoding. Maps to DixScript @ENUMS(EffectType)
 /// in std/enums.msx.
@@ -84,6 +85,33 @@ impl Effect {
         }
     }
 
+    /// The effect in device units, for a layer whose coordinate system maps to
+    /// the device through `m`. Distances (radii, spread) are multiplied by the
+    /// uniform scale `sqrt(|det|)` and offsets go through the linear part of
+    /// the matrix, so a shadow of an element rotated by 90 degrees falls the
+    /// way the element sees it. Colors and opacities are unchanged.
+    pub fn scaled(&self, m: &Matrix2D) -> Effect {
+        let s = (m.a * m.d - m.b * m.c).abs().sqrt();
+        let off = |dx: f64, dy: f64| (m.a * dx + m.c * dy, m.b * dx + m.d * dy);
+        match self {
+            Effect::Blur { radius } => Effect::Blur { radius: radius * s },
+            Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => {
+                let (ox, oy) = off(*offset_x, *offset_y);
+                Effect::DropShadow { offset_x: ox, offset_y: oy, blur_radius: blur_radius * s, color: *color, opacity: *opacity }
+            }
+            Effect::InnerShadow { offset_x, offset_y, blur_radius, color, opacity } => {
+                let (ox, oy) = off(*offset_x, *offset_y);
+                Effect::InnerShadow { offset_x: ox, offset_y: oy, blur_radius: blur_radius * s, color: *color, opacity: *opacity }
+            }
+            Effect::OuterGlow { color, blur_radius, spread, opacity } => {
+                Effect::OuterGlow { color: *color, blur_radius: blur_radius * s, spread: spread * s, opacity: *opacity }
+            }
+            Effect::InnerGlow { color, blur_radius, opacity } => {
+                Effect::InnerGlow { color: *color, blur_radius: blur_radius * s, opacity: *opacity }
+            }
+        }
+    }
+
     /// Pixel extent the effect can reach outside the layer bounds (for bounds expansion).
     pub fn max_extent(&self) -> f64 {
         match self {
@@ -94,3 +122,41 @@ impl Effect {
         }
     }
       }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn identity_leaves_every_effect_alone() {
+        let fx = Effect::DropShadow { offset_x: 3.0, offset_y: -2.0, blur_radius: 4.0, color: Color::BLACK, opacity: 0.5 };
+        assert_eq!(fx.scaled(&Matrix2D::identity()), fx);
+        let glow = Effect::OuterGlow { color: Color::WHITE, blur_radius: 2.0, spread: 1.0, opacity: 1.0 };
+        assert_eq!(glow.scaled(&Matrix2D::identity()), glow);
+    }
+
+    #[test]
+    fn uniform_scale_multiplies_distances() {
+        let m = Matrix2D::scale(2.0, 2.0);
+        assert_eq!(Effect::Blur { radius: 3.0 }.scaled(&m), Effect::Blur { radius: 6.0 });
+        let Effect::OuterGlow { blur_radius, spread, .. } = (Effect::OuterGlow { color: Color::WHITE, blur_radius: 2.0, spread: 1.0, opacity: 1.0 }).scaled(&m) else { unreachable!() };
+        assert!(close(blur_radius, 4.0) && close(spread, 2.0));
+    }
+
+    #[test]
+    fn translation_does_not_move_the_blur() {
+        assert_eq!(Effect::Blur { radius: 3.0 }.scaled(&Matrix2D::translate(50.0, 20.0)), Effect::Blur { radius: 3.0 });
+    }
+
+    #[test]
+    fn rotation_turns_the_offset_but_keeps_the_radius() {
+        let m = Matrix2D::rotate_deg(90.0);
+        let fx = Effect::DropShadow { offset_x: 10.0, offset_y: 0.0, blur_radius: 2.0, color: Color::BLACK, opacity: 1.0 };
+        let Effect::DropShadow { offset_x, offset_y, blur_radius, .. } = fx.scaled(&m) else { unreachable!() };
+        assert!(close(offset_x, 0.0) && close(offset_y, 10.0) && close(blur_radius, 2.0));
+    }
+}

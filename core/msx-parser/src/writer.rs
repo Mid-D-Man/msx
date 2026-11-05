@@ -517,10 +517,38 @@ fn write_track(out: &mut String, t: &AnimationTrack) {
     out.push_str("      ] }\n");
 }
 
-fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result<(), WriteError> {
-    if !l.effects.is_empty() {
-        return Err(WriteError::Unsupported("layer effects".into()));
+/// The `effects` list of a layer, one effect per line. The field names are the
+/// ones `parse_effect` reads.
+fn write_effects(out: &mut String, effects: &[msx_ast::Effect], indent: usize) {
+    use msx_ast::Effect;
+    let _ = writeln!(out, "{}effects = [", pad(indent));
+    for (i, fx) in effects.iter().enumerate() {
+        let body = match fx {
+            Effect::Blur { radius } => format!("type = \"blur\", radius = {}", float(*radius)),
+            Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => format!(
+                "type = \"drop_shadow\", offset_x = {}, offset_y = {}, blur_radius = {}, color = {}, opacity = {}",
+                float(*offset_x), float(*offset_y), float(*blur_radius), color_value(*color), float(*opacity)
+            ),
+            Effect::InnerShadow { offset_x, offset_y, blur_radius, color, opacity } => format!(
+                "type = \"inner_shadow\", offset_x = {}, offset_y = {}, blur_radius = {}, color = {}, opacity = {}",
+                float(*offset_x), float(*offset_y), float(*blur_radius), color_value(*color), float(*opacity)
+            ),
+            Effect::OuterGlow { color, blur_radius, spread, opacity } => format!(
+                "type = \"outer_glow\", color = {}, blur_radius = {}, spread = {}, opacity = {}",
+                color_value(*color), float(*blur_radius), float(*spread), float(*opacity)
+            ),
+            Effect::InnerGlow { color, blur_radius, opacity } => format!(
+                "type = \"inner_glow\", color = {}, blur_radius = {}, opacity = {}",
+                color_value(*color), float(*blur_radius), float(*opacity)
+            ),
+        };
+        let comma = if i + 1 < effects.len() { "," } else { "" };
+        let _ = writeln!(out, "{}{{ {body} }}{comma}", pad(indent + 2));
     }
+    let _ = writeln!(out, "{}],", pad(indent));
+}
+
+fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result<(), WriteError> {
     let mut head = format!("{}{{ type = \"layer\", blend_mode = {}, opacity = {}", pad(indent), quote(blend_mode_text(l.blend_mode)), num(l.opacity));
     if l.mask_type != msx_ast::MaskType::Luminance {
         head.push_str(&format!(", mask_type = {}", quote(l.mask_type.as_str())));
@@ -541,6 +569,9 @@ fn write_layer(out: &mut String, l: &Layer, indent: usize, tail: &str) -> Result
     if let Some(elements) = &l.mask {
         write_element_list(out, "mask", elements, indent + 2)?;
         out.push_str(",\n");
+    }
+    if !l.effects.is_empty() {
+        write_effects(out, &l.effects, indent + 2);
     }
     write_children(out, &l.children, indent + 2)?;
     let _ = write!(out, " }}{tail}");
@@ -779,11 +810,29 @@ mod tests {
         let sdf = Element::Sdf(msx_ast::SdfNode::new(msx_ast::SdfTree::Circle { cx: 0.0, cy: 0.0, r: 1.0 }, Paint::None));
         let err = scene_to_msx(&scene_with(vec![], vec![sdf])).unwrap_err();
         assert_eq!(err, WriteError::Unsupported("sdf elements".into()));
+    }
 
-        let mut layer = Layer::new(vec![]);
-        layer.effects = vec![msx_ast::Effect::Blur { radius: 2.0 }];
-        assert!(scene_to_msx(&scene_with(vec![], vec![Element::Layer(layer)])).is_err());
+    #[test]
+    fn layer_effects_roundtrip() {
+        use msx_ast::Effect;
+        let mut layer = Layer::new(vec![rect(style())]);
+        layer.effects = vec![
+            Effect::Blur { radius: 2.5 },
+            Effect::DropShadow { offset_x: 3.0, offset_y: -2.0, blur_radius: 4.0, color: Color::rgb(10, 20, 30), opacity: 0.75 },
+            Effect::InnerShadow { offset_x: 0.0, offset_y: 1.0, blur_radius: 2.0, color: Color::BLACK, opacity: 0.5 },
+            Effect::OuterGlow { color: Color::WHITE, blur_radius: 8.0, spread: 1.0, opacity: 0.75 },
+            Effect::InnerGlow { color: Color::rgb(255, 0, 0), blur_radius: 3.0, opacity: 1.0 },
+        ];
+        assert_roundtrip(&scene_with(vec![], vec![Element::Layer(layer)]));
+    }
 
+    #[test]
+    fn layer_effects_sit_beside_clip_and_mask() {
+        let mut layer = Layer::new(vec![rect(style())]);
+        layer.effects = vec![msx_ast::Effect::Blur { radius: 4.0 }];
+        layer.clip_path = Some(vec![rect(style())]);
+        layer.mask = Some(vec![rect(style())]);
+        assert_roundtrip(&scene_with(vec![], vec![Element::Layer(layer)]));
     }
 
     fn animated_scene() -> Scene {

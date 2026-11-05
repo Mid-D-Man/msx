@@ -29,7 +29,9 @@ pub fn render_layer(pixmap: &mut Pixmap, layer: &Layer, parent: Matrix2D, defs: 
         render_element(&mut buffer, child, combined, defs, index, base_dir);
     }
 
-    apply_effects(&mut buffer, &layer.effects);
+    // Effect distances are in the layer's own units, so they follow its transform.
+    let device_effects: Vec<msx_ast::Effect> = layer.effects.iter().map(|e| e.scaled(&combined)).collect();
+    apply_effects(&mut buffer, &device_effects);
 
     if let Some(shapes) = &layer.clip_path {
         apply_clip(&mut buffer, shapes, combined, index);
@@ -162,6 +164,29 @@ mod tests {
             }
             assert_eq!(px.alpha(), 255, "{mode:?}");
         }
+    }
+
+    /// The same check on the CPU: a layer scaled by 2 with a blur of 3 looks
+    /// like an unscaled layer of twice the size with a blur of 6.
+    #[test]
+    fn effects_follow_the_layer_transform() {
+        let render = |w: f64, radius: f64, scale: f64| {
+            let mut pm = Pixmap::new(60, 60).unwrap();
+            let defs = Defs::build(&[]);
+            let index = ElementIndex::build(&[]);
+            let mut layer = Layer::new(vec![rect_el(0.0, 0.0, w, 60.0, Color::WHITE)]).with_effect(msx_ast::Effect::Blur { radius });
+            layer.transform = Some(msx_ast::Transform::Scale { x: scale, y: scale });
+            render_layer(&mut pm, &layer, Matrix2D::identity(), &defs, &index, std::path::Path::new("."));
+            pm
+        };
+        let scaled = render(15.0, 3.0, 2.0);
+        let plain = render(30.0, 6.0, 1.0);
+        for x in [24u32, 28, 30, 32, 36] {
+            let (a, b) = (scaled.pixel(x, 30).unwrap().alpha() as i32, plain.pixel(x, 30).unwrap().alpha() as i32);
+            assert!((a - b).abs() <= 3, "x={x}: scaled layer {a} vs plain {b}");
+        }
+        let unscaled_radius = render(15.0, 3.0, 1.0);
+        assert_ne!(scaled.pixel(36, 30).unwrap().alpha(), unscaled_radius.pixel(36, 30).unwrap().alpha());
     }
 
     fn rect_el(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {

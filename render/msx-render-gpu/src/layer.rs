@@ -564,7 +564,8 @@ impl LayerCompositor {
         // case — most layers have no effects at all), and `buffer`
         // itself, unblurred, is what gets composited; see `GpuEffects::apply`'s
         // own doc for why that's cheap rather than a wasted allocation.
-        let blurred = gpu_effects.apply(device, queue, &buffer, &layer.effects);
+        let device_effects: Vec<msx_ast::Effect> = layer.effects.iter().map(|e| e.scaled(&combined)).collect();
+        let blurred = gpu_effects.apply(device, queue, &buffer, &device_effects);
 
         // The clip path comes after the effects (SVG order: filter, then
         // clip) and before the layer composites, so a blurred edge is cut

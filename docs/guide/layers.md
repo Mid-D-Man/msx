@@ -91,6 +91,8 @@ Each entry of `effects` is an object whose `type` selects the effect. Effects ap
 | `outer_glow` | `color` (white), `blur_radius` (8), `spread` (0), `opacity` (0.75) |
 | `inner_glow` | `color` (white), `blur_radius` (8), `opacity` (0.75) |
 
+The radius of a blur is its standard deviation, the same number as `stdDeviation` in SVG. Radii, spreads and offsets are in the coordinate system of the layer, so they follow its transform: a layer scaled by 2 blurs twice as far, and a layer rotated by 90 degrees turns the offset of its shadow. The CPU renderer blurs with the SVG definition (three box blurs from a standard deviation of 2, a true Gaussian kernel below that) and treats pixels outside the canvas as transparent.
+
 An unknown effect type stops the parse. The `std/effects.msx` file ships ready-made presets: `soft_blur`, `heavy_blur`, `soft_shadow`, `long_shadow`, `pressed_inset`, `neon_glow` and `highlight_rim`.
 
 > **Limitation** The GPU renderer applies `blur` only. The other four effects run in the SVG renderer, as a generated filter chain, and in the CPU rasterizer. A GPU render of a layer with a drop shadow shows the layer without the shadow.

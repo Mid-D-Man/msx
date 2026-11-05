@@ -2,12 +2,10 @@
 //! CPU post-process passes for `Layer` effects, operating directly on a
 //! `tiny_skia::Pixmap`'s premultiplied byte buffer.
 //!
-//! `gaussian_blur` is 3 passes of a separable box blur — a standard,
-//! widely-used approximation (the central limit theorem says repeated box
-//! convolution converges toward a Gaussian shape). The per-pass radius
-//! below is a commonly-cited approximation, not an exact variance match —
-//! good enough for a CPU-fallback blur, not meant to be bit-identical to a
-//! true Gaussian kernel.
+//! `gaussian_blur` follows the SVG definition of `feGaussianBlur`: three box
+//! blurs of the width the specification gives for a standard deviation of 2 or
+//! more, and a true Gaussian kernel below that. The radius of an effect is that
+//! standard deviation, in pixels, with transparent pixels outside the buffer.
 //!
 //! `drop_shadow`/`outer_glow` build a same-size offscreen buffer, flood it
 //! with the effect's tint wherever the source has alpha, blur it, then
@@ -48,87 +46,109 @@ pub fn apply_effects(pixmap: &mut Pixmap, effects: &[Effect]) {
 
 // ── Blur ─────────────────────────────────────────────────────────────────────
 
+/// Gaussian blur with standard deviation `sigma` in pixels, the way the SVG
+/// specification describes it: three box blurs for `sigma` of 2 and more, a true
+/// Gaussian kernel below that. Pixels outside the buffer count as transparent,
+/// and the values stay in `f32` until the end so faint sources survive.
 pub fn gaussian_blur(pixmap: &mut Pixmap, sigma: f32) {
-    if sigma <= 0.0 {
+    if sigma.is_nan() || sigma <= 0.0 {
         return;
     }
     let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    let radius = ((sigma * 1.88) as i32).max(1);
+    let mut buf: Vec<f32> = pixmap.data().iter().map(|&b| b as f32).collect();
 
-    // BUGFIX: this used to round-trip through `Vec<u8>` + truncating i64
-    // division between every one of the 6 box-blur sub-passes (3 iterations
-    // × horizontal+vertical). For a low-alpha source spread over a wide
-    // radius — a single bright pixel, a thin line — the per-pixel average
-    // drops below 1.0 well before the spread finishes, and truncating to
-    // u8 at every sub-pass can lose the *entire* signal to flat zero before
-    // the last pass even runs. Confirmed by direct simulation: a single
-    // alpha=204 pixel blurred with this radius collapsed to total mass 0
-    // with the old u8/i64 path, vs. mass ~204 conserved keeping f32
-    // throughout. Quantizing to u8 only once, at the very end, fixes it.
-    let mut buf_a: Vec<f32> = pixmap.data().iter().map(|&b| b as f32).collect();
-    let mut buf_b: Vec<f32> = vec![0.0; buf_a.len()];
+    blur_rows(&mut buf, width, sigma);
+    let mut turned = transpose(&buf, width, height);
+    blur_rows(&mut turned, height, sigma);
+    let buf = transpose(&turned, height, width);
 
-    for _ in 0..3 {
-        box_blur_horizontal(&buf_a, &mut buf_b, width, height, radius);
-        box_blur_vertical(&buf_b, &mut buf_a, width, height, radius);
-    }
-
-    for (dst, &src) in pixmap.data_mut().iter_mut().zip(buf_a.iter()) {
+    for (dst, &src) in pixmap.data_mut().iter_mut().zip(buf.iter()) {
         *dst = src.round().clamp(0.0, 255.0) as u8;
     }
 }
 
-fn box_blur_horizontal(src: &[f32], dst: &mut [f32], width: usize, _height: usize, radius: i32) {
-    if radius <= 0 {
-        dst.copy_from_slice(src);
+/// Blurs every row of an RGBA `f32` buffer that is `width` pixels wide.
+fn blur_rows(buf: &mut [f32], width: usize, sigma: f32) {
+    if width == 0 {
         return;
     }
-    let row_floats = width * 4;
-    dst.par_chunks_mut(row_floats).enumerate().for_each(|(y, dst_row)| {
-        let src_row = &src[y * row_floats..(y + 1) * row_floats];
-        for x in 0..width {
-            let mut sum = [0.0f32; 4];
-            let mut count = 0.0f32;
-            for dx in -radius..=radius {
-                let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
-                let idx = sx * 4;
-                for (s, &v) in sum.iter_mut().zip(&src_row[idx..idx + 4]) {
-                    *s += v;
-                }
-                count += 1.0;
-            }
-            let out_idx = x * 4;
-            for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
-                *d = s / count;
-            }
-        }
-    });
+    buf.par_chunks_mut(width * 4).for_each(|row| blur_line(row, width, sigma));
 }
 
-fn box_blur_vertical(src: &[f32], dst: &mut [f32], width: usize, height: usize, radius: i32) {
-    if radius <= 0 {
-        dst.copy_from_slice(src);
-        return;
-    }
-    let row_floats = width * 4;
-    dst.par_chunks_mut(row_floats).enumerate().for_each(|(y, dst_row)| {
+fn transpose(src: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; src.len()];
+    for y in 0..height {
         for x in 0..width {
+            let from = (y * width + x) * 4;
+            let to = (x * height + y) * 4;
+            out[to..to + 4].copy_from_slice(&src[from..from + 4]);
+        }
+    }
+    out
+}
+
+fn blur_line(row: &mut [f32], n: usize, sigma: f32) {
+    let mut tmp = vec![0.0f32; row.len()];
+    if sigma < 2.0 {
+        let radius = (sigma * 3.0).ceil() as i32;
+        let weights: Vec<f32> = (-radius..=radius).map(|k| (-((k * k) as f32) / (2.0 * sigma * sigma)).exp()).collect();
+        let total: f32 = weights.iter().sum();
+        for x in 0..n as i32 {
             let mut sum = [0.0f32; 4];
-            let mut count = 0.0f32;
-            for dy in -radius..=radius {
-                let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
-                let idx = (sy * width + x) * 4;
-                for (s, &v) in sum.iter_mut().zip(&src[idx..idx + 4]) {
-                    *s += v;
+            for (k, w) in (-radius..=radius).zip(&weights) {
+                let sx = x + k;
+                if sx < 0 || sx >= n as i32 {
+                    continue;
                 }
-                count += 1.0;
+                let idx = sx as usize * 4;
+                for c in 0..4 {
+                    sum[c] += row[idx + c] * w;
+                }
             }
-            let out_idx = x * 4;
-            for (d, &s) in dst_row[out_idx..out_idx + 4].iter_mut().zip(&sum) {
-                *d = s / count;
+            let out = x as usize * 4;
+            for c in 0..4 {
+                tmp[out + c] = sum[c] / total;
             }
         }
-    });
+        row.copy_from_slice(&tmp);
+        return;
+    }
+
+    // The SVG box blur: d is the box width, odd boxes are centered, even ones
+    // alternate left and right with a centered box one wider in between.
+    let d = (sigma * 1.879_971_2 + 0.5).floor().max(1.0) as usize;
+    let passes: [(usize, usize); 3] = if d % 2 == 1 {
+        [((d - 1) / 2, (d - 1) / 2); 3]
+    } else {
+        [(d / 2, d / 2 - 1), (d / 2 - 1, d / 2), (d / 2, d / 2)]
+    };
+    for (left, right) in passes {
+        box_pass(row, &mut tmp, n, left, right);
+        row.copy_from_slice(&tmp);
+    }
+}
+
+/// One box blur over a line: each pixel becomes the mean of the window from
+/// `left` pixels before it to `right` pixels after it, with transparent
+/// pixels outside the line. A running sum keeps it linear in the line length.
+fn box_pass(src: &[f32], dst: &mut [f32], n: usize, left: usize, right: usize) {
+    let size = (left + right + 1) as f32;
+    for c in 0..4 {
+        let mut sum = 0.0f32;
+        for k in 0..=right.min(n.saturating_sub(1)) {
+            sum += src[k * 4 + c];
+        }
+        for x in 0..n {
+            dst[x * 4 + c] = sum / size;
+            let add = x + right + 1;
+            if add < n {
+                sum += src[add * 4 + c];
+            }
+            if x >= left {
+                sum -= src[(x - left) * 4 + c];
+            }
+        }
+    }
 }
 
 // ── Morphology (for OuterGlow's `spread`) ───────────────────────────────────
@@ -402,4 +422,97 @@ mod tests {
         let outside_idx = (1 * 30 + 1) * 4;
         assert_eq!(data[outside_idx + 3], 0);
     }
-         }
+
+    fn alpha_at(p: &Pixmap, x: usize, y: usize) -> u8 {
+        p.data()[(y * p.width() as usize + x) * 4 + 3]
+    }
+
+    /// Left half opaque, right half empty, `at` the column of the edge.
+    fn half_plane(size: usize, edge: usize) -> Pixmap {
+        let mut p = Pixmap::new(size as u32, size as u32).unwrap();
+        for y in 0..size {
+            for x in 0..edge {
+                solid_pixel(&mut p, x, y, [255, 255, 255, 255]);
+            }
+        }
+        p
+    }
+
+    /// Standard normal upper tail, 1 - phi(z), by the Abramowitz and Stegun
+    /// approximation, scaled to 0..255.
+    fn tail(z: f32) -> f32 {
+        let t = 1.0 / (1.0 + 0.231_641_9 * z.abs());
+        let poly = t * (0.319_381_54 + t * (-0.356_563_78 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274_5))));
+        let upper = (-(z * z) / 2.0).exp() / (2.0 * std::f32::consts::PI).sqrt() * poly;
+        255.0 * if z >= 0.0 { upper } else { 1.0 - upper }
+    }
+
+    #[test]
+    fn box_blur_edge_follows_the_gaussian_for_large_sigma() {
+        let mut p = half_plane(80, 40);
+        gaussian_blur(&mut p, 4.0);
+        // Pixel centers sit half a pixel from the edge between columns 39 and 40.
+        for (x, dist) in [(36usize, -3.5f32), (39, -0.5), (40, 0.5), (44, 4.5)] {
+            let want = tail(dist / 4.0);
+            let got = alpha_at(&p, x, 40) as f32;
+            assert!((got - want).abs() < 9.0, "x={x}: got {got}, want about {want}");
+        }
+    }
+
+    #[test]
+    fn kernel_blur_edge_follows_the_gaussian_for_small_sigma() {
+        let mut p = half_plane(40, 20);
+        gaussian_blur(&mut p, 1.0);
+        for (x, dist) in [(18usize, -1.5f32), (19, -0.5), (20, 0.5), (21, 1.5)] {
+            let want = tail(dist);
+            let got = alpha_at(&p, x, 20) as f32;
+            assert!((got - want).abs() < 9.0, "x={x}: got {got}, want about {want}");
+        }
+    }
+
+    #[test]
+    fn blur_keeps_the_total_alpha_of_a_shape_away_from_the_border() {
+        let mut p = Pixmap::new(60, 60).unwrap();
+        for y in 25..35usize {
+            for x in 25..35usize {
+                solid_pixel(&mut p, x, y, [255, 255, 255, 255]);
+            }
+        }
+        let before: u32 = p.data().chunks_exact(4).map(|px| px[3] as u32).sum();
+        gaussian_blur(&mut p, 3.0);
+        let after: u32 = p.data().chunks_exact(4).map(|px| px[3] as u32).sum();
+        assert!((after as f32 - before as f32).abs() / (before as f32) < 0.02, "{before} -> {after}");
+    }
+
+    #[test]
+    fn pixels_outside_the_buffer_count_as_transparent() {
+        let mut p = Pixmap::new(40, 40).unwrap();
+        p.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        gaussian_blur(&mut p, 4.0);
+        let edge = alpha_at(&p, 0, 20);
+        assert!((100..160).contains(&edge), "an edge pixel of a filled buffer is about half covered, got {edge}");
+        assert_eq!(alpha_at(&p, 20, 20), 255);
+    }
+
+    #[test]
+    fn a_huge_sigma_empties_the_buffer_and_stays_fast() {
+        let mut p = Pixmap::new(200, 200).unwrap();
+        for y in 20..180usize {
+            for x in 20..180usize {
+                solid_pixel(&mut p, x, y, [46, 139, 87, 255]);
+            }
+        }
+        let start = std::time::Instant::now();
+        gaussian_blur(&mut p, 1000.0);
+        assert!(start.elapsed().as_secs() < 5);
+        assert!(p.data().chunks_exact(4).all(|px| px[3] <= 2));
+    }
+
+    #[test]
+    fn a_tiny_sigma_changes_nothing() {
+        let mut p = half_plane(20, 10);
+        let before = p.data().to_vec();
+        gaussian_blur(&mut p, 0.01);
+        assert_eq!(p.data(), before.as_slice());
+    }
+}

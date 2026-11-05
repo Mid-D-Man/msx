@@ -243,7 +243,7 @@ fn foreign_namespaces_and_metadata_are_ignored() {
 fn unsupported_features_are_reported() {
     let i = imp(&doc(
         r##"<rect width="1" height="1" clip-path="url(#c)"/>
-            <rect width="1" height="1" filter="url(#f)"/>
+            <filter id="f"><feFlood/></filter><rect width="1" height="1" filter="url(#f)"/>
             <rect width="1" height="1" mask="url(#m)"/>
             <foreignObject width="5" height="5"/>
             <pattern id="p"/><rect width="1" height="1" fill="url(#p)"/>"##,
@@ -2586,4 +2586,302 @@ fn pattern_fills_survive_write_and_parse_without_markers() {
     assert!(!text.contains("pattern:"), "the marker never reaches the source");
     let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
     assert_eq!(format!("{:?}", back.elements), format!("{:?}", i.scene.elements));
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────
+
+fn layer_of(e: &Element) -> &Layer {
+    match e {
+        Element::Layer(l) => l,
+        other => panic!("expected a layer, got {other:?}"),
+    }
+}
+
+/// The layer that carries the effects of a filtered element: inside the layer
+/// that carries its transform and opacity.
+fn filter_layer(i: &Imported) -> &Layer {
+    layer_of(&layer_of(&i.scene.elements[0]).children[0])
+}
+
+fn region_of(l: &Layer) -> (f64, f64, f64, f64) {
+    let r = rect(&l.clip_path.as_ref().expect("the filter region clips the layer")[0]);
+    (r.x, r.y, r.width, r.height)
+}
+
+fn region_is(l: &Layer, want: (f64, f64, f64, f64)) -> bool {
+    let got = region_of(l);
+    close(got.0, want.0) && close(got.1, want.1) && close(got.2, want.2) && close(got.3, want.3)
+}
+
+fn filtered(filter: &str, shape: &str) -> Imported {
+    imp(&doc(&format!("<defs>{filter}</defs>{shape}")))
+}
+
+const SQUARE: &str = r##"<rect x="20" y="20" width="60" height="60" fill="#010203" filter="url(#f)"/>"##;
+
+#[test]
+fn a_blur_filter_becomes_a_layer_with_a_blur_and_the_default_region() {
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="4"/></filter>"#, SQUARE);
+    let l = filter_layer(&i);
+    assert_eq!(l.effects, vec![msx_ast::Effect::Blur { radius: 4.0 }]);
+    // minus 10 percent, 120 percent of the 60 by 60 box
+    assert!(region_is(l, (14.0, 14.0, 72.0, 72.0)), "{:?}", region_of(l));
+    assert_eq!(fill(&rect(&l.children[0]).style), Color::rgb(1, 2, 3));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+}
+
+#[test]
+fn the_element_transform_and_opacity_sit_outside_the_filter_layer() {
+    let i = filtered(
+        r#"<filter id="f"><feGaussianBlur stdDeviation="2"/></filter>"#,
+        r##"<rect x="20" y="20" width="60" height="60" fill="#010203" opacity=".5" transform="translate(5 6)" filter="url(#f)"/>"##,
+    );
+    let outer = layer_of(&i.scene.elements[0]);
+    assert!(outer.transform.is_some());
+    assert!(close(outer.opacity, 0.5));
+    let inner = filter_layer(&i);
+    assert!(inner.transform.is_none());
+    assert!(close(inner.opacity, 1.0));
+    let r = rect(&inner.children[0]);
+    assert!(r.transform.is_none());
+    assert_eq!(r.style.opacity, Some(1.0));
+}
+
+#[test]
+fn a_filter_on_a_group_wraps_all_its_children() {
+    let i = filtered(
+        r#"<filter id="f"><feGaussianBlur stdDeviation="3"/></filter>"#,
+        r#"<g filter="url(#f)"><rect x="10" y="10" width="20" height="20"/><rect x="50" y="50" width="20" height="20"/></g>"#,
+    );
+    let l = filter_layer(&i);
+    assert_eq!(l.children.len(), 2);
+    // the children span 10..70, so the region is 10 - 6 .. 70 + 6
+    assert!(region_is(l, (4.0, 4.0, 72.0, 72.0)), "{:?}", region_of(l));
+}
+
+#[test]
+fn region_fractions_and_user_space_regions() {
+    let i = filtered(r#"<filter id="f" x="0.1" y="0.2" width="0.8" height="0.6"><feGaussianBlur stdDeviation="1"/></filter>"#, SQUARE);
+    assert!(region_is(filter_layer(&i), (26.0, 32.0, 48.0, 36.0)));
+    let i = filtered(
+        r#"<filter id="f" filterUnits="userSpaceOnUse" x="10" y="20" width="80" height="50"><feGaussianBlur stdDeviation="1"/></filter>"#,
+        SQUARE,
+    );
+    assert!(region_is(filter_layer(&i), (10.0, 20.0, 80.0, 50.0)));
+    let i = filtered(r#"<filter id="f" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="1"/></filter>"#, SQUARE);
+    assert!(region_is(filter_layer(&i), (-10.0, -10.0, 120.0, 120.0)), "the default region is 120 percent of the viewport");
+    let i = filtered(r#"<filter id="f" filterUnits="bogus"><feGaussianBlur stdDeviation="1"/></filter>"#, SQUARE);
+    assert!(region_is(filter_layer(&i), (14.0, 14.0, 72.0, 72.0)), "an unknown unit reads as objectBoundingBox");
+}
+
+#[test]
+fn elements_with_a_broken_filter_are_not_drawn() {
+    let missing = imp(&doc(SQUARE));
+    assert!(missing.scene.elements.is_empty());
+    assert!(has_warning(&missing, "does not exist"));
+
+    let empty = filtered(r#"<filter id="f"/>"#, SQUARE);
+    assert!(empty.scene.elements.is_empty());
+    assert!(has_warning(&empty, "no primitives"));
+
+    let negative = filtered(r#"<filter id="f" width="-50"><feGaussianBlur stdDeviation="2"/></filter>"#, SQUARE);
+    assert!(negative.scene.elements.is_empty());
+    assert!(has_warning(&negative, "no area"));
+
+    let not_a_filter = filtered(r#"<rect id="f" width="1" height="1"/>"#, SQUARE);
+    assert!(not_a_filter.scene.elements.is_empty());
+    assert!(has_warning(&not_a_filter, "is a <rect>"));
+
+    let line = filtered(
+        r#"<filter id="f"><feGaussianBlur stdDeviation="1"/></filter>"#,
+        r##"<line x1="50" y1="10" x2="50" y2="90" stroke="#010203" stroke-width="10" filter="url(#f)"/>"##,
+    );
+    assert!(line.scene.elements.is_empty(), "objectBoundingBox units on a line have no area");
+}
+
+#[test]
+fn deviations_that_blur_nothing_leave_the_picture_alone() {
+    for std in ["", "-5", "0", "0 0", "5 10 15 20"] {
+        let i = filtered(&format!(r#"<filter id="f"><feGaussianBlur stdDeviation="{std}"/></filter>"#), SQUARE);
+        assert!(filter_layer(&i).effects.is_empty(), "stdDeviation=\"{std}\"");
+        assert!(i.warnings.is_empty(), "stdDeviation=\"{std}\": {:?}", i.warnings);
+    }
+    let i = filtered(r#"<filter id="f"><feGaussianBlur/></filter>"#, SQUARE);
+    assert!(filter_layer(&i).effects.is_empty());
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="4 4"/></filter>"#, SQUARE);
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 4.0 }]);
+}
+
+#[test]
+fn a_different_blur_per_axis_is_reported_and_the_element_drawn_plain() {
+    for std in ["5 0", "0 5", "20 2"] {
+        let i = filtered(&format!(r#"<filter id="f"><feGaussianBlur stdDeviation="{std}"/></filter>"#), SQUARE);
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "stdDeviation=\"{std}\"");
+        assert!(has_warning(&i, "different amount for each axis"), "stdDeviation=\"{std}\"");
+    }
+}
+
+#[test]
+fn a_chain_of_blurs_applies_in_order() {
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="-1"/><feGaussianBlur stdDeviation="4"/></filter>"#, SQUARE);
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 4.0 }]);
+    let i = filtered(
+        r#"<filter id="f"><feGaussianBlur stdDeviation="2" result="a"/><feGaussianBlur in="a" stdDeviation="3"/></filter>"#,
+        SQUARE,
+    );
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 2.0 }, msx_ast::Effect::Blur { radius: 3.0 }]);
+}
+
+#[test]
+fn drop_shadow_primitives_become_drop_shadow_effects() {
+    let i = filtered(
+        r#"<filter id="f"><feDropShadow dx="4" dy="6" stdDeviation="3" flood-color="blue" flood-opacity=".5"/></filter>"#,
+        SQUARE,
+    );
+    assert_eq!(
+        filter_layer(&i).effects,
+        vec![msx_ast::Effect::DropShadow { offset_x: 4.0, offset_y: 6.0, blur_radius: 3.0, color: Color::rgb(0, 0, 255), opacity: 0.5 }]
+    );
+    let i = filtered(r#"<filter id="f"><feDropShadow/></filter>"#, SQUARE);
+    assert_eq!(
+        filter_layer(&i).effects,
+        vec![msx_ast::Effect::DropShadow { offset_x: 2.0, offset_y: 2.0, blur_radius: 2.0, color: Color::BLACK, opacity: 1.0 }]
+    );
+    let i = filtered(r#"<filter id="f"><feDropShadow stdDeviation="0" dx="6" dy="6" flood-color="rgba(0,0,255,.5)" flood-opacity=".5"/></filter>"#, SQUARE);
+    let msx_ast::Effect::DropShadow { blur_radius, color, opacity, .. } = filter_layer(&i).effects[0].clone() else { panic!("a shadow") };
+    assert_eq!(blur_radius, 0.0);
+    assert_eq!(color, Color::rgb(0, 0, 255));
+    assert!((opacity - 0.25).abs() < 0.01, "the color alpha and the flood opacity multiply, got {opacity}");
+}
+
+#[test]
+fn offsets_move_the_content_before_the_effects() {
+    let i = filtered(r#"<filter id="f"><feOffset dx="5" dy="3"/><feGaussianBlur stdDeviation="2"/></filter>"#, SQUARE);
+    let l = filter_layer(&i);
+    assert_eq!(l.effects, vec![msx_ast::Effect::Blur { radius: 2.0 }]);
+    let Element::Group(g) = &l.children[0] else { panic!("the content sits in a moved group") };
+    assert!(matches!(g.transform, Some(Transform::Translate { x, y }) if close(x, 5.0) && close(y, 3.0)));
+}
+
+#[test]
+fn filters_inherit_attributes_and_primitives_through_href() {
+    let i = filtered(
+        r##"<filter id="base" x="0.1" y="0.2" width="0.8" height="0.6"/><filter id="f" xlink:href="#base"><feGaussianBlur stdDeviation="2"/></filter>"##,
+        SQUARE,
+    );
+    assert!(region_is(filter_layer(&i), (26.0, 32.0, 48.0, 36.0)));
+    let i = filtered(r##"<filter id="base"><feGaussianBlur stdDeviation="6"/></filter><filter id="f" xlink:href="#base"/>"##, SQUARE);
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 6.0 }]);
+    let i = filtered(r##"<rect id="r" width="1" height="1"/><filter id="f" xlink:href="#r"><feGaussianBlur stdDeviation="4"/></filter>"##, SQUARE);
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 4.0 }], "an href to something else is ignored");
+    let i = filtered(
+        r##"<filter id="f" xlink:href="#g"><feGaussianBlur stdDeviation="4"/></filter><filter id="g" xlink:href="#f"><feGaussianBlur stdDeviation="9"/></filter>"##,
+        SQUARE,
+    );
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 4.0 }], "a loop ends");
+}
+
+#[test]
+fn primitives_without_a_layer_effect_are_reported_and_the_element_drawn_plain() {
+    for body in [
+        r#"<feFlood flood-color="red"/>"#,
+        r#"<feGaussianBlur stdDeviation="3" in="SourceAlpha"/>"#,
+        r#"<feGaussianBlur stdDeviation="3" x="10"/>"#,
+        r#"<feGaussianBlur stdDeviation="3"/><feMerge/>"#,
+    ] {
+        let i = filtered(&format!(r#"<filter id="f">{body}</filter>"#), SQUARE);
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{body}");
+        assert!(has_warning(&i, "which is not supported"), "{body}: {:?}", i.warnings);
+    }
+}
+
+#[test]
+fn primitive_units_scale_the_deviation_by_the_box() {
+    let i = filtered(r#"<filter id="f" primitiveUnits="objectBoundingBox"><feGaussianBlur stdDeviation="0.1"/></filter>"#, SQUARE);
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 6.0 }]);
+    let i = filtered(
+        r#"<filter id="f" primitiveUnits="objectBoundingBox"><feGaussianBlur stdDeviation="0.1"/></filter>"#,
+        r##"<rect x="20" y="20" width="60" height="30" fill="#010203" filter="url(#f)"/>"##,
+    );
+    assert!(has_warning(&i, "different amount for each axis"));
+}
+
+#[test]
+fn css_blur_function() {
+    let i = imp(&doc(r##"<rect x="20" y="20" width="60" height="60" fill="#010203" style="filter: blur(5px)"/>"##));
+    let l = filter_layer(&i);
+    assert_eq!(l.effects, vec![msx_ast::Effect::Blur { radius: 5.0 }]);
+    assert!(l.clip_path.is_none(), "a filter function has no region clip");
+    for ok_but_nothing in ["blur(0)", "blur()"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {ok_but_nothing}"/>"##)));
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{ok_but_nothing}");
+        assert!(i.warnings.is_empty(), "{ok_but_nothing}");
+    }
+    for bad in ["blur(-1px)", "blur(5px 5px)", "blur(10%)", "sepia(1)", "grayscale(50%)"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {bad}"/>"##)));
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{bad}");
+        assert!(has_warning(&i, "which is not supported"), "{bad}: {:?}", i.warnings);
+    }
+}
+
+#[test]
+fn css_drop_shadow_function() {
+    let red = Color::rgb(255, 0, 0);
+    for value in ["drop-shadow(2px 3px 4px red)", "drop-shadow(red 2px 3px 4px)", "drop-shadow(2px 3px 4px #f00)", "drop-shadow(2px 3px 4px rgb(255, 0, 0))"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {value}"/>"##)));
+        assert_eq!(
+            filter_layer(&i).effects,
+            vec![msx_ast::Effect::DropShadow { offset_x: 2.0, offset_y: 3.0, blur_radius: 4.0, color: red, opacity: 1.0 }],
+            "{value}"
+        );
+    }
+    let i = imp(&doc(r##"<rect width="10" height="10" color="#0000ff" style="filter: drop-shadow(1px 2px)"/>"##));
+    assert_eq!(
+        filter_layer(&i).effects,
+        vec![msx_ast::Effect::DropShadow { offset_x: 1.0, offset_y: 2.0, blur_radius: 0.0, color: Color::rgb(0, 0, 255), opacity: 1.0 }],
+        "the default color is currentColor"
+    );
+    for bad in ["drop-shadow()", "drop-shadow(2px)", "drop-shadow(2px, 3px)", "drop-shadow(2px 3px -1px)", "drop-shadow(10% 3px)", "drop-shadow(1px 2px 3px 4px)"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {bad}"/>"##)));
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{bad}");
+        assert!(has_warning(&i, "which is not supported"), "{bad}");
+    }
+}
+
+#[test]
+fn a_list_applies_its_filters_in_order_with_the_first_innermost() {
+    let i = filtered(
+        r#"<filter id="f"><feGaussianBlur stdDeviation="2"/></filter>"#,
+        r##"<rect x="20" y="20" width="60" height="60" fill="#010203" style="filter: url(#f) drop-shadow(1px 1px)"/>"##,
+    );
+    let outer_fx = filter_layer(&i);
+    assert!(matches!(outer_fx.effects[0], msx_ast::Effect::DropShadow { .. }));
+    let inner_fx = layer_of(&outer_fx.children[0]);
+    assert_eq!(inner_fx.effects, vec![msx_ast::Effect::Blur { radius: 2.0 }]);
+}
+
+#[test]
+fn one_missing_url_in_a_list_hides_the_element() {
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="2"/></filter>"#, r#"<rect width="10" height="10" style="filter: url(#f) url(#nope)"/>"#);
+    assert!(i.scene.elements.is_empty());
+}
+
+#[test]
+fn filtered_scenes_survive_write_and_parse() {
+    let i = filtered(
+        r##"<filter id="f" x="0" y="0" width="1.5" height="1.5"><feOffset dx="2" dy="2"/><feDropShadow dx="3" dy="3" stdDeviation="2" flood-color="#334455" flood-opacity=".6"/></filter>"##,
+        r##"<rect x="20" y="20" width="60" height="60" fill="#010203" transform="rotate(5)" filter="url(#f)"/><circle cx="50" cy="50" r="10" style="filter: blur(3px)"/>"##,
+    );
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(msx_parser::scene_to_msx(&back).expect("written again"), text);
+}
+
+#[test]
+fn em_in_a_filter_function_is_the_font_size_of_the_element() {
+    let i = imp(&doc(r##"<rect width="10" height="10" font-size="20" style="filter: drop-shadow(blue 0.5em 1em 0.1em)"/>"##));
+    assert_eq!(
+        filter_layer(&i).effects,
+        vec![msx_ast::Effect::DropShadow { offset_x: 10.0, offset_y: 20.0, blur_radius: 2.0, color: Color::rgb(0, 0, 255), opacity: 1.0 }]
+    );
 }

@@ -684,6 +684,38 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         assert!(px[0] > 0 && px[0] < 255, "expected a blurred (partial) red channel past the edge, got {:?} — 0 means blur didn't run at all, 255 means the edge itself moved", px);
     }
 
+    /// A blur radius is in the units of the layer, so a layer scaled by 2 with a
+    /// radius of 3 must look like an unscaled layer of twice the size with a
+    /// radius of 6.
+    #[test]
+    fn blur_radius_follows_the_layer_transform_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let red = || Style { fill: Some(Paint::Color(Color::rgb(255, 0, 0))), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
+        let render = |x: f64, w: f64, radius: f64, scale: f64| {
+            let rect = Element::Rect(Rect { x, y: 0.0, width: w, height: 60.0, rx: None, ry: None, id: None, transform: None, style: red() });
+            let mut layer = Layer::new(vec![rect]);
+            layer.effects = vec![msx_ast::Effect::Blur { radius }];
+            layer.transform = Some(msx_ast::Transform::Scale { x: scale, y: scale });
+            let mut scene = Scene::new(Canvas::new(60.0, 60.0, Color::BLACK));
+            scene.elements.push(Element::Layer(layer));
+            let mut target = RenderTarget::new(60, 60);
+            renderer.render(&scene, &mut target);
+            target
+        };
+        let scaled = render(0.0, 15.0, 3.0, 2.0);
+        let plain = render(0.0, 30.0, 6.0, 1.0);
+        for x in [24u32, 28, 30, 32, 36] {
+            let (a, b) = (scaled.get_pixel(x, 30)[0] as i32, plain.get_pixel(x, 30)[0] as i32);
+            assert!((a - b).abs() <= 6, "x={x}: scaled layer {a} vs plain {b}");
+        }
+        let unscaled_radius = render(0.0, 15.0, 3.0, 1.0);
+        let far = (scaled.get_pixel(36, 30)[0] as i32 - unscaled_radius.get_pixel(36, 30)[0] as i32).abs();
+        assert!(far < 255, "sanity: the renders are comparable");
+    }
+
     fn clip_rect(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {
         let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
         Element::Rect(Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style })
