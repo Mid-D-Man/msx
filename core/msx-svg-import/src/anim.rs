@@ -97,6 +97,19 @@ pub(crate) struct Timing {
     pub fill_before: bool,
 }
 
+/// Cuts the active time at `end`. An `end` that waits for an event is ignored.
+fn clamp_to_end<'a>(get: &impl Fn(&str) -> Option<&'a str>, begin: f64, active: Option<f64>, notes: &mut Vec<String>) -> Result<Option<f64>, String> {
+    let Some(raw) = get("end").map(str::trim).filter(|e| !e.is_empty() && *e != "indefinite") else { return Ok(active) };
+    match parse_begin(Some(raw)) {
+        Ok(end) if end <= begin => Err(format!("end=\"{raw}\" is not after its begin")),
+        Ok(end) => Ok(Some(active.map_or(end - begin, |a| a.min(end - begin)))),
+        Err(_) => {
+            notes.push(format!("end=\"{raw}\" waits for an event or another animation and was ignored"));
+            Ok(active)
+        }
+    }
+}
+
 impl Timing {
     /// Reads `begin`, `dur`, `repeatCount`, `repeatDur`, `end` and `fill`.
     /// Attributes that are read but cannot be honored add a line to `notes`.
@@ -130,14 +143,47 @@ impl Timing {
                 (None, None) => None,
             },
         };
-        if let Some(raw) = get("end").map(str::trim).filter(|e| !e.is_empty() && *e != "indefinite") {
-            match parse_begin(Some(raw)) {
-                Ok(end) if end <= begin => return Err(format!("end=\"{raw}\" is not after its begin")),
-                Ok(end) => active = Some(active.map_or(end - begin, |a| a.min(end - begin))),
-                Err(_) => notes.push(format!("end=\"{raw}\" waits for an event or another animation and was ignored")),
-            }
-        }
+        active = clamp_to_end(&get, begin, active, notes)?;
         Ok(Timing { begin, dur, active, freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false })
+    }
+
+    /// Reads the timing of a `set`. Without a `dur` the value holds from `begin`
+    /// to the end of the scene, which is a hold of a few milliseconds that never
+    /// goes back. A finite `dur`, `repeatCount` or `repeatDur` is one hold as
+    /// long as the active time, because a constant does not change when it repeats.
+    pub(crate) fn parse_set<'a>(get: impl Fn(&str) -> Option<&'a str>, notes: &mut Vec<String>) -> Result<Timing, String> {
+        let begin = parse_begin(get("begin"))?;
+        let dur = match get("dur").map(str::trim) {
+            None | Some("indefinite") | Some("media") => None,
+            Some(v) => Some(parse_clock(v).filter(|d| *d > 0.0).ok_or_else(|| format!("dur=\"{v}\" is not a positive time"))?),
+        };
+        // None: not given. Some(None): forever. Some(Some(x)): x seconds.
+        let by_count = match (get("repeatCount").map(str::trim), dur) {
+            (None, _) => None,
+            (Some("indefinite"), _) | (_, None) => Some(None),
+            (Some(v), Some(d)) => Some(Some(number(v).filter(|c| *c > 0.0).ok_or_else(|| format!("repeatCount=\"{v}\" is not a positive number"))? * d)),
+        };
+        let by_dur = match get("repeatDur").map(str::trim) {
+            None => None,
+            Some("indefinite") => Some(None),
+            Some(v) => Some(Some(parse_clock(v).filter(|d| *d > 0.0).ok_or_else(|| format!("repeatDur=\"{v}\" is not a positive time"))?)),
+        };
+        let mut active = match (by_count, by_dur) {
+            (None, None) => dur,
+            (Some(c), None) => c,
+            (None, Some(d)) => d,
+            (Some(c), Some(d)) => match (c, d) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            },
+        };
+        active = clamp_to_end(&get, begin, active, notes)?;
+        match active {
+            Some(a) if a < EPS * 4.0 => Err(format!("its active time of {a}s is too short")),
+            Some(a) => Ok(Timing { begin, dur: a, active: Some(a), freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false }),
+            None => Ok(Timing { begin, dur: EPS * 4.0, active: Some(EPS * 4.0), freeze: true, fill_before: false }),
+        }
     }
 
     /// Where the animation stops on the scene timeline: infinite when it repeats forever.
@@ -155,13 +201,66 @@ pub(crate) enum Calc {
     Spline,
 }
 
+/// Where a `steps()` easing puts its jumps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Jump {
+    Start,
+    End,
+    None,
+    Both,
+}
+
+/// How the value moves across one interval of a curve with `Calc::Spline`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Ease {
+    /// The control points of a CSS `cubic-bezier()` or a `keySplines` entry.
+    Bezier([f64; 4]),
+    /// CSS `steps()`: `count` equal pieces, each holding one value.
+    Steps { count: u32, jump: Jump },
+}
+
+impl Ease {
+    pub(crate) const LINEAR: Ease = Ease::Bezier([0.0, 0.0, 1.0, 1.0]);
+
+    pub(crate) fn is_linear(&self) -> bool {
+        *self == Ease::LINEAR
+    }
+
+    /// The easing of the same interval played backwards: `1 - f(1 - x)`.
+    pub(crate) fn mirrored(self) -> Ease {
+        match self {
+            Ease::Bezier(e) => Ease::Bezier([1.0 - e[2], 1.0 - e[3], 1.0 - e[0], 1.0 - e[1]]),
+            Ease::Steps { count, jump } => {
+                let jump = match jump {
+                    Jump::Start => Jump::End,
+                    Jump::End => Jump::Start,
+                    other => other,
+                };
+                Ease::Steps { count, jump }
+            }
+        }
+    }
+}
+
+/// How far a `steps()` easing has gone, from 0 to 1, while the input is in
+/// piece `piece` (counted from 0).
+fn step_level(count: u32, jump: Jump, piece: usize) -> f64 {
+    let shift = usize::from(matches!(jump, Jump::Start | Jump::Both));
+    let jumps = match jump {
+        Jump::Start | Jump::End => count,
+        Jump::None => count.saturating_sub(1).max(1),
+        Jump::Both => count + 1,
+    };
+    ((piece + shift) as f64 / f64::from(jumps)).min(1.0)
+}
+
 /// The values of one animation over one iteration, with their key times.
 #[derive(Debug, Clone)]
 pub(crate) struct Curve {
     times: Vec<f64>,
     values: Vec<Vec<f64>>,
     calc: Calc,
-    splines: Vec<[f64; 4]>,
+    eases: Vec<Ease>,
 }
 
 fn lerp(a: &[f64], b: &[f64], t: f64) -> Vec<f64> {
@@ -244,7 +343,7 @@ impl Curve {
                 (_, None) => (0..n).map(|i| i as f64 / (n - 1) as f64).collect(),
             }
         };
-        let mut splines = Vec::new();
+        let mut splines: Vec<Ease> = Vec::new();
         if calc == Calc::Spline && n > 1 {
             let raw = key_splines.map(str::trim).filter(|s| !s.is_empty()).ok_or("calcMode=\"spline\" needs keySplines")?;
             for item in list(raw) {
@@ -252,13 +351,54 @@ impl Curve {
                 if nums.len() != 4 || !(0.0..=1.0).contains(&nums[0]) || !(0.0..=1.0).contains(&nums[2]) {
                     return Err(format!("keySplines entry \"{item}\" is not four numbers with x values in 0 to 1"));
                 }
-                splines.push([nums[0], nums[1], nums[2], nums[3]]);
+                splines.push(Ease::Bezier([nums[0], nums[1], nums[2], nums[3]]));
             }
             if splines.len() != n - 1 {
                 return Err(format!("keySplines has {} entries for {n} values", splines.len()));
             }
         }
-        Ok(Curve { times, values, calc, splines })
+        Ok(Curve { times, values, calc, eases: splines })
+    }
+
+    /// A curve through explicit `(time, value)` points with straight lines
+    /// between them. Points with the same time are pulled `EPS` apart, so a jump
+    /// is a short ramp. `dur` is the length of the iteration in seconds.
+    pub(crate) fn from_points(mut times: Vec<f64>, values: Vec<Vec<f64>>, dur: f64) -> Result<Curve, String> {
+        let width = values.first().map_or(0, Vec::len);
+        if times.len() != values.len() || times.len() < 2 || width == 0 || values.iter().any(|v| v.len() != width) {
+            return Err("its points are not usable".into());
+        }
+        let gap = EPS / dur;
+        for i in 1..times.len() {
+            if times[i] < times[i - 1] + gap {
+                times[i] = times[i - 1] + gap;
+            }
+        }
+        let last = times[times.len() - 1];
+        if last > 1.0 {
+            times.iter_mut().for_each(|t| *t /= last);
+        }
+        Ok(Curve { times, values, calc: Calc::Linear, eases: Vec::new() })
+    }
+
+    /// A curve with a key time and a value for each point and an easing for
+    /// each interval between them.
+    pub(crate) fn eased(values: Vec<Vec<f64>>, times: Vec<f64>, eases: Vec<Ease>) -> Result<Curve, String> {
+        let n = values.len();
+        let width = values.first().map_or(0, Vec::len);
+        if n == 0 || times.len() != n || eases.len() + 1 != n || width == 0 || values.iter().any(|v| v.len() != width) {
+            return Err("its keyframes are not usable".into());
+        }
+        if times[0] != 0.0 || times[n - 1] != 1.0 || times.windows(2).any(|w| w[1] < w[0]) {
+            return Err("keyTimes must rise from 0 to 1".into());
+        }
+        let calc = if eases.iter().all(Ease::is_linear) { Calc::Linear } else { Calc::Spline };
+        Ok(Curve { times, values, calc, eases })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn polyline_for_test(&self, dur: f64) -> Vec<(f64, Vec<f64>)> {
+        self.polyline(dur)
     }
 
     /// One iteration as a polyline: progress `0..=1` and the value there.
@@ -280,9 +420,29 @@ impl Curve {
             Calc::Spline => {
                 for i in 0..n - 1 {
                     let (t0, t1) = (self.times[i], self.times[i + 1]);
-                    for s in 0..SPLINE_STEPS {
-                        let f = s as f64 / SPLINE_STEPS as f64;
-                        out.push((t0 + (t1 - t0) * f, lerp(&self.values[i], &self.values[i + 1], bezier(self.splines[i], f))));
+                    match self.eases[i] {
+                        Ease::Bezier(c) => {
+                            for s in 0..SPLINE_STEPS {
+                                let f = s as f64 / SPLINE_STEPS as f64;
+                                out.push((t0 + (t1 - t0) * f, lerp(&self.values[i], &self.values[i + 1], bezier(c, f))));
+                            }
+                        }
+                        Ease::Steps { count, jump } => {
+                            // Each piece holds one value and the next one is reached in a ramp
+                            // of EPS that ends where the piece does.
+                            let pieces = count as usize;
+                            let ramp = EPS / dur;
+                            for j in 0..pieces {
+                                let start = t0 + (t1 - t0) * j as f64 / pieces as f64;
+                                let stop = t0 + (t1 - t0) * (j + 1) as f64 / pieces as f64;
+                                let v = lerp(&self.values[i], &self.values[i + 1], step_level(count, jump, j));
+                                out.push((start, v.clone()));
+                                let hold = (stop - ramp).max(start);
+                                if hold > start {
+                                    out.push((hold, v));
+                                }
+                            }
+                        }
                     }
                 }
                 out.push((1.0, self.values[n - 1].clone()));
@@ -749,5 +909,104 @@ mod tests {
         let p = plan(&[Span { period: 1.013, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 1.017, indefinite: true, end: f64::INFINITY, removes: false }, Span { period: 1.019, indefinite: true, end: f64::INFINITY, removes: false }]);
         assert!(p.looping && close(p.duration, 1.019));
         assert_eq!(p.notes.len(), 1);
+    }
+    fn set_timing(pairs: &[(&str, &str)]) -> Result<Timing, String> {
+        let mut notes = Vec::new();
+        Timing::parse_set(|k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| *v), &mut notes)
+    }
+
+    #[test]
+    fn a_set_without_dur_holds_for_good() {
+        let t = set_timing(&[("begin", "2s")]).unwrap();
+        assert!(close(t.begin, 2.0) && t.freeze && t.active == Some(EPS * 4.0));
+        assert!(close(t.end(), 2.0 + EPS * 4.0), "the scene needs to last only a moment after the switch");
+        assert_eq!(set_timing(&[("dur", "indefinite")]).unwrap(), set_timing(&[]).unwrap());
+        assert!(set_timing(&[("repeatCount", "indefinite"), ("dur", "1s")]).unwrap().freeze, "a constant that repeats forever holds forever");
+    }
+
+    #[test]
+    fn a_set_with_a_dur_lasts_that_long() {
+        let t = set_timing(&[("begin", "1s"), ("dur", "2s")]).unwrap();
+        assert!(close(t.dur, 2.0) && t.active == Some(2.0) && !t.freeze);
+        assert!(set_timing(&[("dur", "2s"), ("fill", "freeze")]).unwrap().freeze);
+        let rep = set_timing(&[("dur", "2s"), ("repeatCount", "2.5")]).unwrap();
+        assert!(close(rep.dur, 5.0) && rep.active == Some(5.0), "one hold of the whole active time");
+        let cut = set_timing(&[("dur", "2s"), ("repeatDur", "3s")]).unwrap();
+        assert_eq!(cut.active, Some(3.0));
+        let ended = set_timing(&[("begin", "1s"), ("end", "4s")]).unwrap();
+        assert!(close(ended.dur, 3.0) && ended.active == Some(3.0) && !ended.freeze);
+    }
+
+    #[test]
+    fn a_set_with_bad_timing_is_an_error() {
+        assert!(set_timing(&[("dur", "-1s")]).is_err());
+        assert!(set_timing(&[("dur", "2s"), ("repeatCount", "0")]).is_err());
+        assert!(set_timing(&[("begin", "click")]).is_err());
+        assert!(set_timing(&[("begin", "3s"), ("end", "2s")]).is_err());
+        assert!(set_timing(&[("dur", "0.001s")]).is_err());
+    }
+
+    fn eased(values: &[f64], ease: Ease) -> Curve {
+        Curve::eased(values.iter().map(|v| vec![*v]).collect(), (0..values.len()).map(|i| i as f64 / (values.len() - 1) as f64).collect(), vec![ease; values.len() - 1]).unwrap()
+    }
+
+    fn value_at(c: &Curve, dur: f64, u: f64) -> f64 {
+        eval(&c.polyline_for_test(dur), u)[0]
+    }
+
+    #[test]
+    fn steps_become_a_staircase_with_millisecond_ramps() {
+        let c = eased(&[0.0, 8.0], Ease::Steps { count: 4, jump: Jump::End });
+        for (u, want) in [(0.0, 0.0), (0.2, 0.0), (0.3, 2.0), (0.6, 4.0), (0.9, 6.0), (1.0, 8.0)] {
+            assert!(close(value_at(&c, 1.0, u), want), "u={u}: {}", value_at(&c, 1.0, u));
+        }
+        // The step is a ramp of EPS that ends at the piece boundary.
+        let ramp = value_at(&c, 1.0, 0.25 - EPS / 2.0);
+        assert!(ramp > 0.0 && ramp < 2.0, "{ramp}");
+        assert!(close(value_at(&c, 1.0, 0.25 - EPS * 2.0), 0.0));
+    }
+
+    #[test]
+    fn jump_terms_choose_the_levels() {
+        let level = |jump: Jump, count: u32, u: f64| value_at(&eased(&[0.0, 1.0], Ease::Steps { count, jump }), 1.0, u);
+        assert!(close(level(Jump::Start, 4, 0.1), 0.25) && close(level(Jump::Start, 4, 0.9), 1.0));
+        assert!(close(level(Jump::End, 4, 0.1), 0.0) && close(level(Jump::End, 4, 0.9), 0.75));
+        assert!(close(level(Jump::None, 3, 0.1), 0.0) && close(level(Jump::None, 3, 0.9), 1.0) && close(level(Jump::None, 3, 0.5), 0.5));
+        assert!(close(level(Jump::Both, 3, 0.1), 0.25) && close(level(Jump::Both, 3, 0.9), 0.75));
+    }
+
+    #[test]
+    fn steps_between_several_keyframes_stay_in_their_interval() {
+        let c = Curve::eased(vec![vec![0.0], vec![10.0], vec![0.0]], vec![0.0, 0.5, 1.0], vec![Ease::Steps { count: 2, jump: Jump::End }, Ease::LINEAR]).unwrap();
+        assert!(close(value_at(&c, 4.0, 0.1), 0.0) && close(value_at(&c, 4.0, 0.3), 5.0));
+        assert!(close(value_at(&c, 4.0, 0.75), 5.0) && close(value_at(&c, 4.0, 1.0), 0.0));
+    }
+
+    #[test]
+    fn mirroring_swaps_the_jump_of_steps() {
+        let mirrored = |jump: Jump| Ease::Steps { count: 3, jump }.mirrored();
+        assert_eq!(mirrored(Jump::End), Ease::Steps { count: 3, jump: Jump::Start });
+        assert_eq!(mirrored(Jump::Start), Ease::Steps { count: 3, jump: Jump::End });
+        assert_eq!(mirrored(Jump::Both), Ease::Steps { count: 3, jump: Jump::Both });
+        assert_eq!(mirrored(Jump::None), Ease::Steps { count: 3, jump: Jump::None });
+        let Ease::Bezier(m) = Ease::Bezier([0.42, 0.0, 1.0, 1.0]).mirrored() else { panic!("a Bezier mirrors to a Bezier") };
+        assert!(m.iter().zip([0.0, 0.0, 0.58, 1.0]).all(|(a, b)| (a - b).abs() < 1e-12), "{m:?}");
+    }
+
+    #[test]
+    fn eased_curves_are_checked() {
+        assert!(Curve::eased(vec![vec![0.0], vec![1.0]], vec![0.0, 0.5], vec![Ease::LINEAR]).is_err(), "key times must end at 1");
+        assert!(Curve::eased(vec![vec![0.0], vec![1.0]], vec![0.0, 1.0], vec![]).is_err(), "an easing for each interval");
+        assert!(Curve::eased(vec![vec![0.0], vec![1.0, 2.0]], vec![0.0, 1.0], vec![Ease::LINEAR]).is_err(), "equal widths");
+    }
+
+    #[test]
+    fn from_points_pulls_equal_times_apart() {
+        let c = Curve::from_points(vec![0.0, 0.5, 0.5, 1.0], vec![vec![0.0], vec![1.0], vec![5.0], vec![6.0]], 2.0).unwrap();
+        let poly = c.polyline_for_test(2.0);
+        assert_eq!(poly.len(), 4);
+        assert!(close(poly[2].0 - poly[1].0, EPS / 2.0), "{poly:?}");
+        assert!(Curve::from_points(vec![0.0], vec![vec![0.0]], 1.0).is_err());
+        assert!(Curve::from_points(vec![0.0, 1.0], vec![vec![0.0], vec![1.0, 2.0]], 1.0).is_err());
     }
 }

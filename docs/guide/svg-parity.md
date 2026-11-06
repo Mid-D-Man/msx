@@ -68,9 +68,10 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `context-fill`, `context-stroke` | Partial | Colors, opacity and nesting through `use` and markers work. A gradient is fitted to the shape painted, not to the context element, and a pattern on a stroke is a gap |
 | `foreignObject` | Gap | Reported |
 | `animateTransform` of `translate`, `scale` and `rotate`, `animate` of `opacity`, `x`, `y`, `cx`, `cy`, `r` on an unstroked circle and the opacity of a single paint, with `begin`, `dur`, repeats, `end`, `fill`, `values`, `keyTimes`, `calcMode` and `keySplines` | Expanded | Baked into MSX tracks on one scene timeline, with a wrapper group or layer per animation. See [Importing SVG](svg-import.md#animation) |
-| `animate` of colors, paths, sizes and dash offsets, `skewX` and `skewY`, `animateMotion`, `set`, `begin` on an event | Gap | Reported, the static frame is drawn. MSX tracks have only translate, scale, rotate, opacity and z-index channels |
-| CSS `animation` and `@keyframes` with `transform` (translate, scale and rotate), `opacity`, `fill-opacity` and `stroke-opacity` | Expanded | Baked into tracks like the SMIL animations, with delay, iterations, direction, fill mode, `cubic-bezier()` and keyword easing, and `transform-origin` with `transform-box: fill-box`. See [Importing SVG](svg-import.md#animation) |
-| CSS animation with `steps()` easing, `paused`, skews, matrices, mismatched `transform` lists, or other keyframe properties | Gap | Reported, the static frame is drawn |
+| `set` of the same attributes, `set` and `animate` of `visibility` and `display`, `animateMotion` with `path`, `mpath`, `values`, `keyPoints` and `rotate` | Expanded | A constant track, an opacity layer that shows or hides the element, and sampled translate and rotate tracks. See [Importing SVG](svg-import.md#animation) |
+| `animate` of colors, paths, sizes and dash offsets, `skewX` and `skewY`, `animateColor`, `animateMotion` with `calcMode` discrete or spline, `begin` on an event | Gap | Reported, the static frame is drawn. MSX tracks have only translate, scale, rotate, opacity and z-index channels |
+| CSS `animation` and `@keyframes` with `transform` (translate, scale and rotate), `opacity`, `fill-opacity` and `stroke-opacity` | Expanded | Baked into tracks like the SMIL animations, with delay, iterations, direction, fill mode, `cubic-bezier()`, `steps()` and keyword easing, and `transform-origin` with `transform-box: fill-box`. See [Importing SVG](svg-import.md#animation) |
+| CSS animation with `paused`, skews, matrices, mismatched `transform` lists, or other keyframe properties | Gap | Reported, the static frame is drawn |
 
 ## Text
 
@@ -106,4 +107,4 @@ The remaining gaps share a few causes, so they are closed in this order.
 6. Done for blur, drop shadow and offset. What is left needs new effect kinds: a blur per axis, flood, color matrix and the compositing primitives, and primitive regions.
 7. Text styling, then `textPath`.
 8. A binary version bump with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`.
-9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. CSS `@keyframes` followed. What is left is `set`, `animateMotion` and the properties that have no track channel yet, such as fill color and dash offset.
+9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. CSS `@keyframes` followed. `set`, `animateMotion` and `steps()` followed. What is left is the properties that have no track channel yet, such as fill color and dash offset.

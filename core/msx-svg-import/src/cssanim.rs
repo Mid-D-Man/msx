@@ -6,10 +6,12 @@
 //! this file has no dependency on the scene types. The importer reads the
 //! `@keyframes` rules and builds the wrappers, `anim.rs` bakes the timing.
 
-use crate::anim::Curve;
+use crate::anim::{Curve, Ease, Jump};
 
-pub(crate) const LINEAR: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
-const EASE: [f64; 4] = [0.25, 0.1, 0.25, 1.0];
+pub(crate) const LINEAR: Ease = Ease::LINEAR;
+const EASE: Ease = Ease::Bezier([0.25, 0.1, 0.25, 1.0]);
+/// Most pieces one `steps()` easing may have.
+const MAX_STEPS: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -26,7 +28,7 @@ pub(crate) struct AnimDecl {
     pub duration: f64,
     pub delay: f64,
     /// Easing between two keyframes, as the control points of a cubic Bezier.
-    pub ease: [f64; 4],
+    pub ease: Ease,
     /// `None` repeats forever.
     pub count: Option<f64>,
     pub direction: Direction,
@@ -56,23 +58,45 @@ pub(crate) fn parse_time(s: &str) -> Option<f64> {
     digits.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v * scale)
 }
 
-/// The control points of a CSS easing. Step easings have no equivalent in a
-/// track of linear keyframes and are an error.
-pub(crate) fn parse_timing_function(s: &str) -> Result<[f64; 4], String> {
+/// A CSS easing: the control points of a Bezier, or the pieces of `steps()`.
+pub(crate) fn parse_timing_function(s: &str) -> Result<Ease, String> {
     let t = s.trim().to_ascii_lowercase();
     match t.as_str() {
         "linear" => Ok(LINEAR),
         "ease" => Ok(EASE),
-        "ease-in" => Ok([0.42, 0.0, 1.0, 1.0]),
-        "ease-out" => Ok([0.0, 0.0, 0.58, 1.0]),
-        "ease-in-out" => Ok([0.42, 0.0, 0.58, 1.0]),
-        "step-start" | "step-end" => Err("step easing has no equivalent in a track of linear keyframes".into()),
-        _ if t.starts_with("steps(") => Err("step easing has no equivalent in a track of linear keyframes".into()),
+        "ease-in" => Ok(Ease::Bezier([0.42, 0.0, 1.0, 1.0])),
+        "ease-out" => Ok(Ease::Bezier([0.0, 0.0, 0.58, 1.0])),
+        "ease-in-out" => Ok(Ease::Bezier([0.42, 0.0, 0.58, 1.0])),
+        "step-start" => Ok(Ease::Steps { count: 1, jump: Jump::Start }),
+        "step-end" => Ok(Ease::Steps { count: 1, jump: Jump::End }),
+        _ if t.starts_with("steps(") && t.ends_with(')') => {
+            let inner = &t["steps(".len()..t.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            let bad = || format!("\"{}\" is not steps() with a whole number of steps and a jump term", s.trim());
+            if parts.len() > 2 {
+                return Err(bad());
+            }
+            let count: u32 = parts[0].parse().ok().filter(|c| *c > 0).ok_or_else(bad)?;
+            let jump = match parts.get(1).copied() {
+                None | Some("end") | Some("jump-end") => Jump::End,
+                Some("start") | Some("jump-start") => Jump::Start,
+                Some("jump-none") => Jump::None,
+                Some("jump-both") => Jump::Both,
+                Some(_) => return Err(bad()),
+            };
+            if jump == Jump::None && count < 2 {
+                return Err(format!("\"{}\" needs at least 2 steps with jump-none", s.trim()));
+            }
+            if count > MAX_STEPS {
+                return Err(format!("\"{}\" has more than {MAX_STEPS} steps", s.trim()));
+            }
+            Ok(Ease::Steps { count, jump })
+        }
         _ if t.starts_with("cubic-bezier(") && t.ends_with(')') => {
             let inner = &t["cubic-bezier(".len()..t.len() - 1];
             let nums: Vec<f64> = inner.split(',').filter_map(|p| p.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect();
             if nums.len() == 4 && inner.split(',').count() == 4 && (0.0..=1.0).contains(&nums[0]) && (0.0..=1.0).contains(&nums[2]) {
-                Ok([nums[0], nums[1], nums[2], nums[3]])
+                Ok(Ease::Bezier([nums[0], nums[1], nums[2], nums[3]]))
             } else {
                 Err(format!("\"{}\" is not a cubic-bezier with x values in 0 to 1", s.trim()))
             }
@@ -346,11 +370,7 @@ pub(crate) fn align(lists: &[Vec<Tf>]) -> Result<Vec<Vec<Tf>>, String> {
 pub(crate) struct Stops {
     pub offsets: Vec<f64>,
     pub values: Vec<Vec<f64>>,
-    pub eases: Vec<[f64; 4]>,
-}
-
-fn mirror(e: [f64; 4]) -> [f64; 4] {
-    [1.0 - e[2], 1.0 - e[3], 1.0 - e[0], 1.0 - e[1]]
+    pub eases: Vec<Ease>,
 }
 
 impl Stops {
@@ -361,7 +381,7 @@ impl Stops {
         Stops {
             offsets: (0..n).map(|k| 1.0 - self.offsets[n - 1 - k]).collect(),
             values: self.values.iter().rev().cloned().collect(),
-            eases: (0..n.saturating_sub(1)).map(|k| mirror(self.eases[n - 2 - k])).collect(),
+            eases: (0..n.saturating_sub(1)).map(|k| self.eases[n - 2 - k].mirrored()).collect(),
         }
     }
 
@@ -389,14 +409,9 @@ impl Stops {
     }
 
     /// A curve for `anim::bake`. Straight easings stay linear, the others
-    /// become `keySplines`.
+    /// become eased intervals.
     pub(crate) fn curve(&self) -> Result<Curve, String> {
-        let times = self.offsets.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(";");
-        if self.eases.iter().all(|e| *e == LINEAR) {
-            return Curve::new(self.values.clone(), Some(&times), Some("linear"), None);
-        }
-        let splines = self.eases.iter().map(|e| format!("{} {} {} {}", e[0], e[1], e[2], e[3])).collect::<Vec<_>>().join(";");
-        Curve::new(self.values.clone(), Some(&times), Some("spline"), Some(&splines))
+        Curve::eased(self.values.clone(), self.offsets.clone(), self.eases.clone())
     }
 }
 
@@ -434,12 +449,22 @@ mod tests {
     fn timing_functions() {
         assert_eq!(parse_timing_function("linear"), Ok(LINEAR));
         assert_eq!(parse_timing_function("EASE"), Ok(EASE));
-        assert_eq!(parse_timing_function("cubic-bezier(0.1, 0.7, 1, 0.1)"), Ok([0.1, 0.7, 1.0, 0.1]));
-        assert_eq!(parse_timing_function("cubic-bezier(.4,-1,.6,2)"), Ok([0.4, -1.0, 0.6, 2.0]));
+        assert_eq!(parse_timing_function("cubic-bezier(0.1, 0.7, 1, 0.1)"), Ok(Ease::Bezier([0.1, 0.7, 1.0, 0.1])));
+        assert_eq!(parse_timing_function("cubic-bezier(.4,-1,.6,2)"), Ok(Ease::Bezier([0.4, -1.0, 0.6, 2.0])));
         assert!(parse_timing_function("cubic-bezier(2, 0, 1, 1)").is_err());
         assert!(parse_timing_function("cubic-bezier(0, 0, 1)").is_err());
-        assert!(parse_timing_function("steps(4, end)").is_err());
-        assert!(parse_timing_function("step-start").is_err());
+        let steps = |count, jump| Ok(Ease::Steps { count, jump });
+        assert_eq!(parse_timing_function("steps(4, end)"), steps(4, Jump::End));
+        assert_eq!(parse_timing_function("STEPS(4)"), steps(4, Jump::End));
+        assert_eq!(parse_timing_function("steps(3, jump-start)"), steps(3, Jump::Start));
+        assert_eq!(parse_timing_function("steps(3,start)"), steps(3, Jump::Start));
+        assert_eq!(parse_timing_function("steps(3, jump-none)"), steps(3, Jump::None));
+        assert_eq!(parse_timing_function("steps(3, jump-both)"), steps(3, Jump::Both));
+        assert_eq!(parse_timing_function("step-start"), steps(1, Jump::Start));
+        assert_eq!(parse_timing_function("step-end"), steps(1, Jump::End));
+        for bad in ["steps(0)", "steps(-2)", "steps(2.5)", "steps()", "steps(4, middle)", "steps(4, end, end)", "steps(1, jump-none)", "steps(5000)"] {
+            assert!(parse_timing_function(bad).is_err(), "{bad}");
+        }
         assert!(parse_timing_function("wobble").is_err());
     }
 
@@ -449,9 +474,9 @@ mod tests {
         assert_eq!((d.name.as_str(), d.duration, d.delay, d.ease, d.count), ("spin", 2.0, 0.0, LINEAR, None));
         let d = one(&[("animation", "1.5s ease-in-out 0.5s 3 alternate both fade")]);
         assert_eq!((d.name.as_str(), d.duration, d.delay, d.count, d.direction, d.forwards, d.backwards), ("fade", 1.5, 0.5, Some(3.0), Direction::Alternate, true, true));
-        assert_eq!(d.ease, [0.42, 0.0, 0.58, 1.0]);
+        assert_eq!(d.ease, Ease::Bezier([0.42, 0.0, 0.58, 1.0]));
         let d = one(&[("animation", "bounce 800ms cubic-bezier(0.5, 0, 0.5, 1) reverse forwards")]);
-        assert_eq!((d.duration, d.ease, d.direction, d.forwards, d.backwards), (0.8, [0.5, 0.0, 0.5, 1.0], Direction::Reverse, true, false));
+        assert_eq!((d.duration, d.ease, d.direction, d.forwards, d.backwards), (0.8, Ease::Bezier([0.5, 0.0, 0.5, 1.0]), Direction::Reverse, true, false));
         let d = one(&[("animation", "spin 1s paused")]);
         assert!(d.paused);
         assert_eq!(one(&[("animation", "spin 1s")]).count, Some(1.0));
@@ -483,7 +508,7 @@ mod tests {
         assert_eq!(d.name, "wiggle");
         assert!(close(d.duration, 0.25) && close(d.delay, -0.1));
         assert_eq!((d.count, d.direction, d.forwards, d.backwards), (None, Direction::AlternateReverse, false, true));
-        assert_eq!(d.ease, [0.0, 0.0, 0.58, 1.0]);
+        assert_eq!(d.ease, Ease::Bezier([0.0, 0.0, 0.58, 1.0]));
     }
 
     #[test]
@@ -499,7 +524,7 @@ mod tests {
         assert!(decls(&[]).is_empty());
         assert!(decls(&[("animation", "none")]).is_empty());
         assert!(decls(&[("animation-name", "none")]).is_empty());
-        let d = decls(&[("animation", "spin 1s steps(4)")]);
+        let d = decls(&[("animation", "spin 1s steps(0)")]);
         assert!(d.len() == 1 && d[0].is_err());
         let d = decls(&[("animation-name", "a"), ("animation-duration", "soon")]);
         assert!(d[0].is_err());
@@ -532,7 +557,7 @@ mod tests {
         assert!(align(&[vec![Tf::Rotate(1.0)], vec![Tf::Rotate(1.0), Tf::Rotate(2.0)]]).is_err());
     }
 
-    fn stops(values: &[f64], eases: &[[f64; 4]]) -> Stops {
+    fn stops(values: &[f64], eases: &[Ease]) -> Stops {
         let n = values.len();
         Stops { offsets: (0..n).map(|i| i as f64 / (n - 1) as f64).collect(), values: values.iter().map(|v| vec![*v]).collect(), eases: eases.to_vec() }
     }
@@ -590,7 +615,7 @@ mod tests {
 
     #[test]
     fn easing_is_reversed_with_the_direction() {
-        let ease_in = [0.42, 0.0, 1.0, 1.0];
+        let ease_in = Ease::Bezier([0.42, 0.0, 1.0, 1.0]);
         let s = stops(&[0.0, 100.0], &[ease_in]);
         let fwd = sample(&s, Direction::Normal, 1.0, Some(1.0), 1.0, &[0.25]);
         let rev = sample(&s, Direction::Reverse, 1.0, Some(1.0), 1.0, &[0.75]);
@@ -598,13 +623,13 @@ mod tests {
         // Backwards, the animation runs the same curve mirrored in time: 100 - f(1 - u)
         // with the reversed easing, so after 3/4 of the time it is at the value forward play has at 1/4.
         assert!((rev[0] - fwd[0]).abs() < 0.5, "{rev:?} vs {fwd:?}");
-        let m = mirror(ease_in);
+        let Ease::Bezier(m) = ease_in.mirrored() else { panic!("a Bezier mirrors to a Bezier") };
         assert!(m.iter().zip([0.0, 0.0, 0.58, 1.0]).all(|(a, b)| (a - b).abs() < 1e-12), "{m:?}");
     }
 
     #[test]
     fn unequal_easings_per_interval_survive_alternation() {
-        let s = stops(&[0.0, 10.0, 0.0], &[[0.42, 0.0, 1.0, 1.0], LINEAR]);
+        let s = stops(&[0.0, 10.0, 0.0], &[Ease::Bezier([0.42, 0.0, 1.0, 1.0]), LINEAR]);
         let (o, _) = s.orient(Direction::Alternate);
         assert_eq!(o.eases.len(), o.offsets.len() - 1);
         assert!(o.curve().is_ok());

@@ -22,30 +22,43 @@
 //!   centre (a stroke would scale with it, which SVG does not do).
 //!
 //! Several animations on one element nest outermost first in this order:
-//! opacity layers, `animateTransform` in document order, then position
-//! (`x`, `y`, `cx`, `cy`), then radius.
+//! opacity layers, `animateTransform` in document order, then motion, then
+//! position (`x`, `y`, `cx`, `cy`), then radius.
 //! CSS animation is built from the same pieces: the `transform` functions of
 //! the keyframes, taken one by one in list order, become wrappers like the ones
 //! `animateTransform` makes, and `opacity` becomes a layer. `transform-origin`
 //! (with `transform-box: fill-box`) is the pivot of the scale and the rotation.
-//! Anything that has no channel (colors, paths, dash offsets, skew, motion
-//! paths, `set`) is reported and the static value is drawn.
+//! `set` is a constant animation of one value, so it goes through the same arms
+//! as `animate` (`opacity`, `fill-opacity`, `stroke-opacity`, `r`, `x`, `y`,
+//! `cx`, `cy`). `visibility` and `display`, by `set` or by a discrete `animate`,
+//! become an opacity layer that is 1 while the element shows and 0 while it is
+//! hidden. An element that starts hidden is built as if visible (`reveals`).
+//! `animateMotion` is sampled into translate tracks, and a rotate track for
+//! `rotate="auto"`, by `motion.rs`; it sits inside `animateTransform` and
+//! outside the geometry attributes.
+//! CSS easing, `steps()` included, is turned into staircase keyframes by
+//! `anim.rs`.
+//! Anything that has no channel (colors, paths, dash offsets, skew) is reported
+//! and the static value is drawn.
 
 use std::collections::HashMap;
 
-use msx_ast::{AnimatedProperty, AnimationTrack, Element, Group, Keyframe, Layer, LoopMode, Scene, Transform};
+use msx_ast::path::parse_d;
+use msx_ast::{AnimatedProperty, AnimationTrack, Element, Group, Keyframe, Layer, LoopMode, PathCommand, Point, Scene, Transform};
 use roxmltree::{Document, Node, NodeId};
 
-use crate::anim::{self, Curve, Span, Timing};
+use crate::anim::{self, Curve, Ease, Span, Timing};
 use crate::cssanim::{self, AnimDecl, Stops, Tf};
+use crate::motion;
 use crate::parse::parse_origin;
 use crate::style::element_opacity;
 use crate::{is_foreign, translate, Importer};
 
 const TIER_OPACITY: u8 = 0;
 const TIER_TRANSFORM: u8 = 1;
-const TIER_POSITION: u8 = 2;
-const TIER_RADIUS: u8 = 3;
+const TIER_MOTION: u8 = 2;
+const TIER_POSITION: u8 = 3;
+const TIER_RADIUS: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Replaces {
@@ -60,8 +73,8 @@ const EPS_DUR: f64 = 0.004;
 
 /// Keeps the last entry of each offset: two keyframes at one offset merge, and
 /// the later declarations win.
-fn dedupe<V>(entries: Vec<(f64, V, Option<[f64; 4]>)>) -> Vec<(f64, V, Option<[f64; 4]>)> {
-    let mut out: Vec<(f64, V, Option<[f64; 4]>)> = Vec::new();
+fn dedupe<V>(entries: Vec<(f64, V, Option<Ease>)>) -> Vec<(f64, V, Option<Ease>)> {
+    let mut out: Vec<(f64, V, Option<Ease>)> = Vec::new();
     for e in entries {
         match out.last_mut() {
             Some(last) if (last.0 - e.0).abs() < 1e-12 => *last = e,
@@ -97,6 +110,10 @@ pub(crate) struct Spec {
     origin: Option<Origin>,
     /// Moves the element, so the element's own transform goes outside the wrapper.
     moves: bool,
+    /// The element is hidden without the animation (`display: none` or
+    /// `visibility: hidden`) and the animation shows it, so the walk builds it as
+    /// if it were visible and the layer around it holds it back until then.
+    reveals: bool,
     /// Nesting order, outermost first. Opacity layers commute with everything
     /// and go on the outside, then `animateTransform` in document order. The
     /// attributes `x`, `y`, `cx`, `cy` and `r` change the geometry, which SVG
@@ -141,6 +158,10 @@ fn user_length(s: &str) -> Option<f64> {
 /// The values of one animation, from `values` or from `from`, `to` and `by`.
 /// `ident` stands in for the underlying value where `from` is missing.
 fn derive_values(a: &Node, ident: &[f64], parse_one: &dyn Fn(&str) -> Option<Vec<f64>>) -> Result<Vec<Vec<f64>>, String> {
+    if a.tag_name().name() == "set" {
+        let to = a.attribute("to").map(str::trim).filter(|t| !t.is_empty()).ok_or("it has no to")?;
+        return parse_one(to).map(|v| vec![v]).ok_or_else(|| format!("to=\"{to}\" cannot be read"));
+    }
     if let Some(v) = a.attribute("values") {
         let vals: Option<Vec<Vec<f64>>> = v.split(';').map(str::trim).filter(|s| !s.is_empty()).map(parse_one).collect();
         return vals.filter(|v| !v.is_empty()).ok_or_else(|| format!("values=\"{}\" cannot be read", v.trim()));
@@ -268,7 +289,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         let timing = |factor: f64| Timing { begin: d.delay, dur: d.duration * factor, active: d.count.map(|c| c * d.duration), freeze: d.forwards, fill_before: d.backwards };
 
-        type Entry<V> = (f64, V, Option<[f64; 4]>);
+        type Entry<V> = (f64, V, Option<Ease>);
         let mut transform: Vec<Entry<Vec<Tf>>> = Vec::new();
         let mut opacity: Vec<Entry<f64>> = Vec::new();
         let mut fill_opacity: Vec<Entry<f64>> = Vec::new();
@@ -332,7 +353,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     Tf::Scale(..) => (vec![AnimatedProperty::ScaleX, AnimatedProperty::ScaleY], vec![1.0, 1.0], true),
                     Tf::Rotate(_) => (vec![AnimatedProperty::Rotate], vec![0.0], true),
                 };
-                specs.push(Spec { props: props_k, curve, timing: timing(factor), base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: if pivoted { origin.clone() } else { None }, moves: true, tier: TIER_TRANSFORM });
+                specs.push(Spec { props: props_k, curve, timing: timing(factor), base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: if pivoted { origin.clone() } else { None }, moves: true, reveals: false, tier: TIER_TRANSFORM });
             }
         }
         if !opacity.is_empty() {
@@ -352,7 +373,7 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     /// The spec of an opacity-like property: a layer whose track holds the value.
-    fn css_alpha(&self, ents: Vec<(f64, f64, Option<[f64; 4]>)>, fixed: f64, replaces: Replaces, d: &AnimDecl, timing: &dyn Fn(f64) -> Timing) -> Result<Spec, String> {
+    fn css_alpha(&self, ents: Vec<(f64, f64, Option<Ease>)>, fixed: f64, replaces: Replaces, d: &AnimDecl, timing: &dyn Fn(f64) -> Timing) -> Result<Spec, String> {
         let mut offsets = Vec::new();
         let mut values = Vec::new();
         let mut eases = Vec::new();
@@ -374,7 +395,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         eases.pop();
         let (oriented, factor) = Stops { offsets, values, eases }.orient(d.direction);
         let curve = oriented.curve()?;
-        Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing: timing(factor), base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, tier: TIER_OPACITY })
+        Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing: timing(factor), base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
     }
 
     /// The pivot of a CSS `transform-origin`, measured in the viewport or, for
@@ -444,10 +465,13 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn build_spec(&mut self, node: Node<'a, 'i>, a: Node<'a, 'i>, notes: &mut Vec<String>) -> Result<Spec, String> {
         let tag = a.tag_name().name();
         match tag {
-            "animateTransform" | "animate" => {}
+            "animateTransform" | "animate" | "set" | "animateMotion" => {}
             other => return Err(format!("<{other}> has no matching animation channel")),
         }
-        let timing = Timing::parse(|k| a.attribute(k), notes)?;
+        let timing = if tag == "set" { Timing::parse_set(|k| a.attribute(k), notes)? } else { Timing::parse(|k| a.attribute(k), notes)? };
+        if tag == "animateMotion" {
+            return self.motion_spec(a, timing, notes);
+        }
         let calc = a.attribute("calcMode");
         let (kt, ks) = (a.attribute("keyTimes"), a.attribute("keySplines"));
 
@@ -493,7 +517,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
             let base = ident.iter().take(props.len()).copied().collect();
             let curve = Curve::new(values, kt, calc, ks)?;
-            return Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: pivot.filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, tier: TIER_TRANSFORM });
+            return Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: pivot.filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_TRANSFORM });
         }
 
         let attr = a.attribute("attributeName").map(str::trim).unwrap_or("");
@@ -504,7 +528,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let parse_one = |s: &str| -> Option<Vec<f64>> { s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| vec![v.clamp(0.0, 1.0)]) };
                 let values = derive_values(&a, &[base], &parse_one)?;
                 let curve = Curve::new(values, kt, calc, ks)?;
-                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Opacity, pivot: None, origin: None, moves: false, tier: TIER_OPACITY })
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Opacity, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
             }
             "fill-opacity" | "stroke-opacity" => {
                 let fixed = self.single_paint(node, attr)?;
@@ -514,7 +538,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let values = derive_values(&a, &[fixed], &parse_one)?;
                 let curve = Curve::new(values, kt, calc, ks)?;
                 let replaces = if attr == "fill-opacity" { Replaces::FillOpacity } else { Replaces::StrokeOpacity };
-                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, tier: TIER_OPACITY })
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
             }
             "r" => {
                 if node_tag != "circle" {
@@ -534,7 +558,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let cx = self.length(node, "cx", 16.0, self.vp.0).unwrap_or(0.0);
                 let cy = self.length(node, "cy", 16.0, self.vp.1).unwrap_or(0.0);
                 let props = vec![AnimatedProperty::ScaleX, AnimatedProperty::ScaleY];
-                Ok(Spec { props, curve, timing, base: vec![1.0, 1.0], layer: false, replaces: Replaces::Nothing, pivot: Some((cx, cy)).filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, tier: TIER_RADIUS })
+                Ok(Spec { props, curve, timing, base: vec![1.0, 1.0], layer: false, replaces: Replaces::Nothing, pivot: Some((cx, cy)).filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_RADIUS })
             }
             "x" | "y" | "cx" | "cy" => {
                 let ok = match attr {
@@ -552,18 +576,148 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let values: Vec<Vec<f64>> = values.into_iter().map(|v| vec![v[0] - at]).collect();
                 let curve = Curve::new(values, kt, calc, ks)?;
                 let prop = if horizontal { AnimatedProperty::TranslateX } else { AnimatedProperty::TranslateY };
-                Ok(Spec { props: vec![prop], curve, timing, base: vec![0.0], layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, tier: TIER_POSITION })
+                Ok(Spec { props: vec![prop], curve, timing, base: vec![0.0], layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_POSITION })
+            }
+            "visibility" | "display" => {
+                let hidden = if attr == "visibility" {
+                    self.computed_prop(node, "visibility").is_some_and(|v| matches!(v.trim(), "hidden" | "collapse"))
+                } else {
+                    self.props_for(node).get("display").is_some_and(|v| v.trim() == "none")
+                };
+                let base = if hidden { 0.0 } else { 1.0 };
+                let parse_one = |s: &str| -> Option<Vec<f64>> {
+                    let s = s.trim();
+                    let shown = if attr == "visibility" {
+                        match s {
+                            "visible" => true,
+                            "hidden" | "collapse" => false,
+                            _ => return None,
+                        }
+                    } else {
+                        match s {
+                            "none" => false,
+                            "" | "inherit" | "initial" | "unset" | "revert" => return None,
+                            _ => true,
+                        }
+                    };
+                    Some(vec![if shown { 1.0 } else { 0.0 }])
+                };
+                let values = derive_values(&a, &[base], &parse_one)?;
+                if hidden && values.iter().all(|v| v[0] == 0.0) {
+                    return Err(format!("the element is hidden and the animation never changes its {attr}"));
+                }
+                // The values of these properties cannot be blended, so they switch.
+                let calc = if tag == "set" { calc } else { Some("discrete") };
+                let curve = Curve::new(values, kt, calc, ks)?;
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: hidden, tier: TIER_OPACITY })
             }
             "" => Err("it has no attributeName".into()),
-            other => Err(format!("animating {other} is not supported; only opacity, fill-opacity, stroke-opacity, x, y, cx, cy, r and transform have a channel")),
+            other => Err(format!("animating {other} is not supported; only opacity, fill-opacity, stroke-opacity, visibility, display, x, y, cx, cy, r and transform have a channel")),
         }
+    }
+
+    /// An `animateMotion`: the path from `mpath`, `path` or `values` (in that
+    /// order of precedence), sampled into x, y and, when the element turns, a
+    /// heading.
+    fn motion_spec(&mut self, a: Node<'a, 'i>, timing: Timing, notes: &mut Vec<String>) -> Result<Spec, String> {
+        let rotate = motion::parse_rotate(a.attribute("rotate"))?;
+        let calc = a.attribute("calcMode").map(str::trim).filter(|c| !c.is_empty());
+        match calc {
+            None | Some("paced") | Some("linear") => {}
+            Some(c @ ("discrete" | "spline")) => return Err(format!("calcMode=\"{c}\" is not supported on animateMotion")),
+            Some(other) => return Err(format!("calcMode=\"{other}\" is not known")),
+        }
+        if a.attribute("accumulate").map(str::trim) == Some("sum") {
+            notes.push("accumulate=\"sum\" was ignored; every repeat starts at the beginning of the path".into());
+        }
+        let mpath = a.children().find(|c| c.is_element() && c.tag_name().name() == "mpath");
+        // Where on the path each value is, when the path was built from `values`.
+        let mut at_values: Option<Vec<f64>> = None;
+        let cmds: Vec<PathCommand> = if let Some(m) = mpath {
+            let href = m.attribute("href").or_else(|| m.attribute((crate::XLINK_NS, "href"))).map(str::trim).and_then(|h| h.strip_prefix('#'));
+            let Some(target) = href.and_then(|id| self.ids.get(id).copied()) else {
+                return Err("its mpath does not point at an element".into());
+            };
+            if target.tag_name().name() != "path" {
+                return Err(format!("its mpath points at a <{}>, and only a <path> is supported", target.tag_name().name()));
+            }
+            let d = target.attribute("d").ok_or("the path of its mpath has no d")?;
+            if target.attribute("transform").is_some() {
+                notes.push("the transform of the path of the mpath was ignored".into());
+            }
+            parse_d(d).map_err(|e| format!("the path of its mpath cannot be read ({e})"))?
+        } else if let Some(d) = a.attribute("path") {
+            parse_d(d).map_err(|e| format!("path=\"{}\" cannot be read ({e})", d.trim()))?
+        } else {
+            let parse_one = |s: &str| -> Option<Vec<f64>> { strict_numbers(s).filter(|n| n.len() == 2) };
+            let points = derive_values(&a, &[0.0, 0.0], &parse_one).map_err(|e| format!("it has no path or mpath and {e}"))?;
+            if points.len() < 2 {
+                return Err("it has only one point to move through".into());
+            }
+            let pts: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
+            at_values = Some(motion::Flat::fractions_of(&pts));
+            let mut cmds = vec![PathCommand::MoveTo(Point { x: pts[0].0, y: pts[0].1 })];
+            cmds.extend(pts[1..].iter().map(|p| PathCommand::LineTo(Point { x: p.0, y: p.1 })));
+            cmds
+        };
+
+        // keyTimes and keyPoints. Over a path they decide the progress at each
+        // key time. Over `values` each value is a point, and with calcMode
+        // linear the values are evenly spaced in time unless keyTimes says otherwise.
+        let key_times = a.attribute("keyTimes").map(|k| motion::parse_list(k).ok_or("keyTimes is not a list of numbers")).transpose()?;
+        // A keyPoints with an error is dropped and the animation runs without it, as the SVG spec says.
+        let key_points = match a.attribute("keyPoints") {
+            None => None,
+            Some(k) => match motion::parse_list(k) {
+                None => {
+                    notes.push("keyPoints is not a list of numbers and was ignored".into());
+                    None
+                }
+                Some(p) if p.iter().any(|v| !(0.0..=1.0).contains(v)) => {
+                    notes.push("keyPoints must lie in 0 to 1 and was ignored".into());
+                    None
+                }
+                Some(p) if key_times.as_ref().is_some_and(|t| t.len() != p.len()) => {
+                    notes.push("keyPoints and keyTimes have different lengths and keyPoints was ignored".into());
+                    None
+                }
+                Some(p) => Some(p),
+            },
+        };
+        let keys: Option<(Vec<f64>, Vec<f64>)> = match (&at_values, key_points, key_times) {
+            (Some(points), _, kt) => {
+                if calc == Some("linear") {
+                    let n = points.len();
+                    Some((kt.unwrap_or_else(|| (0..n).map(|i| i as f64 / (n - 1) as f64).collect()), points.clone()))
+                } else {
+                    None
+                }
+            }
+            (None, Some(kp), Some(kt)) => Some((kt, kp)),
+            (None, Some(_), None) => {
+                notes.push("keyPoints without keyTimes was ignored".into());
+                None
+            }
+            (None, None, _) => None,
+        };
+
+        let flat = motion::flatten(&cmds, rotate)?;
+        let turns = rotate.turns();
+        let curve = motion::curve(&flat, keys.as_ref().map(|(t, p)| (t.as_slice(), p.as_slice())), turns, timing.dur)?;
+        let (props, base) = if turns {
+            (vec![AnimatedProperty::TranslateX, AnimatedProperty::TranslateY, AnimatedProperty::Rotate], vec![0.0, 0.0, 0.0])
+        } else {
+            (vec![AnimatedProperty::TranslateX, AnimatedProperty::TranslateY], vec![0.0, 0.0])
+        };
+        Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_MOTION })
     }
 
     /// Wraps `content` for one animation and files its tracks for later.
     fn wrap_animation(&mut self, spec: &Spec, content: Vec<Element>) -> Vec<Element> {
         if self.pending.len() >= MAX_ANIMATIONS {
             self.warn(format!("the SVG has more than {MAX_ANIMATIONS} animations; the rest are drawn static"));
-            return content;
+            // An element that only an animation shows stays hidden.
+            return if spec.reveals { Vec::new() } else { content };
         }
         let id = loop {
             self.next_anim += 1;
@@ -611,6 +765,10 @@ impl<'a, 'i> Importer<'a, 'i> {
         let replaces = |what: Replaces| specs.iter().any(|s| s.replaces == what);
         let (fades, fill_fades, stroke_fades) = (replaces(Replaces::Opacity), replaces(Replaces::FillOpacity), replaces(Replaces::StrokeOpacity));
         let static_transform = if moves { self.node_transform(node) } else { None };
+        let saved_force = self.force_visible;
+        if specs.iter().any(|s| s.reveals) {
+            self.force_visible = Some(node.id());
+        }
         let saved = (self.skip_transform, self.skip_opacity, self.skip_fill_opacity, self.skip_stroke_opacity);
         if moves {
             self.skip_transform = Some(node.id());
@@ -627,6 +785,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         let mut content = Vec::new();
         self.walk_plain(node, parent, &mut content, expanded);
         (self.skip_transform, self.skip_opacity, self.skip_fill_opacity, self.skip_stroke_opacity) = saved;
+        self.force_visible = saved_force;
         if content.is_empty() {
             return;
         }

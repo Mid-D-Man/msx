@@ -27,6 +27,7 @@ mod encoding;
 mod filter;
 mod geom;
 mod markers;
+mod motion;
 mod pattern;
 mod gradient;
 mod parse;
@@ -184,6 +185,8 @@ pub(crate) struct Importer<'a, 'i> {
     /// The element whose own transform the walk leaves off, because an
     /// animation wrapper carries it instead.
     skip_transform: Option<roxmltree::NodeId>,
+    /// The element an animation shows from hidden: it is built as if visible.
+    force_visible: Option<roxmltree::NodeId>,
     /// The element whose own opacity the walk leaves off, because an opacity
     /// animation replaces it.
     skip_opacity: Option<roxmltree::NodeId>,
@@ -683,6 +686,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             pending: Vec::new(),
             next_anim: 0,
             skip_transform: None,
+            force_visible: None,
             skip_opacity: None,
             skip_fill_opacity: None,
             skip_stroke_opacity: None,
@@ -1046,11 +1050,15 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// Cascade for one element. `None` when it is `display: none`.
     fn begin(&mut self, node: Node<'a, 'i>, parent: &Inh) -> Option<(Inh, Props)> {
         let props = self.props_for(node);
-        if props.get("display").is_some_and(|v| v.trim() == "none") {
+        let forced = self.force_visible == Some(node.id());
+        if !forced && props.get("display").is_some_and(|v| v.trim() == "none") {
             return None;
         }
         let mut inh = parent.clone();
         apply(&mut inh, &props, self.vp);
+        if forced {
+            inh.hidden = false;
+        }
         // An animation of fill-opacity or stroke-opacity replaces the value, so
         // the layer around the shape carries it and the shape paints at full alpha.
         if self.skip_fill_opacity == Some(node.id()) {

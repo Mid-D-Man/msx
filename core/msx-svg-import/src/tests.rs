@@ -1758,7 +1758,7 @@ fn animations_that_cannot_run_are_reported_and_the_static_frame_stays() {
     let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="opacity" from="0" to="1" begin="click" dur="1s"/></rect>
         <rect width="5" height="5"><animate attributeName="width" from="1" to="9" dur="1s"/></rect>
         <rect width="5" height="5"><animate attributeName="opacity" from="0" to="1"/></rect>
-        <rect width="5" height="5"><animateMotion path="M0 0 L9 9" dur="1s"/></rect>
+        <rect width="5" height="5"><animateMotion path="M0 0 L9 9" calcMode="discrete" dur="1s"/></rect>
         <rect width="5" height="5"><animate attributeName="opacity" values="0;1" keyTimes="0;0.5" dur="1s"/></rect>
         <text x="1" y="1"><animate attributeName="x" from="0" to="5" dur="1s"/>hi</text>"##));
     for needle in ["waits for an event", "animating width", "no finite dur", "<animateMotion>", "keyTimes must rise", "x on <text>"] {
@@ -2060,7 +2060,7 @@ fn css_fill_opacity_follows_the_single_paint_rule() {
 fn css_animations_that_cannot_run_are_reported_and_left_static() {
     let cases = [
         (r##"@keyframes k { to { transform: skewX(20deg) } } .e { animation: k 1s }"##, "skewX() has no animation channel"),
-        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 1s steps(4) }"##, "step easing"),
+        (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 1s steps(0) }"##, "steps() with a whole number"),
         (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: ghost 1s }"##, "@keyframes ghost is not defined"),
         (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 1s paused }"##, "paused"),
         (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 0s }"##, "0 or too short"),
@@ -2894,4 +2894,330 @@ fn em_in_a_filter_function_is_the_font_size_of_the_element() {
         filter_layer(&i).effects,
         vec![msx_ast::Effect::DropShadow { offset_x: 10.0, offset_y: 20.0, blur_radius: 2.0, color: Color::rgb(0, 0, 255), opacity: 1.0 }]
     );
+}
+
+// ── set, visibility, display ────────────────────────────────────────────────
+
+#[test]
+fn set_holds_a_value_from_its_begin_to_the_end() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><set attributeName="opacity" to="0.25" begin="1s"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Once);
+    assert!((i.scene.duration - 1.004).abs() < 1e-9, "{}", i.scene.duration);
+    assert!(close(layer_opacity_at(&i, 0.5), 1.0));
+    assert!(close(layer_opacity_at(&i, 1.5), 0.25));
+    assert!(close(layer_opacity_at(&i, 99.0), 0.25));
+}
+
+#[test]
+fn set_with_a_dur_goes_back_unless_it_freezes() {
+    let back = imp(&doc(r##"<rect width="5" height="5"><set attributeName="opacity" to="0" begin="1s" dur="1s"/></rect>"##));
+    assert!(close(layer_opacity_at(&back, 0.5), 1.0) && close(layer_opacity_at(&back, 1.5), 0.0) && close(layer_opacity_at(&back, 2.5), 1.0));
+    let frozen = imp(&doc(r##"<rect width="5" height="5"><set attributeName="opacity" to="0" begin="1s" dur="1s" fill="freeze"/></rect>"##));
+    assert!(close(layer_opacity_at(&frozen, 1.5), 0.0) && close(layer_opacity_at(&frozen, 2.5), 0.0));
+    let repeated = imp(&doc(r##"<rect width="5" height="5"><set attributeName="opacity" to="0" begin="1s" dur="1s" repeatCount="3"/></rect>"##));
+    assert!(close(layer_opacity_at(&repeated, 3.5), 0.0) && close(layer_opacity_at(&repeated, 4.5), 1.0), "a constant repeated is one hold of the whole active time");
+}
+
+#[test]
+fn set_works_for_the_geometry_attributes_too() {
+    let i = imp(&doc(r##"<circle cx="10" cy="10" r="3"><set attributeName="cx" to="30" begin="1s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(shape_point(&i, 0.0, 10.0, 10.0), (10.0, 10.0)));
+    assert!(near(shape_point(&i, 2.0, 10.0, 10.0), (30.0, 10.0)));
+}
+
+#[test]
+fn set_without_a_readable_value_is_reported() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><set attributeName="opacity" begin="1s"/></rect><rect width="5" height="5"><set attributeName="opacity" to="lots"/></rect>"##));
+    assert!(has_warning(&i, "it has no to"), "{:?}", i.warnings);
+    assert!(has_warning(&i, "to=\"lots\" cannot be read"), "{:?}", i.warnings);
+    assert!(i.scene.animations.is_empty());
+}
+
+#[test]
+fn set_hides_a_visible_element_for_a_while() {
+    for what in [r##"attributeName="visibility" to="hidden""##, r##"attributeName="display" to="none""##] {
+        let i = imp(&doc(&format!(r##"<rect width="5" height="5"><set {what} begin="1s" dur="1s"/></rect>"##)));
+        assert!(i.warnings.is_empty(), "{what}: {:?}", i.warnings);
+        assert!(close(layer_opacity_at(&i, 0.5), 1.0) && close(layer_opacity_at(&i, 1.5), 0.0) && close(layer_opacity_at(&i, 2.5), 1.0), "{what}");
+    }
+}
+
+#[test]
+fn set_shows_an_element_that_starts_hidden() {
+    for (start, what) in [
+        (r##"visibility="hidden""##, r##"attributeName="visibility" to="visible""##),
+        (r##"display="none""##, r##"attributeName="display" to="inline""##),
+        (r##"style="display:none""##, r##"attributeName="display" to="block""##),
+    ] {
+        let i = imp(&doc(&format!(r##"<rect id="r" width="5" height="5" {start}><set {what} begin="2s" fill="freeze"/></rect>"##)));
+        assert!(i.warnings.is_empty(), "{start}: {:?}", i.warnings);
+        let Element::Layer(l) = &i.scene.elements[0] else { panic!("a layer: {:?}", i.scene.elements) };
+        assert!(matches!(&l.children[0], Element::Rect(r) if r.id.as_deref() == Some("r")), "{start}: the rect is built");
+        assert!(close(layer_opacity_at(&i, 1.0), 0.0) && close(layer_opacity_at(&i, 3.0), 1.0), "{start}");
+    }
+}
+
+#[test]
+fn only_the_animated_element_is_built_visible() {
+    let i = imp(&doc(r##"<g visibility="hidden"><rect id="a" width="5" height="5"/><rect id="b" width="5" height="5"><set attributeName="visibility" to="visible" begin="1s" fill="freeze"/></rect></g>"##));
+    let mut ids = Vec::new();
+    fn collect(e: &Element, ids: &mut Vec<String>) {
+        match e {
+            Element::Group(g) => g.children.iter().for_each(|c| collect(c, ids)),
+            Element::Layer(l) => l.children.iter().for_each(|c| collect(c, ids)),
+            Element::Rect(r) => ids.push(r.id.clone().unwrap_or_default()),
+            _ => {}
+        }
+    }
+    i.scene.elements.iter().for_each(|e| collect(e, &mut ids));
+    assert!(!ids.contains(&"a".to_string()), "the sibling stays hidden: {ids:?}");
+    assert!(ids.contains(&"b".to_string()), "{ids:?}");
+}
+
+#[test]
+fn a_set_that_never_shows_a_hidden_element_is_reported() {
+    let i = imp(&doc(r##"<rect width="5" height="5" visibility="hidden"><set attributeName="visibility" to="hidden" begin="1s"/></rect>"##));
+    assert!(has_warning(&i, "never changes its visibility"), "{:?}", i.warnings);
+    assert!(i.scene.animations.is_empty());
+    assert!(!i.scene.elements.iter().any(|e| matches!(e, Element::Layer(_))), "nothing is wrapped or shown");
+}
+
+#[test]
+fn animate_switches_visibility_without_blending() {
+    let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="visibility" values="visible;hidden;visible" keyTimes="0;0.5;1" dur="2s" repeatCount="indefinite"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.duration, 2.0);
+    assert!(close(layer_opacity_at(&i, 0.5), 1.0) && close(layer_opacity_at(&i, 1.5), 0.0));
+    assert!(close(layer_opacity_at(&i, 2.5), 1.0), "and loops");
+    let from_to = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="visibility" from="hidden" to="visible" dur="2s" fill="freeze"/></rect>"##));
+    assert!(close(layer_opacity_at(&from_to, 0.5), 0.0) && close(layer_opacity_at(&from_to, 1.5), 1.0), "a discrete from-to switches halfway");
+}
+
+#[test]
+fn set_visibility_keeps_the_element_opacity() {
+    let i = imp(&doc(r##"<rect width="5" height="5" opacity=".5"><set attributeName="visibility" to="hidden" begin="1s" dur="1s"/></rect>"##));
+    let Element::Layer(outer) = &i.scene.elements[0] else { panic!("a layer") };
+    assert!(matches!(&outer.children[0], Element::Rect(r) if r.style.opacity == Some(0.5)), "{:?}", outer.children);
+    assert!(close(layer_opacity_at(&i, 0.5), 1.0) && close(layer_opacity_at(&i, 1.5), 0.0));
+}
+
+// ── animateMotion ───────────────────────────────────────────────────────────
+
+#[test]
+fn animate_motion_follows_the_path_at_constant_speed() {
+    let i = imp(&doc(r##"<rect id="r" width="4" height="4"><animateMotion path="M 0 0 L 10 0 L 10 10" dur="2s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.duration, 2.0);
+    assert_eq!(i.scene.animations.len(), 2, "no heading channel without rotate");
+    for (t, want) in [(0.0, (0.0, 0.0)), (0.5, (5.0, 0.0)), (1.0, (10.0, 0.0)), (1.5, (10.0, 5.0)), (2.0, (10.0, 10.0)), (5.0, (10.0, 10.0))] {
+        assert!(near(frame_point(&i, t, 0.0, 0.0), want), "t={t}: {:?}", frame_point(&i, t, 0.0, 0.0));
+    }
+}
+
+#[test]
+fn animate_motion_goes_back_after_its_end_unless_it_freezes() {
+    let i = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 3 0 L 13 0" begin="1s" dur="1s"/></rect><rect width="1" height="1" transform="translate(0 50)"/>"##));
+    assert!(near(frame_point(&i, 0.5, 0.0, 0.0), (0.0, 0.0)));
+    assert!(near(frame_point(&i, 1.5, 0.0, 0.0), (8.0, 0.0)));
+    assert!(near(frame_point(&i, 3.0, 0.0, 0.0), (0.0, 0.0)));
+}
+
+#[test]
+fn animate_motion_loops_when_it_repeats() {
+    let i = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 20 0" dur="2s" repeatCount="indefinite"/></rect>"##));
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+    assert_eq!(i.scene.duration, 2.0);
+    assert!(near(frame_point(&i, 0.5, 0.0, 0.0), (5.0, 0.0)));
+    assert!(near(frame_point(&i, 2.5, 0.0, 0.0), (5.0, 0.0)));
+}
+
+#[test]
+fn rotate_auto_turns_the_element_along_the_path() {
+    let i = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 10 0 L 10 10" rotate="auto" dur="2s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(track(&i, msx_ast::AnimatedProperty::Rotate).len(), 1);
+    let heading = |t: f64| track(&i, msx_ast::AnimatedProperty::Rotate)[0].evaluate(t).expect("a heading");
+    assert!(heading(0.5).abs() < 1e-9 && (heading(1.5) - 90.0).abs() < 1e-9, "{} {}", heading(0.5), heading(1.5));
+    // The corner is a quick turn, not a slow one.
+    assert!(heading(0.99) < 1e-9 && (heading(1.01) - 90.0).abs() < 1e-9);
+    // Half way along the second leg the element faces down, so its local (4, 0) is 4 below its place.
+    let (x, y) = frame_point(&i, 1.5, 4.0, 0.0);
+    assert!((x - 10.0).abs() < 1e-6 && (y - 9.0).abs() < 0.02, "({x}, {y}); the turn at the corner takes a millisecond");
+    let rev = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 10 0" rotate="auto-reverse" dur="1s" fill="freeze"/></rect>"##));
+    assert!((track(&rev, msx_ast::AnimatedProperty::Rotate)[0].evaluate(0.5).unwrap() - 180.0).abs() < 1e-9);
+    let fixed = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 10 0" rotate="30" dur="1s" fill="freeze"/></rect>"##));
+    assert!((track(&fixed, msx_ast::AnimatedProperty::Rotate)[0].evaluate(0.5).unwrap() - 30.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_curved_path_is_followed_closely() {
+    // A half circle of radius 50 centred on (50, 0), taken in 4s.
+    let i = imp(&doc(r##"<rect width="2" height="2"><animateMotion path="M 0 0 A 50 50 0 0 1 100 0" dur="4s" fill="freeze"/></rect>"##));
+    let (x, y) = frame_point(&i, 2.0, 0.0, 0.0);
+    assert!((x - 50.0).abs() < 0.3 && (y + 50.0).abs() < 0.3, "{x} {y}");
+    for t in [0.3, 0.9, 1.7, 2.6, 3.4] {
+        let (x, y) = frame_point(&i, t, 0.0, 0.0);
+        assert!(((x - 50.0).hypot(y) - 50.0).abs() < 0.2, "t={t}: ({x}, {y}) is off the circle");
+    }
+}
+
+#[test]
+fn mpath_takes_the_path_of_another_element() {
+    let i = imp(&doc(r##"<defs><path id="p" d="M 0 0 L 20 0"/></defs><rect width="4" height="4"><animateMotion dur="2s" fill="freeze"><mpath href="#p"/></animateMotion></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(frame_point(&i, 1.0, 0.0, 0.0), (10.0, 0.0)));
+    let wins = imp(&doc(r##"<defs><path id="p" d="M 0 0 L 20 0"/></defs><rect width="4" height="4"><animateMotion path="M 0 0 L 0 100" dur="2s" fill="freeze"><mpath xlink:href="#p"/></animateMotion></rect>"##));
+    assert!(near(frame_point(&wins, 2.0, 0.0, 0.0), (20.0, 0.0)), "mpath beats path");
+    let bad = imp(&doc(r##"<rect width="4" height="4"><animateMotion dur="2s"><mpath href="#nothing"/></animateMotion></rect>"##));
+    assert!(has_warning(&bad, "mpath does not point at an element"), "{:?}", bad.warnings);
+}
+
+#[test]
+fn key_points_set_how_far_along_the_path_at_each_key_time() {
+    let i = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 100 0" keyPoints="0;0.8;1" keyTimes="0;0.25;1" calcMode="linear" dur="4s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(frame_point(&i, 1.0, 0.0, 0.0), (80.0, 0.0)));
+    assert!(near(frame_point(&i, 0.5, 0.0, 0.0), (40.0, 0.0)));
+    assert!(near(frame_point(&i, 4.0, 0.0, 0.0), (100.0, 0.0)));
+    let no_times = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 100 0" keyPoints="0;1" dur="4s" fill="freeze"/></rect>"##));
+    assert!(has_warning(&no_times, "keyPoints without keyTimes"), "{:?}", no_times.warnings);
+    let outside = imp(&doc(r##"<rect width="4" height="4"><animateMotion path="M 0 0 L 100 0" keyPoints="0;1.5" keyTimes="0;1" dur="4s"/></rect>"##));
+    assert!(has_warning(&outside, "keyPoints must lie in 0 to 1"), "{:?}", outside.warnings);
+}
+
+#[test]
+fn key_points_that_go_back_match_the_web_platform_test() {
+    // web-platform-tests svg/animations/animateMotion-keyPoints-001: a path of 250, keyPoints 1;0 over 5s,
+    // and the element's own transform comes first.
+    let i = imp(&doc(r##"<rect width="100" height="100" transform="translate(100, -50)"><animateMotion dur="5s" keyPoints="1;0" keyTimes="0;1" path="M-200,50h250"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    for (t, want) in [(1.0, 100.0), (2.0, 50.0), (3.0, 0.0)] {
+        let (x, y) = frame_point(&i, t, 0.0, 0.0);
+        assert!((x - want).abs() < 1e-3 && y.abs() < 1e-6, "t={t}: ({x}, {y}) wanted x {want}");
+    }
+    // The same with a bad keyPoints is ignored (the animation then runs forward over the path).
+    let bad = imp(&doc(r##"<rect width="100" height="100" transform="translate(100, -50)"><animateMotion dur="5s" keyPoints="X" keyTimes="0;1" path="M-200,50h250"/></rect>"##));
+    assert!(has_warning(&bad, "keyPoints is not a list of numbers"), "{:?}", bad.warnings);
+}
+
+#[test]
+fn values_are_points_on_a_path() {
+    let paced = imp(&doc(r##"<rect width="4" height="4"><animateMotion values="0,0; 10,0; 10,30" dur="4s" fill="freeze"/></rect>"##));
+    assert!(paced.warnings.is_empty(), "{:?}", paced.warnings);
+    assert!(near(frame_point(&paced, 1.0, 0.0, 0.0), (10.0, 0.0)), "paced: a quarter of the length takes a quarter of the time");
+    let linear = imp(&doc(r##"<rect width="4" height="4"><animateMotion values="0,0; 4,0; 40,0" calcMode="linear" dur="4s" fill="freeze"/></rect>"##));
+    assert!(near(frame_point(&linear, 2.0, 0.0, 0.0), (4.0, 0.0)), "linear: the values are evenly spaced in time");
+    let by = imp(&doc(r##"<rect width="4" height="4"><animateMotion by="6,8" dur="2s" fill="freeze"/></rect>"##));
+    assert!(near(frame_point(&by, 1.0, 0.0, 0.0), (3.0, 4.0)));
+}
+
+#[test]
+fn animate_motion_sits_inside_the_transform_and_outside_the_geometry() {
+    let i = imp(&doc(r##"<rect x="10" y="10" width="4" height="4" transform="translate(100 0)"><animateMotion path="M 0 0 L 20 0" dur="2s" fill="freeze"/><animate attributeName="x" from="10" to="30" dur="2s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // Static translate(100 0), motion +20 and x +20: the rect's corner (10, 10) lands at (100 + 20 + 20 + 10, 10).
+    assert!(near(frame_point(&i, 2.0, 10.0, 10.0), (150.0, 10.0)), "{:?}", frame_point(&i, 2.0, 10.0, 10.0));
+}
+
+#[test]
+fn animate_motion_that_cannot_run_is_reported() {
+    for (attrs, needle) in [
+        (r##"path="M 5 5" dur="1s""##, "no length"),
+        (r##"path="M 0 0 L 9 9" calcMode="spline" keySplines=".4 0 .6 1" dur="1s""##, "calcMode=\"spline\" is not supported"),
+        (r##"path="M 0 0 L 9 9" calcMode="discrete" dur="1s""##, "calcMode=\"discrete\" is not supported"),
+        (r##"path="M 0 0 L 9 9" rotate="sideways" dur="1s""##, "rotate=\"sideways\""),
+        (r##"dur="1s""##, "no path or mpath"),
+        (r##"path="not a path" dur="1s""##, "cannot be read"),
+        (r##"values="1,1" dur="1s""##, "only one point"),
+    ] {
+        let i = imp(&doc(&format!(r##"<rect width="4" height="4"><animateMotion {attrs}/></rect>"##)));
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+        assert!(i.scene.animations.is_empty(), "{needle}");
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{needle}: the static frame stays");
+    }
+}
+
+#[test]
+fn set_and_motion_survive_write_and_parse() {
+    let svg = doc(r##"<rect id="a" width="4" height="4"><animateMotion path="M 0 0 C 10 0 20 20 30 20 L 30 40" rotate="auto" dur="3s" repeatCount="indefinite"/></rect>
+        <rect id="b" width="4" height="4" display="none"><set attributeName="display" to="inline" begin="1s" dur="1s"/></rect>"##);
+    let i = imp(&svg);
+    assert!(i.scene.animations.len() >= 4, "{}", i.scene.animations.len());
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    assert_eq!(format!("{:?}", back.animations), format!("{:?}", i.scene.animations));
+    for t in [0.0, 0.7, 1.5, 2.9] {
+        assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements), "frame at {t}");
+    }
+}
+
+// ── CSS steps() ─────────────────────────────────────────────────────────────
+
+fn stepped(timing: &str, extra: &str) -> Imported {
+    imp(&doc(&format!(r##"<style>@keyframes fade {{ from {{ opacity: 0 }} to {{ opacity: 1 }} }} .a {{ animation: fade 2s {timing} {extra} }}</style><rect class="a" width="5" height="5"/>"##)))
+}
+
+#[test]
+fn steps_hold_a_value_for_each_piece() {
+    // steps(4) is jump-end: 0, 0.25, 0.5, 0.75 and 1 at the very end.
+    let i = stepped("steps(4)", "forwards");
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    for (t, want) in [(0.1, 0.0), (0.4, 0.0), (0.6, 0.25), (1.1, 0.5), (1.6, 0.75), (1.95, 0.75), (2.5, 1.0)] {
+        assert!(close(layer_opacity_at(&i, t), want), "t={t}: {}", layer_opacity_at(&i, t));
+    }
+}
+
+#[test]
+fn steps_can_jump_at_the_start_or_not_at_all_at_the_ends() {
+    let start = stepped("steps(4, jump-start)", "forwards");
+    for (t, want) in [(0.1, 0.25), (0.6, 0.5), (1.1, 0.75), (1.6, 1.0), (2.5, 1.0)] {
+        assert!(close(layer_opacity_at(&start, t), want), "jump-start t={t}: {}", layer_opacity_at(&start, t));
+    }
+    let none = stepped("steps(5, jump-none)", "forwards");
+    for (t, want) in [(0.1, 0.0), (0.5, 0.25), (1.0, 0.5), (1.5, 0.75), (1.9, 1.0)] {
+        assert!(close(layer_opacity_at(&none, t), want), "jump-none t={t}: {}", layer_opacity_at(&none, t));
+    }
+    let both = stepped("steps(3, jump-both)", "forwards");
+    for (t, want) in [(0.1, 0.25), (0.8, 0.5), (1.4, 0.75), (1.9, 0.75), (2.5, 1.0)] {
+        assert!(close(layer_opacity_at(&both, t), want), "jump-both t={t}: {}", layer_opacity_at(&both, t));
+    }
+}
+
+#[test]
+fn step_start_and_step_end_are_one_step() {
+    let end = stepped("step-end", "forwards");
+    assert!(close(layer_opacity_at(&end, 1.0), 0.0) && close(layer_opacity_at(&end, 2.5), 1.0));
+    let start = stepped("step-start", "forwards");
+    assert!(close(layer_opacity_at(&start, 0.5), 1.0));
+}
+
+#[test]
+fn steps_follow_the_direction_of_the_animation() {
+    // Backwards, the animation shows what forward play shows at the mirrored time, so
+    // jump-end becomes jump-start of the reversed play: 0.75 at first, then 0.5, 0.25 and 0.
+    let rev = stepped("steps(4)", "reverse forwards");
+    for (t, want) in [(0.1, 0.75), (0.6, 0.5), (1.1, 0.25), (1.6, 0.0), (2.5, 0.0)] {
+        assert!(close(layer_opacity_at(&rev, t), want), "reverse t={t}: {}", layer_opacity_at(&rev, t));
+    }
+}
+
+#[test]
+fn a_steps_easing_on_a_keyframe_applies_to_its_interval_only() {
+    let i = imp(&doc(r##"<style>@keyframes k { 0% { opacity: 0; animation-timing-function: steps(2) } 50% { opacity: 1 } 100% { opacity: 0 } } .a { animation: k 4s linear forwards }</style><rect class="a" width="5" height="5"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // First half: two steps, 0 then 0.5. Second half: a plain linear fall from 1 to 0.
+    assert!(close(layer_opacity_at(&i, 0.5), 0.0) && close(layer_opacity_at(&i, 1.5), 0.5));
+    assert!(close(layer_opacity_at(&i, 3.0), 0.5), "{}", layer_opacity_at(&i, 3.0));
+}
+
+#[test]
+fn steps_on_a_transform_survive_write_and_parse() {
+    let i = imp(&doc(r##"<style>@keyframes slide { to { transform: translate(40px, 0) } } .a { animation: slide 2s steps(4) infinite }</style><rect class="a" width="5" height="5"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(frame_point(&i, 0.1, 0.0, 0.0), (0.0, 0.0)) && near(frame_point(&i, 0.6, 0.0, 0.0), (10.0, 0.0)));
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text).expect("parsed");
+    assert_eq!(format!("{:?}", back.animations), format!("{:?}", i.scene.animations));
 }

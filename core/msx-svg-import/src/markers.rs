@@ -50,11 +50,11 @@ pub(crate) fn parse_orient(v: &str) -> Orient {
 /// A segment as a cubic. A line has both control points on its ends, so the
 /// same tangent rules cover every kind of segment.
 #[derive(Debug, Clone, Copy)]
-struct Seg {
-    from: (f64, f64),
-    c1: (f64, f64),
-    c2: (f64, f64),
-    to: (f64, f64),
+pub(crate) struct Seg {
+    pub(crate) from: (f64, f64),
+    pub(crate) c1: (f64, f64),
+    pub(crate) c2: (f64, f64),
+    pub(crate) to: (f64, f64),
     /// Whether a vertex sits at the end. An arc is cut into several cubics but
     /// is one segment, so only its last piece ends in a vertex.
     vertex_after: bool,
@@ -71,26 +71,26 @@ impl Seg {
     }
 
     /// Direction the segment leaves its start in, skipping coincident control points.
-    fn start_dir(&self) -> Option<(f64, f64)> {
+    pub(crate) fn start_dir(&self) -> Option<(f64, f64)> {
         [self.c1, self.c2, self.to].into_iter().map(|p| (p.0 - self.from.0, p.1 - self.from.1)).find(|d| d.0.hypot(d.1) > 1e-9)
     }
 
     /// Direction the segment arrives in.
-    fn end_dir(&self) -> Option<(f64, f64)> {
+    pub(crate) fn end_dir(&self) -> Option<(f64, f64)> {
         [self.c2, self.c1, self.from].into_iter().map(|p| (self.to.0 - p.0, self.to.1 - p.1)).find(|d| d.0.hypot(d.1) > 1e-9)
     }
 }
 
-struct Sub {
-    start: (f64, f64),
-    segs: Vec<Seg>,
+pub(crate) struct Sub {
+    pub(crate) start: (f64, f64),
+    pub(crate) segs: Vec<Seg>,
     closed: bool,
 }
 
 /// Splits `cmds` into subpaths of absolute segments. A closepath adds a
 /// segment back to the start, even a zero length one, so that it has a vertex
 /// of its own.
-fn subpaths(cmds: &[PathCommand]) -> Vec<Sub> {
+pub(crate) fn subpaths(cmds: &[PathCommand]) -> Vec<Sub> {
     let mut subs: Vec<Sub> = Vec::new();
     let (mut cur, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
     let mut open = false;
