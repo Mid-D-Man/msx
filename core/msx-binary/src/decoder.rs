@@ -2,7 +2,7 @@
 //! Low-level binary read helpers. All read_ functions advance a &mut usize cursor.
 
 use std::io;
-use crate::encoder::{UNSET_BYTE, UNSET_U16};
+use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_STROKE_OPACITY, UNSET_BYTE, UNSET_U16};
 use msx_ast::{Color, FillRule, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, Transform};
 use msx_ast::transform::{
     Matrix2D, TRANSFORM_MATRIX, TRANSFORM_MULTIPLE, TRANSFORM_NONE, TRANSFORM_ROTATE,
@@ -205,6 +205,15 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         let vd              = read_u8(data, cursor)?;
         s.visibility_hidden = vd & 1 != 0;
         s.display_none      = vd & 2 != 0;
+        if vd & 4 != 0 {
+            let present = read_u8(data, cursor)?;
+            if present & EXT_FILL_OPACITY      != 0 { s.fill_opacity      = Some(read_f32(data, cursor)?); }
+            if present & EXT_STROKE_OPACITY    != 0 { s.stroke_opacity    = Some(read_f32(data, cursor)?); }
+            if present & EXT_DOMINANT_BASELINE != 0 {
+                let idx = read_u16(data, cursor)?;
+                s.dominant_baseline = Some(lookup_string(pool, idx)?.to_string());
+            }
+        }
     }
     Ok(s)
 }
@@ -275,6 +284,48 @@ mod tests {
         assert_eq!(back.stroke, style.stroke);
         assert!((back.stroke_width.unwrap() - 2.5).abs() < 1e-3);
         assert!((back.opacity.unwrap() - 0.8).abs() < 1e-3);
+    }
+
+    #[test]
+    fn style_extension_roundtrip() {
+        let mut style = Style::empty();
+        style.fill_opacity      = Some(0.5);
+        style.stroke_opacity    = Some(0.25);
+        style.dominant_baseline = Some("central".to_string());
+        style.display_none      = true;
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+        assert_eq!(cursor, buf.len());
+        assert_eq!(back.fill_opacity, Some(0.5));
+        assert_eq!(back.stroke_opacity, Some(0.25));
+        assert_eq!(back.dominant_baseline.as_deref(), Some("central"));
+        assert!(back.display_none && !back.visibility_hidden);
+    }
+
+    #[test]
+    fn style_without_the_extension_is_byte_for_byte_what_version_2_wrote() {
+        let mut style = Style::empty();
+        style.visibility_hidden = true;
+        let mut buf  = Vec::new();
+        write_style(&mut buf, &style, &mut Vec::new());
+        // present flags (bit 7 only), then the one visibility byte with no extension bit.
+        assert_eq!(buf, vec![0x80, 0x01]);
+    }
+
+    #[test]
+    fn a_cut_off_extension_is_an_error_not_a_panic() {
+        let mut style = Style::empty();
+        style.fill_opacity   = Some(0.5);
+        style.stroke_opacity = Some(0.5);
+        let mut buf  = Vec::new();
+        write_style(&mut buf, &style, &mut Vec::new());
+        for cut in 0..buf.len() {
+            let mut cursor = 0;
+            assert!(read_style(&buf[..cut], &mut cursor, &[]).is_err(), "cut at {cut}");
+        }
     }
 
     #[test]

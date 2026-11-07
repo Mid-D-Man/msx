@@ -1,7 +1,13 @@
 // core/msx-binary/src/header.rs
 
 pub const MAGIC: [u8; 4] = [0x4D, 0x53, 0x58, 0x00]; // "MSX\0"
-pub const VERSION: u8 = 2; // v0.2 — adds Sdf/Splat/Layer/ConicGradient tags
+/// The oldest wire version this crate reads, and the one it writes for a scene
+/// that needs nothing newer. v2 added the Sdf/Splat/Layer/ConicGradient tags.
+pub const MIN_VERSION: u8 = 2;
+/// The newest wire version this crate reads. v3 adds the style extension block
+/// (`fill_opacity`, `stroke_opacity`, `dominant_baseline`). A scene is written
+/// with the lowest version that can hold it, see `version.rs`.
+pub const VERSION: u8 = 3;
 pub const HEADER_SIZE: usize = 32;
 
 // compress field
@@ -29,7 +35,7 @@ pub struct MsxHeader {
 impl MsxHeader {
     pub fn new(width: f32, height: f32) -> Self {
         MsxHeader {
-            version:      VERSION,
+            version:      MIN_VERSION,
             compress:     COMPRESS_MBFA,
             flags:        0,
             width,
@@ -73,8 +79,8 @@ impl MsxHeader {
         if data[0..4] != MAGIC {
             return Err(e("not an MSX file (bad magic)"));
         }
-        if data[4] != VERSION {
-            return Err(e(format!("unsupported MSX version {} (expected {})", data[4], VERSION)));
+        if !(MIN_VERSION..=VERSION).contains(&data[4]) {
+            return Err(e(format!("unsupported MSX version {} (this reader handles {} to {})", data[4], MIN_VERSION, VERSION)));
         }
         let compress = data[5];
         if compress != COMPRESS_NONE && compress != COMPRESS_MBFA {
@@ -114,7 +120,7 @@ mod tests {
         h.set_viewbox(true);
         let bytes = h.serialize();
         let h2 = MsxHeader::parse(&bytes).unwrap();
-        assert_eq!(h2.version, VERSION);
+        assert_eq!(h2.version, MIN_VERSION);
         assert!((h2.width - 640.0).abs() < 1e-4);
         assert_eq!(h2.elem_count, 5);
         assert!(h2.has_viewbox());
@@ -142,5 +148,16 @@ mod tests {
         let mut h = MsxHeader::new(100.0, 100.0).serialize();
         h[4] = VERSION + 1;
         assert!(MsxHeader::parse(&h).is_err());
+        h[4] = MIN_VERSION - 1;
+        assert!(MsxHeader::parse(&h).is_err());
+    }
+
+    #[test]
+    fn every_version_from_the_oldest_to_the_newest_is_read() {
+        for v in MIN_VERSION..=VERSION {
+            let mut h = MsxHeader::new(100.0, 100.0).serialize();
+            h[4] = v;
+            assert_eq!(MsxHeader::parse(&h).unwrap().version, v);
+        }
     }
 }

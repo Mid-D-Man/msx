@@ -45,7 +45,7 @@ Where a gradient is not interpolated, the paint is the average of its stops. Tha
 
 ### CPU
 
-- The rasterizer applies stroke width, dashes, caps, joins, the miter limit and the fill rule. It does not read `fill_opacity` or `stroke_opacity`.
+- The rasterizer applies stroke width, dashes, caps, joins, the miter limit, the fill rule, `fill_opacity` and `stroke_opacity`.
 - Compositing for layers uses the shared blend functions in `msx-render-core`, which cover all twelve modes.
 - Text is drawn as glyph outlines from an embedded DejaVu Sans face, through the same path pipeline as other shapes. `font_family` is ignored and there is no OpenType shaping. See [Text](text.md).
 - Linear and radial gradients are `tiny-skia` shaders mapped through the bounding box. Conic gradients have no `tiny-skia` shader, so the renderer rasterizes the shape coverage and colors each covered pixel itself.

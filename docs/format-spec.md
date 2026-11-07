@@ -503,7 +503,7 @@ MSX source supports DixScript interpolated strings for parametric paths:
 | Offset | Size | Field | Type | Notes |
 |---|---|---|---|---|
 | 0 | 4 | magic | `[u8; 4]` | `0x4D 0x53 0x58 0x00` — "MSX\0" |
-| 4 | 1 | version | `u8` | `2` — bumped when new **tags** would break an old decoder's assumptions about tag-driven dispatch (last bumped for Sdf/Splat/Layer/ConicGradient). New tags/flags that an old decoder can just never encounter or safely ignore (Image/Audio, the animations flag below) do **not** bump this — see "Wire-format versioning" below. |
+| 4 | 1 | version | `u8` | `2` or `3`. A file carries the lowest version that can hold its content, so a scene that uses nothing newer is written as `2`. `3` marks the style extension block (see "Style Block"). A reader accepts `2` to `3` and refuses anything else. Bumped when bytes an old decoder would misread are added; new tags and flags that an old decoder never meets or safely ignores (Image/Audio, the animations flag below) do **not** bump it. See "Wire-format versioning" below. |
 | 5 | 1 | compress | `u8` | `0`=none `1`=mbfa |
 | 6 | 1 | flags | `u8` | bit0=has_viewbox bit1=has_metadata bit2=has_defs bit3=has_animations |
 | 7 | 1 | reserved | `u8` | zero |
@@ -517,6 +517,13 @@ MSX source supports DixScript interpolated strings for parametric paths:
 #### Wire-format versioning
 
 New tags/flags are added additively wherever the decoder can either dispatch on the tag itself (a new element/def tag an old decoder simply never emits or reads) or gate a whole optional section behind a flag bit an old decoder never checks. Both of those degrade **gracefully** on version mismatch rather than crashing — an old decoder either never encounters the new tag at all (the file simply doesn't use the feature it postdates), or, for a flag-gated section like animations, silently doesn't read past where it always stopped, same "silently drops what it doesn't know about" behavior as before that section existed, not a new failure mode. Only changes to tags an old decoder actively dispatches on and would now misinterpret bump `version`.
+
+A change that alters the bytes of something an old decoder does read, such as the style block, is gated differently: the encoder writes the lowest version that holds the scene. A scene that uses none of the new fields is written as version 2, byte for byte as before, and still opens in a version 2 reader. A scene that uses one is written as version 3, which a version 2 reader refuses at the header with a clear error instead of misreading the bytes that follow. The versions are:
+
+| Version | Adds |
+|---|---|
+| 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -707,7 +714,7 @@ Only present when header `flags.bit3` (has_animations) is set — gated on wheth
   bit 4 = fill_rule, linecap, linejoin or miterlimit present
   bit 5 = font fields present
   bit 6 = dash array or dash offset present
-  bit 7 = visibility / display present
+  bit 7 = visibility / display present, or an extension block (version 3)
 
 [paint]                     if bit 0   (fill)
 [paint]                     if bit 1   (stroke)
@@ -724,12 +731,19 @@ Only present when header `flags.bit3` (has_animations) is set — gated on wheth
 [u16 dash_count]            if bit 6   (0=no dash array)
 [f32 dash]*
 [f32 dashoffset]                       (NaN=unset)
-[u8  vis_display_flags]     if bit 7   bit0=hidden  bit1=display_none
+[u8  vis_display_flags]     if bit 7   bit0=hidden  bit1=display_none  bit2=extension follows (version 3)
+[u8  ext_present]           if vis_display_flags.bit2
+  bit 0 = fill_opacity present
+  bit 1 = stroke_opacity present
+  bit 2 = dominant_baseline present
+[f32 fill_opacity]          if ext_present.bit0
+[f32 stroke_opacity]        if ext_present.bit1
+[u16 dominant_baseline_str_idx]  if ext_present.bit2
 ```
 
 One flag bit covers each group of fields, so a field that the source left unset carries its own marker inside the group. A decoder returns `None` for a marker and an explicit value otherwise. Files written before the markers existed hold the default value in those slots and decode to explicit values, which renders identically.
 
-The style block has no slot for `fill_opacity`, `stroke_opacity` or `dominant_baseline`. Those three keys are not stored, so they are lost when a scene is compiled.
+`fill_opacity`, `stroke_opacity` and `dominant_baseline` are stored in the extension block, which exists from version 3 on. Bit 7 of `present_flags` is set when any of them is set, even when neither `hidden` nor `display_none` is, and `vis_display_flags` then carries bit 2. Files written before version 3 have no such block and decode with those three keys unset. An unset key has no presence bit and decodes to `None`. A value of `fill_opacity` or `stroke_opacity` above 1 or below 0 is held to the range 0 to 1 when drawn.
 
 Note: `Sdf` and `Layer` don't have a style block at all — `Sdf` has direct `fill`/`stroke` paint fields instead (see its geometry-fields row above), and `Layer` has no fill/stroke concept at all (it's a compositing group, not a drawable shape).
 

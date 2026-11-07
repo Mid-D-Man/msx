@@ -27,6 +27,7 @@ use crate::tags::*;
 // ── Public API ───────────────────────────────────────────────────────────────
 
 pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
+    crate::version::begin();
     let mut pool:    Vec<String> = Vec::new();
     let mut payload: Vec<u8>     = Vec::new();
 
@@ -92,6 +93,9 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
     header.str_pool_len = pool.iter().map(|s| 2 + s.len()).sum::<usize>() as u32 + 2;
     header.def_count    = scene.defs.len() as u32;
     header.compress     = if compress { COMPRESS_MBFA } else { COMPRESS_NONE };
+    // The lowest version that holds this scene, so a scene that uses nothing new
+    // still opens in an older reader.
+    header.version      = crate::version::needed();
 
     if scene.canvas.viewbox.is_some() { header.set_viewbox(true); }
     if !scene.defs.is_empty()         { header.set_defs(true); }
@@ -498,6 +502,89 @@ mod tests {
             id: None, transform: None, style,
         }));
         scene
+    }
+
+    fn circle_with(style: Style) -> Element {
+        Element::Circle(Circle { cx: 10.0, cy: 10.0, r: 5.0, id: None, transform: None, style })
+    }
+
+    fn version_of(data: &[u8]) -> u8 {
+        crate::header::MsxHeader::parse(data).unwrap().version
+    }
+
+    #[test]
+    fn a_scene_that_uses_nothing_new_is_written_as_the_oldest_version() {
+        for compress in [false, true] {
+            assert_eq!(version_of(&compile(&basic_scene(), compress).unwrap()), crate::MIN_VERSION, "compress={compress}");
+        }
+    }
+
+    #[test]
+    fn fill_opacity_stroke_opacity_and_baseline_survive_and_need_version_3() {
+        let mut style = Style::empty();
+        style.fill = Some(Paint::Color(Color::rgb(1, 2, 3)));
+        style.fill_opacity = Some(0.25);
+        style.stroke_opacity = Some(0.75);
+        style.dominant_baseline = Some("middle".to_string());
+        style.visibility_hidden = true;
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(circle_with(style));
+        for compress in [false, true] {
+            let data = compile(&scene, compress).unwrap();
+            assert_eq!(version_of(&data), 3, "compress={compress}");
+            let back = crate::decode(&data).unwrap();
+            let Element::Circle(c) = &back.elements[0] else { panic!("a circle") };
+            assert!((c.style.fill_opacity.unwrap() - 0.25).abs() < 1e-6);
+            assert!((c.style.stroke_opacity.unwrap() - 0.75).abs() < 1e-6);
+            assert_eq!(c.style.dominant_baseline.as_deref(), Some("middle"));
+            assert!(c.style.visibility_hidden && !c.style.display_none, "the bits that share the byte are kept");
+            assert_eq!(c.style.fill, Some(Paint::Color(Color::rgb(1, 2, 3))));
+        }
+    }
+
+    #[test]
+    fn each_v3_field_alone_is_enough() {
+        for set in [
+            (|s: &mut Style| s.fill_opacity = Some(0.5)) as fn(&mut Style),
+            |s| s.stroke_opacity = Some(0.5),
+            |s| s.dominant_baseline = Some("hanging".to_string()),
+        ] {
+            let mut style = Style::empty();
+            set(&mut style);
+            let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+            scene.elements.push(circle_with(style.clone()));
+            let data = compile(&scene, false).unwrap();
+            assert_eq!(version_of(&data), 3);
+            let back = crate::decode(&data).unwrap();
+            let Element::Circle(c) = &back.elements[0] else { panic!("a circle") };
+            assert_eq!(c.style.fill_opacity.is_some(), style.fill_opacity.is_some());
+            assert_eq!(c.style.stroke_opacity.is_some(), style.stroke_opacity.is_some());
+            assert_eq!(c.style.dominant_baseline, style.dominant_baseline);
+        }
+    }
+
+    #[test]
+    fn a_v3_style_inside_a_group_or_a_clip_path_raises_the_version_too() {
+        let mut inner = Style::empty();
+        inner.fill_opacity = Some(0.5);
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Group(msx_ast::Group { id: None, transform: None, style: None, children: vec![circle_with(inner.clone())] }));
+        assert_eq!(version_of(&compile(&scene, false).unwrap()), 3);
+        let mut clipped = Layer::new(vec![]).with_clip_path(vec![circle_with(inner)]);
+        clipped.clip = true;
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.elements.push(Element::Layer(clipped));
+        assert_eq!(version_of(&compile(&scene, false).unwrap()), 3);
+    }
+
+    #[test]
+    fn the_version_of_one_compile_does_not_leak_into_the_next() {
+        let mut style = Style::empty();
+        style.stroke_opacity = Some(0.1);
+        let mut v3 = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        v3.elements.push(circle_with(style));
+        assert_eq!(version_of(&compile(&v3, false).unwrap()), 3);
+        assert_eq!(version_of(&compile(&basic_scene(), false).unwrap()), 2);
     }
 
     #[test]

@@ -82,7 +82,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `font-style`, `text-decoration`, `letter-spacing`, `word-spacing`, `writing-mode` | Gap | Reported |
 | Different styles inside one line | Gap | The style of the line start is used |
 | `textPath` | Gap | |
-| `dominant-baseline` | Partial | Honored from source, lost when compiled to binary |
+| `dominant-baseline` | Native | Kept in the binary from version 3 on |
 
 ## Renderers
 
@@ -106,5 +106,5 @@ The remaining gaps share a few causes, so they are closed in this order.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.
 6. Done for blur, drop shadow and offset. What is left needs new effect kinds: a blur per axis, flood, color matrix and the compositing primitives, and primitive regions.
 7. Text styling, then `textPath`.
-8. A binary version bump with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`.
+8. Done: a binary version 3 with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`, written only for a scene that uses one. CPU and GPU now honor the two opacities.
 9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. CSS `@keyframes` followed. `set`, `animateMotion` and `steps()` followed. What is left is the properties that have no track channel yet, such as fill color and dash offset.

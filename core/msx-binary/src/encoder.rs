@@ -151,6 +151,10 @@ pub fn write_id_flags(
 
 /// Marks an unset field inside a grouped style block. Real enum bytes are 0 to 2.
 pub const UNSET_BYTE: u8 = 0xFF;
+/// Presence bits of the style extension block (wire version 3).
+pub const EXT_FILL_OPACITY: u8 = 1 << 0;
+pub const EXT_STROKE_OPACITY: u8 = 1 << 1;
+pub const EXT_DOMINANT_BASELINE: u8 = 1 << 2;
 /// Marks an unset font size. A real size is stored as hundredths of a unit.
 pub const UNSET_U16: u16 = 0xFFFF;
 
@@ -207,8 +211,26 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
         write_f32(out, style.stroke_dashoffset.unwrap_or(f64::NAN));
     }
     if flags & (1 << 7) != 0 {
-        let vd = (style.visibility_hidden as u8) | ((style.display_none as u8) << 1);
+        let ext = style.has_v3_fields();
+        let vd = (style.visibility_hidden as u8) | ((style.display_none as u8) << 1) | ((ext as u8) << 2);
         write_u8(out, vd);
+        if ext {
+            // Wire version 3: a byte of presence bits, then the fields that are set.
+            // A reader of version 2 would take the bytes after `vd` for the next
+            // field, so a scene that gets here is written as version 3.
+            crate::version::require(3);
+            let mut present = 0u8;
+            if style.fill_opacity.is_some()      { present |= EXT_FILL_OPACITY; }
+            if style.stroke_opacity.is_some()    { present |= EXT_STROKE_OPACITY; }
+            if style.dominant_baseline.is_some() { present |= EXT_DOMINANT_BASELINE; }
+            write_u8(out, present);
+            if let Some(v) = style.fill_opacity   { write_f32(out, v); }
+            if let Some(v) = style.stroke_opacity { write_f32(out, v); }
+            if let Some(b) = &style.dominant_baseline {
+                let idx = intern_string(pool, b);
+                write_u16(out, idx);
+            }
+        }
     }
 }
 

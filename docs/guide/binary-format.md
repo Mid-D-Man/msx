@@ -46,9 +46,11 @@ The version byte is `2`. It changes only when a change would make an older decod
 
 ## What a compiled file keeps
 
-The style block stores fill, stroke, opacity, stroke width, fill rule, line cap, line join, miter limit, the dash array and offset, the font keys and the visibility flags. A key the source did not set stays unset after a roundtrip, so a decoded scene renders the same SVG as the source.
+The style block stores fill, stroke, opacity, stroke width, fill rule, line cap, line join, miter limit, the dash array and offset, the font keys, the visibility flags and, from version 3, `fill_opacity`, `stroke_opacity` and `dominant_baseline`. A key the source did not set stays unset after a roundtrip, so a decoded scene renders the same SVG as the source.
 
-Three style keys have no slot in the block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. They are dropped when a scene is compiled, and `msx roundtrip` reports a mismatch for a scene that sets them. Writing the alpha into the color (`#ff880080`) is the portable way to make a fill or stroke translucent.
+## Versions
+
+A file carries the lowest version that can hold its content. A scene that sets none of `fill_opacity`, `stroke_opacity` and `dominant_baseline` is written as version 2, byte for byte as before, and opens in a version 2 reader. A scene that sets one is written as version 3, because those keys sit in an extension block after the visibility byte, which a version 2 reader would misread. A version 2 reader refuses a version 3 file at the header with an error. A reader of this release opens versions 2 and 3, and files written before version 3 decode with the three keys unset. `msx info` prints the version of a binary.
 
 ## Embedded media
 

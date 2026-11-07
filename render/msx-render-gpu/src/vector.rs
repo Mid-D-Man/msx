@@ -343,7 +343,7 @@ fn fill_and_stroke(
         };
 
         if !routed_to_shader {
-            match resolve_paint(fill, opacity, defs, bbox) {
+            match resolve_paint(fill, opacity * style.fill_opacity.unwrap_or(1.0).clamp(0.0, 1.0), defs, bbox) {
                 Some(ResolvedPaint::Flat(rgba)) => fill_path(path, fill_rule, rgba, transform, canvas, &mut batch.buffers),
                 Some(ResolvedPaint::Gradient(desc, b)) => {
                     let grad = batch.push_gradient(*desc);
@@ -363,7 +363,7 @@ fn stroke_with_paint(path: &LyonPath, style: &Style, transform: Matrix2D, canvas
     if width <= 0.0 {
         return;
     }
-    let opacity = style.opacity.unwrap_or(1.0);
+    let opacity = style.opacity.unwrap_or(1.0) * style.stroke_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
     match resolve_paint(stroke, opacity, defs, bbox) {
         Some(ResolvedPaint::Flat(rgba)) => stroke_path(path, rgba, width, transform, canvas, &mut batch.buffers),
         Some(ResolvedPaint::Gradient(desc, b)) => {

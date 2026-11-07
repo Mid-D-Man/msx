@@ -10,7 +10,8 @@ pub mod path_codec;
 pub mod scene_decode;
 pub mod sdf_codec;
 pub mod tags;
+mod version;
 
 pub use compiler::{compile, compile_stats};
-pub use header::{MsxHeader, COMPRESS_MBFA, COMPRESS_NONE, HEADER_SIZE, VERSION};
+pub use header::{MsxHeader, COMPRESS_MBFA, COMPRESS_NONE, HEADER_SIZE, MIN_VERSION, VERSION};
 pub use scene_decode::decode;

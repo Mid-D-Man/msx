@@ -456,3 +456,39 @@ fn text_ink_matches_the_cpu_renderer() {
     eprintln!("covered area cpu {ca:.0} gpu {ga:.0} ratio {ratio:.3}");
     assert!((0.95..=1.05).contains(&ratio), "covered area cpu {ca:.0} gpu {ga:.0}, ratio {ratio}");
 }
+
+// ── fill_opacity and stroke_opacity ─────────────────────────────────────────
+
+#[test]
+fn fill_opacity_fades_the_fill_only() {
+    let Some(r) = gpu() else { return };
+    let mut style = Style { fill: Some(Paint::Color(Color::rgb(255, 0, 0))), stroke: Some(Paint::Color(Color::rgb(0, 0, 255))), stroke_width: Some(10.0), opacity: Some(1.0), ..Default::default() };
+    style.fill_opacity = Some(0.5);
+    let t = render_gpu(&r, &scene(60.0, 60.0, vec![], vec![rect(15.0, 15.0, 30.0, 30.0, style)]));
+    let inside = t.get_pixel(30, 30);
+    assert!((inside[0] as i32 - 128).abs() <= 4 && inside[2] < 6, "half red over black, got {inside:?}");
+    let on_stroke = t.get_pixel(15, 30);
+    assert!(on_stroke[2] > 250, "the stroke is still opaque blue, got {on_stroke:?}");
+}
+
+#[test]
+fn stroke_opacity_fades_the_stroke_only() {
+    let Some(r) = gpu() else { return };
+    let mut style = Style { fill: Some(Paint::Color(Color::rgb(255, 0, 0))), stroke: Some(Paint::Color(Color::rgb(0, 0, 255))), stroke_width: Some(10.0), opacity: Some(1.0), ..Default::default() };
+    style.stroke_opacity = Some(0.25);
+    let t = render_gpu(&r, &scene(60.0, 60.0, vec![], vec![rect(15.0, 15.0, 30.0, 30.0, style)]));
+    let inside = t.get_pixel(30, 30);
+    assert!(inside[0] > 250, "the fill is opaque red, got {inside:?}");
+    let edge = t.get_pixel(12, 30);
+    assert!((edge[2] as i32 - 64).abs() <= 4, "a quarter of blue where only the stroke is, got {edge:?}");
+}
+
+#[test]
+fn fill_opacity_applies_to_a_gradient_fill() {
+    let Some(r) = gpu() else { return };
+    let mut style = fill_style(url("g"));
+    style.fill_opacity = Some(0.5);
+    let t = render_gpu(&r, &scene(100.0, 20.0, vec![horizontal("g")], vec![rect(0.0, 0.0, 100.0, 20.0, style)]));
+    let (l, rr) = (t.get_pixel(5, 10), t.get_pixel(95, 10));
+    assert!((l[0] as i32 - 128).abs() <= 8 && (rr[2] as i32 - 128).abs() <= 8, "half strength over black: {l:?} {rr:?}");
+}

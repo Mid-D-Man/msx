@@ -193,7 +193,7 @@ fn fill_and_stroke(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, loc
     };
 
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
-        match resolve_paint(fill, geo.opacity, defs, geo.bbox) {
+        match resolve_paint(fill, geo.opacity * unit(style.fill_opacity), defs, geo.bbox) {
             Some(ResolvedPaint::Shader(paint)) => pixmap.fill_path(&path, &paint, sk_fill_rule(style), geo.transform, None),
             Some(ResolvedPaint::Conic(conic)) => gradient::conic_fill(pixmap, &path, &conic, sk_fill_rule(style), geo.transform, geo.matrix),
             Some(ResolvedPaint::Nothing) | None => {}
@@ -222,11 +222,16 @@ fn stroke_with_paint(pixmap: &mut Pixmap, path: &SkPath, style: &Style, geo: &Dr
         return;
     }
     let stroke = build_stroke(style, width);
-    match resolve_paint(stroke_paint, geo.opacity, defs, geo.bbox) {
+    match resolve_paint(stroke_paint, geo.opacity * unit(style.stroke_opacity), defs, geo.bbox) {
         Some(ResolvedPaint::Shader(paint)) => pixmap.stroke_path(path, &paint, &stroke, geo.transform, None),
         Some(ResolvedPaint::Conic(conic)) => gradient::conic_stroke(pixmap, path, &conic, &stroke, geo.transform, geo.matrix),
         Some(ResolvedPaint::Nothing) | None => {}
     }
+}
+
+/// A `fill_opacity` or `stroke_opacity` as a factor: unset is 1, and the value is held to 0..=1.
+fn unit(v: Option<f64>) -> f32 {
+    v.unwrap_or(1.0).clamp(0.0, 1.0) as f32
 }
 
 fn combine(parent: Matrix2D, local: Option<&msx_ast::Transform>) -> Matrix2D {

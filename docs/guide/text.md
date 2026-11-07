@@ -32,7 +32,7 @@ A gradient on text maps onto the text box, which is the advance width of the str
 
 `y` is the alphabetic baseline unless `dominant_baseline` says otherwise. The CPU and GPU renderers read these values: `middle`, `central`, `hanging`, `text-before-edge`, `text-top`, `text-after-edge`, `text-bottom` and `ideographic`. Any other value keeps the alphabetic baseline.
 
-> **Limitation** The binary format has no slot for `dominant_baseline`, so a compiled file loses it and its text sits on the alphabetic baseline.
+From binary version 3 the compiled file keeps `dominant_baseline`, and a scene that sets it is written as version 3 (see [Binary format](binary-format.md#versions)).
 
 ## Text and the roundtrip
 

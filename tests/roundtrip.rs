@@ -847,3 +847,51 @@ fn roundtrip_use_element() {
 )
 "##);
         }
+
+// ── Wire version 3: style extension ───────────────────────────────────────────
+
+const V3_STYLE_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 120, background = #ffffff }
+  elements::
+    { type = "rect", x = 10, y = 10, width = 80, height = 80,
+      style = { fill = #ff0000, stroke = #0000ff, stroke_width = 8,
+                fill_opacity = 0.4, stroke_opacity = 0.6, opacity = 1.0 } }
+    { type = "text", x = 150, y = 60, content = "Hello", 
+      style = { fill = #000000, font_size = 24, dominant_baseline = "middle",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
+"#;
+
+#[test]
+fn roundtrip_fill_opacity_stroke_opacity_and_dominant_baseline() {
+    // These three had no slot in the binary before wire version 3, so the SVG
+    // after a roundtrip lost fill-opacity, stroke-opacity and dominant-baseline.
+    check_roundtrip("v3_style", V3_STYLE_SOURCE);
+    let scene = parse_scene(V3_STYLE_SOURCE).unwrap();
+    let svg = render(&decode(&compile(&scene, true).unwrap()).unwrap());
+    assert!(svg.contains("fill-opacity=\"0.4\""), "{svg}");
+    assert!(svg.contains("stroke-opacity=\"0.6\""), "{svg}");
+    assert!(svg.contains("dominant-baseline=\"middle\""), "{svg}");
+}
+
+#[test]
+fn a_scene_without_v3_fields_is_still_written_as_version_2() {
+    let plain = parse_scene(r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 100, height = 100, background = #ffffff }
+  elements::
+    { type = "circle", cx = 50, cy = 50, r = 20,
+      style = { fill = #ff0000, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
+"#).unwrap();
+    for compress in [false, true] {
+        assert_eq!(compile(&plain, compress).unwrap()[4], 2, "compress={compress}");
+    }
+    let v3 = parse_scene(V3_STYLE_SOURCE).unwrap();
+    for compress in [false, true] {
+        assert_eq!(compile(&v3, compress).unwrap()[4], 3, "compress={compress}");
+    }
+}

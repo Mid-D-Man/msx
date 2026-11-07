@@ -294,3 +294,52 @@ fn a_smooth_command_after_a_non_curve_uses_the_current_point() {
     assert!(px(&p, 30, 50)[3] > 100);
     assert!(px(&p, 70, 49)[3] > 0 || px(&p, 70, 45)[3] > 0 || px(&p, 70, 40)[3] > 0, "the curve then rises toward (90, 10)");
 }
+
+// ── fill_opacity and stroke_opacity ─────────────────────────────────────────
+
+fn red() -> Paint {
+    Paint::Color(Color::rgb(255, 0, 0))
+}
+
+#[test]
+fn fill_opacity_fades_the_fill_only() {
+    let mut style = Style { fill: Some(red()), stroke: Some(Paint::Color(Color::rgb(0, 0, 255))), stroke_width: Some(10.0), opacity: Some(1.0), ..Default::default() };
+    style.fill_opacity = Some(0.5);
+    let p = render_to_pixmap(&scene(60.0, 60.0, vec![], vec![rect(15.0, 15.0, 30.0, 30.0, style)]));
+    let inside = px(&p, 30, 30);
+    assert!((inside[3] as i32 - 128).abs() <= 2 && inside[0] == inside[3], "half transparent red, got {inside:?}");
+    let on_stroke = px(&p, 15, 30);
+    assert!(on_stroke[3] > 250 && on_stroke[2] > 250, "the stroke is still opaque blue, got {on_stroke:?}");
+}
+
+#[test]
+fn stroke_opacity_fades_the_stroke_only() {
+    let mut style = Style { fill: Some(red()), stroke: Some(Paint::Color(Color::rgb(0, 0, 255))), stroke_width: Some(10.0), opacity: Some(1.0), ..Default::default() };
+    style.stroke_opacity = Some(0.25);
+    let p = render_to_pixmap(&scene(60.0, 60.0, vec![], vec![rect(15.0, 15.0, 30.0, 30.0, style)]));
+    let inside = px(&p, 30, 30);
+    assert!(inside[3] > 250 && inside[0] > 250, "the fill is opaque red, got {inside:?}");
+    let outside_edge = px(&p, 12, 30);
+    assert!((outside_edge[3] as i32 - 64).abs() <= 3, "a quarter of blue where only the stroke is, got {outside_edge:?}");
+}
+
+#[test]
+fn fill_opacity_multiplies_with_opacity_and_applies_to_gradients_and_is_held_to_one() {
+    let mut style = fill_style(red());
+    style.opacity = Some(0.5);
+    style.fill_opacity = Some(0.5);
+    let p = render_to_pixmap(&scene(40.0, 40.0, vec![], vec![rect(0.0, 0.0, 40.0, 40.0, style)]));
+    assert!((px(&p, 20, 20)[3] as i32 - 64).abs() <= 2, "opacity 0.5 times fill-opacity 0.5");
+
+    let mut grad = fill_style(url("g"));
+    grad.fill_opacity = Some(0.5);
+    let p = render_to_pixmap(&scene(100.0, 20.0, vec![horizontal("g")], vec![rect(0.0, 0.0, 100.0, 20.0, grad)]));
+    for x in [5, 50, 95] {
+        assert!((px(&p, x, 10)[3] as i32 - 128).abs() <= 3, "x={x}: {:?}", px(&p, x, 10));
+    }
+
+    let mut over = fill_style(red());
+    over.fill_opacity = Some(3.0);
+    let p = render_to_pixmap(&scene(40.0, 40.0, vec![], vec![rect(0.0, 0.0, 40.0, 40.0, over)]));
+    assert_eq!(px(&p, 20, 20), [255, 0, 0, 255], "a value above 1 counts as 1");
+}

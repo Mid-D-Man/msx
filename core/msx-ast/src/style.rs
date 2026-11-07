@@ -187,8 +187,16 @@ impl Style {
         a
     }
 
+    /// Whether the style sets a field that only wire version 3 can hold:
+    /// `fill_opacity`, `stroke_opacity` or `dominant_baseline`.
+    pub fn has_v3_fields(&self) -> bool {
+        self.fill_opacity.is_some() || self.stroke_opacity.is_some() || self.dominant_baseline.is_some()
+    }
+
     /// Bit flags indicating which fields are present (for binary encoding).
     /// Layout must remain stable across versions — msx-binary depends on it.
+    /// Bit 7 covers `visibility_hidden`, `display_none` and, from wire version 3,
+    /// the extension block of `has_v3_fields`.
     pub fn present_flags(&self) -> u8 {
         let mut f = 0u8;
         if self.fill.is_some()                                                                                   { f |= 1 << 0; }
@@ -198,7 +206,7 @@ impl Style {
         if self.fill_rule.is_some() || self.stroke_linecap.is_some() || self.stroke_linejoin.is_some() || self.stroke_miterlimit.is_some() { f |= 1 << 4; }
         if self.font_size.is_some() || self.font_family.is_some() || self.font_weight.is_some() || self.text_anchor.is_some() { f |= 1 << 5; }
         if self.stroke_dasharray.is_some() || self.stroke_dashoffset.is_some()                                   { f |= 1 << 6; }
-        if self.visibility_hidden || self.display_none                                                           { f |= 1 << 7; }
+        if self.visibility_hidden || self.display_none || self.has_v3_fields()                                    { f |= 1 << 7; }
         f
     }
 }
@@ -210,6 +218,14 @@ mod tests {
 
     #[test] fn fillrule_rt()     { assert_eq!(FillRule::from_byte(FillRule::EvenOdd.to_byte()), FillRule::EvenOdd); }
     #[test] fn linecap_all()     { for lc in [LineCap::Butt, LineCap::Round, LineCap::Square] { assert_eq!(LineCap::from_byte(lc.to_byte()), lc); } }
+    #[test] fn v3_fields_set_the_last_flag_bit() {
+        let mut s = Style::empty();
+        assert!(!s.has_v3_fields() && s.present_flags() & (1 << 7) == 0);
+        s.fill_opacity = Some(0.5);
+        assert!(s.has_v3_fields() && s.present_flags() & (1 << 7) != 0);
+        let mut s = Style::empty(); s.stroke_opacity = Some(0.5); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.dominant_baseline = Some("middle".into()); assert!(s.has_v3_fields());
+    }
     #[test] fn flags_fill_only() { let mut s = Style::empty(); s.fill = Some(Paint::Color(Color::BLACK)); assert_eq!(s.present_flags() & 1, 1); assert_eq!(s.present_flags() & 2, 0); }
     #[test] fn opacity_1_omitted() { let mut s = Style::empty(); s.opacity = Some(1.0); assert!(!s.to_svg_attrs().iter().any(|(k,_)| *k == "opacity")); }
     #[test] fn opacity_half_present() { let mut s = Style::empty(); s.opacity = Some(0.5); assert!(s.to_svg_attrs().iter().any(|(k,v)| *k == "opacity" && v == "0.5")); }
