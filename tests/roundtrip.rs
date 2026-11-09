@@ -895,3 +895,39 @@ fn a_scene_without_v3_fields_is_still_written_as_version_2() {
         assert_eq!(compile(&v3, compress).unwrap()[4], 3, "compress={compress}");
     }
 }
+
+// ── Wire version 3: gradient units, spread and transform ─────────────────────
+
+const V3_GRADIENT_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 200, height = 100, background = #ffffff }
+  defs::
+    { type = "linear_gradient", id = "stripes", x1 = 0, y1 = 0, x2 = 20, y2 = 0,
+      units = "user_space", spread = "repeat", transform = "rotate(30)",
+      stops = [ { offset = 0.0, color = #ff0000, opacity = 1.0 },
+                { offset = 1.0, color = #0000ff, opacity = 1.0 } ] }
+    { type = "radial_gradient", id = "cone", cx = 0.4, cy = 0.5, r = 0.2, fx = 0.9, fy = 0.5,
+      spread = "reflect", transform = "scale(1 0.5)",
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 },
+                { offset = 1.0, color = #000000, opacity = 1.0 } ] }
+  elements::
+    { type = "rect", x = 5, y = 5, width = 90, height = 90,
+      style = { fill = "url(#stripes)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 105, y = 5, width = 90, height = 90,
+      style = { fill = "url(#cone)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
+"#;
+
+#[test]
+fn roundtrip_gradient_units_spread_and_transform() {
+    check_roundtrip("v3_gradient", V3_GRADIENT_SOURCE);
+    let scene = parse_scene(V3_GRADIENT_SOURCE).unwrap();
+    for compress in [false, true] {
+        assert_eq!(compile(&scene, compress).unwrap()[4], 3, "compress={compress}");
+    }
+    let svg = render(&decode(&compile(&scene, true).unwrap()).unwrap());
+    assert!(svg.contains("gradientUnits=\"userSpaceOnUse\""), "{svg}");
+    assert!(svg.contains("spreadMethod=\"repeat\"") && svg.contains("spreadMethod=\"reflect\""), "{svg}");
+    assert!(svg.matches("gradientTransform=\"matrix(").count() == 2, "{svg}");
+}

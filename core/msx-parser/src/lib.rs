@@ -144,6 +144,40 @@ mod tests {
         }
     }
 
+    fn gradient_scene(extra: &str) -> String {
+        format!(r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = {{ width = 100, height = 100, background = #ffffff }}
+  defs::
+    {{ type = "linear_gradient", id = "g1", x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0{extra},
+      stops = [ {{ offset = 0.0, color = #ff0000, opacity = 1.0 }},
+                {{ offset = 1.0, color = #0000ff, opacity = 1.0 }} ] }}
+)
+"#)
+    }
+
+    #[test]
+    fn gradient_units_spread_and_transform_are_read() {
+        let scene = parse_scene(&gradient_scene(r#", units = "user_space", spread = "repeat", transform = "translate(5 6) scale(2)""#)).expect("parse");
+        let Def::LinearGradient(g) = &scene.defs[0] else { panic!("a linear gradient") };
+        assert_eq!(g.units, msx_ast::GradientUnits::UserSpace);
+        assert_eq!(g.spread, msx_ast::SpreadMethod::Repeat);
+        let m = g.transform.as_ref().expect("a transform").to_matrix();
+        assert!((m.a - 2.0).abs() < 1e-12 && (m.e - 5.0).abs() < 1e-12 && (m.f - 6.0).abs() < 1e-12);
+        let plain = parse_scene(&gradient_scene("")).expect("parse");
+        let Def::LinearGradient(g) = &plain.defs[0] else { panic!("a linear gradient") };
+        assert!(!g.has_v3_fields());
+    }
+
+    #[test]
+    fn unknown_gradient_units_or_spread_are_errors() {
+        let e = parse_scene(&gradient_scene(r#", units = "userSpaceOnUse""#)).unwrap_err();
+        assert!(e.to_string().contains("units"), "{e}");
+        let e = parse_scene(&gradient_scene(r#", spread = "mirror""#)).unwrap_err();
+        assert!(e.to_string().contains("spread"), "{e}");
+    }
+
     #[test]
     fn linear_gradient_def() {
         let src = r#"

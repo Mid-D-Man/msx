@@ -492,3 +492,112 @@ fn fill_opacity_applies_to_a_gradient_fill() {
     let (l, rr) = (t.get_pixel(5, 10), t.get_pixel(95, 10));
     assert!((l[0] as i32 - 128).abs() <= 8 && (rr[2] as i32 - 128).abs() <= 8, "half strength over black: {l:?} {rr:?}");
 }
+
+// ── gradient units, spread and transform ─────────────────────────────────────
+
+use msx_ast::{GradientUnits, SpreadMethod, Transform};
+
+fn lin(units: GradientUnits, spread: SpreadMethod, x1: f64, x2: f64) -> LinearGradient {
+    LinearGradient::new("g".into(), x1, 0.0, x2, 0.0, red_blue()).with_units(units).with_spread(spread)
+}
+
+fn paint_rect(r: &GpuRenderer, def: Def, x: f64, y: f64, w: f64, h: f64, canvas: (f64, f64)) -> RenderTarget {
+    render_gpu(r, &scene(canvas.0, canvas.1, vec![def], vec![rect(x, y, w, h, fill_style(url("g")))]))
+}
+
+#[test]
+fn reflect_runs_the_gradient_back_and_forth() {
+    let Some(r) = gpu() else { return };
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Reflect, 0.25, 0.75));
+    let t = paint_rect(&r, def, 0.0, 0.0, 100.0, 20.0, (100.0, 20.0));
+    let (a, b) = (t.get_pixel(12, 10), t.get_pixel(37, 10));
+    assert!((a[0] as i32 - b[0] as i32).abs() <= 10 && (a[2] as i32 - b[2] as i32).abs() <= 10, "mirrored about the start: {a:?} {b:?}");
+    assert!(t.get_pixel(5, 10)[2] > 80, "already turned toward blue at x=5: {:?}", t.get_pixel(5, 10));
+}
+
+#[test]
+fn repeat_starts_the_gradient_again() {
+    let Some(r) = gpu() else { return };
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Repeat, 0.25, 0.75));
+    let t = paint_rect(&r, def, 0.0, 0.0, 100.0, 20.0, (100.0, 20.0));
+    let (a, b) = (t.get_pixel(12, 10), t.get_pixel(62, 10));
+    assert!((a[0] as i32 - b[0] as i32).abs() <= 10 && (a[2] as i32 - b[2] as i32).abs() <= 10, "one period apart: {a:?} {b:?}");
+}
+
+#[test]
+fn user_space_units_ignore_the_shape() {
+    let Some(r) = gpu() else { return };
+    let def = Def::LinearGradient(lin(GradientUnits::UserSpace, SpreadMethod::Pad, 0.0, 300.0));
+    let t = paint_rect(&r, def, 100.0, 0.0, 100.0, 20.0, (300.0, 20.0));
+    let (left, right) = (t.get_pixel(102, 10), t.get_pixel(197, 10));
+    assert!(left[0] > 150 && left[2] > 60 && left[2] < 140, "a third of the way: {left:?}");
+    assert!(right[2] > 150 && right[0] > 60 && right[0] < 140, "two thirds of the way: {right:?}");
+}
+
+#[test]
+fn a_user_space_gradient_paints_a_line_that_has_no_box_area() {
+    let Some(r) = gpu() else { return };
+    let line = |units| {
+        let def = Def::LinearGradient(lin(units, SpreadMethod::Pad, 10.0, 90.0));
+        let el = Element::Line(Line { x1: 10.0, y1: 50.0, x2: 90.0, y2: 50.0, id: None, transform: None, style: stroke_style(url("g"), 10.0) });
+        render_gpu(&r, &scene(100.0, 100.0, vec![def], vec![el]))
+    };
+    let user = line(GradientUnits::UserSpace);
+    assert!(user.get_pixel(14, 50)[0] > 200 && user.get_pixel(86, 50)[2] > 200, "{:?} {:?}", user.get_pixel(14, 50), user.get_pixel(86, 50));
+    let boxed = line(GradientUnits::ObjectBoundingBox);
+    assert_eq!(&boxed.get_pixel(50, 50)[..3], &[0, 0, 0], "a box without area paints nothing in box units");
+}
+
+#[test]
+fn a_gradient_transform_turns_the_gradient_inside_the_box() {
+    let Some(r) = gpu() else { return };
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Pad, 0.0, 1.0).with_transform(Transform::Rotate { angle: 90.0, cx: Some(0.5), cy: Some(0.5) }));
+    let t = paint_rect(&r, def, 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let (top, bottom, left, right) = (t.get_pixel(50, 5), t.get_pixel(50, 94), t.get_pixel(5, 50), t.get_pixel(94, 50));
+    assert!(top[0] > 200 && bottom[2] > 200, "red at the top, blue at the bottom: {top:?} {bottom:?}");
+    assert!((left[0] as i32 - right[0] as i32).abs() <= 10, "even across: {left:?} {right:?}");
+}
+
+#[test]
+fn a_radial_gradient_under_a_stretch_is_an_ellipse() {
+    let Some(r) = gpu() else { return };
+    let stops = vec![Stop::new(0.0, Color::rgb(255, 255, 255)), Stop::new(1.0, Color::rgb(0, 0, 0))];
+    let g = RadialGradient::new("g".into(), 25.0, 50.0, 25.0, 25.0, 50.0, stops)
+        .with_units(GradientUnits::UserSpace)
+        .with_transform(Transform::Scale { x: 2.0, y: 1.0 });
+    let t = paint_rect(&r, Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let (wide, tall) = (t.get_pixel(90, 50), t.get_pixel(50, 70));
+    assert!((wide[0] as i32 - tall[0] as i32).abs() <= 14, "0.8 of the way out along either axis: {wide:?} {tall:?}");
+    assert!(t.get_pixel(50, 50)[0] > 240 && t.get_pixel(50, 90)[0] < 10);
+}
+
+#[test]
+fn gpu_and_cpu_agree_on_a_reflected_gradient_under_a_transform() {
+    let Some(r) = gpu() else { return };
+    let def = Def::LinearGradient(
+        lin(GradientUnits::UserSpace, SpreadMethod::Reflect, 20.0, 60.0).with_transform(Transform::Matrix(msx_ast::Matrix2D { a: 1.0, b: 0.3, c: 0.0, d: 1.0, e: 5.0, f: 0.0 })),
+    );
+    let sc = scene(120.0, 40.0, vec![def], vec![rect(0.0, 0.0, 120.0, 40.0, fill_style(url("g")))]);
+    let gpu_px = render_gpu(&r, &sc);
+    let cpu_px = msx_render_cpu::render_to_pixmap(&sc);
+    let mut worst = 0;
+    for (x, y) in [(3u32, 5u32), (30, 12), (55, 20), (80, 30), (110, 8)] {
+        let g = gpu_px.get_pixel(x, y);
+        let i = ((y * cpu_px.width() + x) * 4) as usize;
+        let c = &cpu_px.data()[i..i + 3];
+        worst = worst.max((0..3).map(|k| (g[k] as i32 - c[k] as i32).abs()).max().unwrap());
+    }
+    assert!(worst <= 12, "GPU and CPU differ by up to {worst} levels");
+}
+
+#[test]
+fn a_focal_point_outside_the_circle_makes_a_cone() {
+    let Some(r) = gpu() else { return };
+    let g = RadialGradient::new("g".into(), 50.0, 50.0, 20.0, 95.0, 50.0, red_blue()).with_units(GradientUnits::UserSpace);
+    let t = paint_rect(&r, Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let painted = |x, y| { let p = t.get_pixel(x, y); p[0] > 40 || p[2] > 40 };
+    assert!(painted(70, 50), "between the focal point and the circle is inside the cone");
+    assert!(painted(10, 50) && t.get_pixel(10, 50)[2] > 200, "past the circle on the axis the last color continues");
+    assert!(!painted(95, 10), "to the side of the focal point is outside the cone: {:?}", t.get_pixel(95, 10));
+    assert!(!painted(50, 95), "and so is below the circle: {:?}", t.get_pixel(50, 95));
+}

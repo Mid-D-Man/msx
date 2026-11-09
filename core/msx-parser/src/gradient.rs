@@ -1,8 +1,9 @@
 // core/msx-parser/src/gradient.rs
 use dixscript::Runtime::{DixData, dix_path};
-use msx_ast::{AudioDef, Color, ConicGradient, Def, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, Stop};
+use msx_ast::{AudioDef, Color, ConicGradient, Def, GradientUnits, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, SpreadMethod, Stop, Transform};
 
 use crate::dix_helpers::{array_len, color_from, opt, parse_media_source, raw, type_tag};
+use crate::transform::parse_transform;
 
 /// Parse the `defs::` (or nested `defs = [...]`) array on the canvas, or on
 /// any future scope that wants its own local defs.
@@ -16,6 +17,20 @@ pub fn parse_defs(data: &DixData, parent_prefix: &str, field: &str) -> Result<Ve
     Ok(out)
 }
 
+/// `units`, `spread` and `transform` of a linear or radial gradient. A key that
+/// is not there keeps its default, and a name that is not known is an error.
+fn parse_gradient_space(data: &DixData, prefix: &str) -> Result<(GradientUnits, SpreadMethod, Option<Transform>), String> {
+    let units = match opt::<String>(data, prefix, "units")? {
+        None => GradientUnits::default(),
+        Some(s) => GradientUnits::from_name(&s).ok_or_else(|| format!("{prefix}.units: '{s}' is not object_bounding_box or user_space"))?,
+    };
+    let spread = match opt::<String>(data, prefix, "spread")? {
+        None => SpreadMethod::default(),
+        Some(s) => SpreadMethod::from_name(&s).ok_or_else(|| format!("{prefix}.spread: '{s}' is not pad, reflect or repeat"))?,
+    };
+    Ok((units, spread, parse_transform(data, prefix)?))
+}
+
 fn parse_def(data: &DixData, prefix: &str) -> Result<Def, String> {
     let kind = type_tag(data, prefix)?;
     match kind.as_str() {
@@ -27,7 +42,10 @@ fn parse_def(data: &DixData, prefix: &str) -> Result<Def, String> {
             let x2 = opt::<f64>(data, prefix, "x2")?.unwrap_or(1.0);
             let y2 = opt::<f64>(data, prefix, "y2")?.unwrap_or(0.0);
             let stops = parse_stops(data, prefix, "stops")?;
-            Ok(Def::LinearGradient(LinearGradient::new(id, x1, y1, x2, y2, stops)))
+            let (units, spread, transform) = parse_gradient_space(data, prefix)?;
+            let mut g = LinearGradient::new(id, x1, y1, x2, y2, stops).with_units(units).with_spread(spread);
+            if let Some(t) = transform { g = g.with_transform(t); }
+            Ok(Def::LinearGradient(g))
         }
         "radial_gradient" => {
             let id = opt::<String>(data, prefix, "id")?
@@ -38,7 +56,10 @@ fn parse_def(data: &DixData, prefix: &str) -> Result<Def, String> {
             let fx = opt::<f64>(data, prefix, "fx")?.unwrap_or(cx);
             let fy = opt::<f64>(data, prefix, "fy")?.unwrap_or(cy);
             let stops = parse_stops(data, prefix, "stops")?;
-            Ok(Def::RadialGradient(RadialGradient::new(id, cx, cy, r, fx, fy, stops)))
+            let (units, spread, transform) = parse_gradient_space(data, prefix)?;
+            let mut g = RadialGradient::new(id, cx, cy, r, fx, fy, stops).with_units(units).with_spread(spread);
+            if let Some(t) = transform { g = g.with_transform(t); }
+            Ok(Def::RadialGradient(g))
         }
         "conic_gradient" => {
             let id = opt::<String>(data, prefix, "id")?

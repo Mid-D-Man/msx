@@ -13,8 +13,9 @@
 use std::io;
 
 use msx_ast::{
-    Circle, Def, Element, Ellipse, GaussianSplat, Group, Image, Layer, Line, LoopMode,
-    MediaSource, Path, Polyline, Rect, Scene, SdfNode, ShaderUniformValue, Style, Text, Use,
+    Circle, Def, Element, Ellipse, GaussianSplat, GradientUnits, Group, Image, Layer, Line, LoopMode,
+    MediaSource, Path, Polyline, Rect, Scene, SdfNode, ShaderUniformValue, SpreadMethod, Style, Text,
+    Transform, Use,
 };
 
 use crate::encoder::*;
@@ -117,25 +118,42 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
 
 // ── Def encoding ─────────────────────────────────────────────────────────────
 
+/// The flags byte of a version 3 gradient, then its transform when it has one.
+/// A reader of version 2 does not know the tags this follows, so a scene that
+/// gets here is written as version 3.
+fn write_gradient_space(out: &mut Vec<u8>, units: GradientUnits, spread: SpreadMethod, transform: &Option<Transform>) {
+    crate::version::require(3);
+    let t = transform.as_ref().filter(|t| !t.is_none());
+    let mut flags = spread.to_byte() << GRAD_SPREAD_SHIFT;
+    if units == GradientUnits::UserSpace { flags |= GRAD_FLAG_USER_SPACE; }
+    if t.is_some() { flags |= GRAD_FLAG_TRANSFORM; }
+    write_u8(out, flags);
+    if let Some(t) = t { write_transform(out, t); }
+}
+
 fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
     match def {
         Def::LinearGradient(g) => {
-            write_u8(out, TAG_LINEAR_GRADIENT);
+            let v3 = g.has_v3_fields();
+            write_u8(out, if v3 { TAG_LINEAR_GRADIENT_V3 } else { TAG_LINEAR_GRADIENT });
             let id_idx = intern_string(pool, &g.id);
             write_u16(out, id_idx);
             write_f32(out, g.x1); write_f32(out, g.y1);
             write_f32(out, g.x2); write_f32(out, g.y2);
             write_u16(out, g.stops.len() as u16);
             for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
+            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform); }
         }
         Def::RadialGradient(g) => {
-            write_u8(out, TAG_RADIAL_GRADIENT);
+            let v3 = g.has_v3_fields();
+            write_u8(out, if v3 { TAG_RADIAL_GRADIENT_V3 } else { TAG_RADIAL_GRADIENT });
             let id_idx = intern_string(pool, &g.id);
             write_u16(out, id_idx);
             write_f32(out, g.cx); write_f32(out, g.cy); write_f32(out, g.r);
             write_f32(out, g.fx); write_f32(out, g.fy);
             write_u16(out, g.stops.len() as u16);
             for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
+            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform); }
         }
         Def::ConicGradient(g) => {
             write_u8(out, TAG_CONIC_GRADIENT);
@@ -575,6 +593,62 @@ mod tests {
         let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
         scene.elements.push(Element::Layer(clipped));
         assert_eq!(version_of(&compile(&scene, false).unwrap()), 3);
+    }
+
+    fn gradient_scene(def: Def) -> Scene {
+        let mut scene = Scene::new(Canvas::new(50.0, 50.0, Color::WHITE));
+        scene.defs.push(def);
+        scene
+    }
+
+    fn two_stops() -> Vec<Stop> {
+        vec![Stop::new(0.0, Color::rgb(255, 0, 0)), Stop::new(1.0, Color::rgb(0, 0, 255))]
+    }
+
+    #[test]
+    fn a_plain_gradient_is_still_version_2_with_the_old_tags() {
+        for def in [
+            Def::LinearGradient(LinearGradient::new("l".into(), 0.0, 0.0, 1.0, 0.0, two_stops())),
+            Def::RadialGradient(msx_ast::RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops())),
+        ] {
+            let data = compile(&gradient_scene(def.clone()), false).unwrap();
+            assert_eq!(version_of(&data), 2);
+            assert_eq!(format!("{:?}", crate::decode(&data).unwrap().defs), format!("{:?}", vec![def]));
+        }
+    }
+
+    #[test]
+    fn gradient_units_spread_and_transform_survive_and_need_version_3() {
+        let m = Transform::Matrix(msx_ast::Matrix2D { a: 2.0, b: 0.5, c: -0.5, d: 2.0, e: 10.0, f: -4.0 });
+        let lin = LinearGradient::new("l".into(), 10.0, 0.0, 90.0, 0.0, two_stops())
+            .with_units(msx_ast::GradientUnits::UserSpace)
+            .with_spread(msx_ast::SpreadMethod::Reflect)
+            .with_transform(m.clone());
+        let rad = msx_ast::RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.25, 0.25, two_stops())
+            .with_spread(msx_ast::SpreadMethod::Repeat)
+            .with_transform(m);
+        for def in [Def::LinearGradient(lin), Def::RadialGradient(rad)] {
+            for compress in [false, true] {
+                let data = compile(&gradient_scene(def.clone()), compress).unwrap();
+                assert_eq!(version_of(&data), 3, "compress={compress}");
+                assert_eq!(format!("{:?}", crate::decode(&data).unwrap().defs), format!("{:?}", vec![def.clone()]), "compress={compress}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_gradient_field_alone_is_enough_for_version_3() {
+        let base = || LinearGradient::new("l".into(), 0.0, 0.0, 1.0, 0.0, two_stops());
+        for g in [
+            base().with_units(msx_ast::GradientUnits::UserSpace),
+            base().with_spread(msx_ast::SpreadMethod::Reflect),
+            base().with_spread(msx_ast::SpreadMethod::Repeat),
+            base().with_transform(Transform::Scale { x: 2.0, y: 3.0 }),
+        ] {
+            let data = compile(&gradient_scene(Def::LinearGradient(g.clone())), false).unwrap();
+            assert_eq!(version_of(&data), 3);
+            assert_eq!(format!("{:?}", crate::decode(&data).unwrap().defs), format!("{:?}", vec![Def::LinearGradient(g)]));
+        }
     }
 
     #[test]

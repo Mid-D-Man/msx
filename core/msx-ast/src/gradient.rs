@@ -3,6 +3,152 @@
 use crate::color::Color;
 use crate::media::AudioDef;
 use crate::primitives::fmt_f64;
+use crate::transform::{Matrix2D, Transform};
+
+/// The coordinate system a linear or radial gradient's geometry is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GradientUnits {
+    /// Fractions of the bounding box of the shape that is painted. The default.
+    #[default]
+    ObjectBoundingBox,
+    /// The local coordinates of the shape that is painted, so a gradient with
+    /// these units stays put when the shape moves or has no area.
+    UserSpace,
+}
+
+impl GradientUnits {
+    /// The name used in `.msx` source.
+    pub fn name(self) -> &'static str {
+        match self {
+            GradientUnits::ObjectBoundingBox => "object_bounding_box",
+            GradientUnits::UserSpace => "user_space",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "object_bounding_box" => Some(GradientUnits::ObjectBoundingBox),
+            "user_space" => Some(GradientUnits::UserSpace),
+            _ => None,
+        }
+    }
+
+    /// The value of the SVG `gradientUnits` attribute.
+    pub fn svg_name(self) -> &'static str {
+        match self {
+            GradientUnits::ObjectBoundingBox => "objectBoundingBox",
+            GradientUnits::UserSpace => "userSpaceOnUse",
+        }
+    }
+}
+
+/// What a gradient paints beyond its first and last stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpreadMethod {
+    /// The end colors continue. The default.
+    #[default]
+    Pad,
+    /// The gradient runs back and forth.
+    Reflect,
+    /// The gradient starts again.
+    Repeat,
+}
+
+impl SpreadMethod {
+    /// The name used in `.msx` source and in SVG `spreadMethod`.
+    pub fn name(self) -> &'static str {
+        match self {
+            SpreadMethod::Pad => "pad",
+            SpreadMethod::Reflect => "reflect",
+            SpreadMethod::Repeat => "repeat",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "pad" => Some(SpreadMethod::Pad),
+            "reflect" => Some(SpreadMethod::Reflect),
+            "repeat" => Some(SpreadMethod::Repeat),
+            _ => None,
+        }
+    }
+
+    /// The wire byte, which is also the order of the variants.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(SpreadMethod::Pad),
+            1 => Some(SpreadMethod::Reflect),
+            2 => Some(SpreadMethod::Repeat),
+            _ => None,
+        }
+    }
+}
+
+/// The matrix from a gradient's own space to the local space of the shape.
+///
+/// With `ObjectBoundingBox` units the gradient space is the unit square of
+/// `bbox` (`x`, `y`, width, height), with `UserSpace` it is the local space
+/// itself, and `transform` is applied inside either one, like SVG's
+/// `gradientTransform`, unless it cannot be undone (see `usable_transform`).
+/// `None` means a bounding box without area, which leaves nothing to paint
+/// with `ObjectBoundingBox` units.
+pub fn gradient_matrix(units: GradientUnits, transform: &Option<Transform>, bbox: Option<(f64, f64, f64, f64)>) -> Option<Matrix2D> {
+    let base = match units {
+        GradientUnits::UserSpace => Matrix2D::identity(),
+        GradientUnits::ObjectBoundingBox => {
+            let (x, y, w, h) = bbox?;
+            if !(w > 0.0 && h > 0.0 && x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
+                return None;
+            }
+            Matrix2D { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y }
+        }
+    };
+    Some(match usable_transform(transform) {
+        Some(m) => base.concat(m),
+        None => base,
+    })
+}
+
+/// The matrix of a gradient transform, or `None` when there is none or it
+/// cannot be undone (a zero scale, or a value that is not a number). Such a
+/// transform counts as no transform, which is what resvg draws for SVG's
+/// `matrix(0 0 0 0 0 0)`, so every renderer treats it the same way.
+pub fn usable_transform(transform: &Option<Transform>) -> Option<Matrix2D> {
+    let m = transform.as_ref().filter(|t| !t.is_none())?.to_matrix();
+    let det = m.a * m.d - m.b * m.c;
+    let finite = [m.a, m.b, m.c, m.d, m.e, m.f].iter().all(|v| v.is_finite());
+    (finite && det.abs() > 1e-12).then_some(m)
+}
+
+/// Up to six decimals, for gradient geometry that must keep small values.
+fn fmt_fine(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e10 {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{:.6}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// The attributes after `gradientUnits` that a gradient adds when it uses more
+/// than the defaults. Empty for the defaults, so older output stays as it was.
+fn extra_svg_attrs(spread: SpreadMethod, transform: &Option<Transform>) -> String {
+    let mut out = String::new();
+    if spread != SpreadMethod::Pad {
+        out.push_str(&format!(r#" spreadMethod="{}""#, spread.name()));
+    }
+    if let Some(m) = usable_transform(transform) {
+        out.push_str(&format!(
+            r#" gradientTransform="matrix({} {} {} {} {} {})""#,
+            fmt_fine(m.a), fmt_fine(m.b), fmt_fine(m.c), fmt_fine(m.d), fmt_fine(m.e), fmt_fine(m.f),
+        ));
+    }
+    out
+}
 
 /// A single gradient color stop.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,11 +184,26 @@ pub struct LinearGradient {
     pub x2:    f64,
     pub y2:    f64,
     pub stops: Vec<Stop>,
+    /// Coordinate system of the end points. Needs wire version 3 when not the default.
+    pub units:     GradientUnits,
+    /// What lies beyond the end points. Needs wire version 3 when not the default.
+    pub spread:    SpreadMethod,
+    /// Applied inside `units`, like SVG `gradientTransform`. Needs wire version 3.
+    pub transform: Option<Transform>,
 }
 
 impl LinearGradient {
     pub fn new(id: String, x1: f64, y1: f64, x2: f64, y2: f64, stops: Vec<Stop>) -> Self {
-        LinearGradient { id, x1, y1, x2, y2, stops }
+        LinearGradient { id, x1, y1, x2, y2, stops, units: GradientUnits::default(), spread: SpreadMethod::default(), transform: None }
+    }
+
+    pub fn with_units(mut self, units: GradientUnits) -> Self { self.units = units; self }
+    pub fn with_spread(mut self, spread: SpreadMethod) -> Self { self.spread = spread; self }
+    pub fn with_transform(mut self, t: Transform) -> Self { self.transform = Some(t).filter(|t| !t.is_none()); self }
+
+    /// Whether the gradient sets a field that only wire version 3 can hold.
+    pub fn has_v3_fields(&self) -> bool {
+        self.units != GradientUnits::default() || self.spread != SpreadMethod::default() || self.transform.as_ref().is_some_and(|t| !t.is_none())
     }
 
     pub fn to_svg(&self) -> String {
@@ -50,9 +211,11 @@ impl LinearGradient {
             r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
             fmt_f64(s.offset), s.color.to_svg_hex(), fmt_f64(s.color.opacity()),
         )).collect::<Vec<_>>().join("");
+        let fmt = if self.units == GradientUnits::UserSpace { fmt_fine } else { fmt_f64 };
         format!(
-            r#"<linearGradient id="{}" x1="{}" y1="{}" x2="{}" y2="{}" gradientUnits="objectBoundingBox">{}</linearGradient>"#,
-            self.id, fmt_f64(self.x1), fmt_f64(self.y1), fmt_f64(self.x2), fmt_f64(self.y2), stops_svg,
+            r#"<linearGradient id="{}" x1="{}" y1="{}" x2="{}" y2="{}" gradientUnits="{}"{}>{}</linearGradient>"#,
+            self.id, fmt(self.x1), fmt(self.y1), fmt(self.x2), fmt(self.y2), self.units.svg_name(),
+            extra_svg_attrs(self.spread, &self.transform), stops_svg,
         )
     }
 }
@@ -66,11 +229,26 @@ pub struct RadialGradient {
     pub fx:    f64,
     pub fy:    f64,
     pub stops: Vec<Stop>,
+    /// Coordinate system of the circle and focal point. Needs wire version 3 when not the default.
+    pub units:     GradientUnits,
+    /// What lies beyond the circle. Needs wire version 3 when not the default.
+    pub spread:    SpreadMethod,
+    /// Applied inside `units`, like SVG `gradientTransform`. Needs wire version 3.
+    pub transform: Option<Transform>,
 }
 
 impl RadialGradient {
     pub fn new(id: String, cx: f64, cy: f64, r: f64, fx: f64, fy: f64, stops: Vec<Stop>) -> Self {
-        RadialGradient { id, cx, cy, r, fx, fy, stops }
+        RadialGradient { id, cx, cy, r, fx, fy, stops, units: GradientUnits::default(), spread: SpreadMethod::default(), transform: None }
+    }
+
+    pub fn with_units(mut self, units: GradientUnits) -> Self { self.units = units; self }
+    pub fn with_spread(mut self, spread: SpreadMethod) -> Self { self.spread = spread; self }
+    pub fn with_transform(mut self, t: Transform) -> Self { self.transform = Some(t).filter(|t| !t.is_none()); self }
+
+    /// Whether the gradient sets a field that only wire version 3 can hold.
+    pub fn has_v3_fields(&self) -> bool {
+        self.units != GradientUnits::default() || self.spread != SpreadMethod::default() || self.transform.as_ref().is_some_and(|t| !t.is_none())
     }
 
     pub fn to_svg(&self) -> String {
@@ -78,10 +256,12 @@ impl RadialGradient {
             r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
             fmt_f64(s.offset), s.color.to_svg_hex(), fmt_f64(s.color.opacity()),
         )).collect::<Vec<_>>().join("");
+        let fmt = if self.units == GradientUnits::UserSpace { fmt_fine } else { fmt_f64 };
         format!(
-            r#"<radialGradient id="{}" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" gradientUnits="objectBoundingBox">{}</radialGradient>"#,
-            self.id, fmt_f64(self.cx), fmt_f64(self.cy), fmt_f64(self.r),
-            fmt_f64(self.fx), fmt_f64(self.fy), stops_svg,
+            r#"<radialGradient id="{}" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" gradientUnits="{}"{}>{}</radialGradient>"#,
+            self.id, fmt(self.cx), fmt(self.cy), fmt(self.r),
+            fmt(self.fx), fmt(self.fy), self.units.svg_name(),
+            extra_svg_attrs(self.spread, &self.transform), stops_svg,
         )
     }
 }
@@ -267,4 +447,93 @@ mod tests {
         assert!(svg.starts_with("<!--"));
         assert!(svg.contains("plasma_1"));
     }
-               }
+
+    fn two_stops() -> Vec<Stop> {
+        vec![Stop::new(0.0, Color::rgb(255, 0, 0)), Stop::new(1.0, Color::rgb(0, 0, 255))]
+    }
+
+    #[test]
+    fn a_default_gradient_writes_the_svg_it_always_did() {
+        let l = LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.0, two_stops());
+        assert!(l.to_svg().starts_with(r#"<linearGradient id="g" x1="0" y1="0" x2="1" y2="0" gradientUnits="objectBoundingBox">"#), "{}", l.to_svg());
+        let r = RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops());
+        assert!(r.to_svg().starts_with(r#"<radialGradient id="r" cx="0.5" cy="0.5" r="0.5" fx="0.5" fy="0.5" gradientUnits="objectBoundingBox">"#), "{}", r.to_svg());
+        assert!(!l.has_v3_fields() && !r.has_v3_fields());
+    }
+
+    #[test]
+    fn units_spread_and_transform_reach_the_svg() {
+        let l = LinearGradient::new("g".into(), 10.0, 0.0, 90.5, 0.0, two_stops())
+            .with_units(GradientUnits::UserSpace)
+            .with_spread(SpreadMethod::Reflect)
+            .with_transform(Transform::Matrix(Matrix2D { a: 0.00125, b: 0.5, c: -0.5, d: 1.0, e: 3.0, f: 4.25 }));
+        let svg = l.to_svg();
+        assert!(svg.contains(r#"gradientUnits="userSpaceOnUse""#), "{svg}");
+        assert!(svg.contains(r#"spreadMethod="reflect""#), "{svg}");
+        assert!(svg.contains(r#"gradientTransform="matrix(0.00125 0.5 -0.5 1 3 4.25)""#), "small matrix entries keep their digits: {svg}");
+        assert!(svg.contains(r#"x2="90.5""#));
+        assert!(l.has_v3_fields());
+        let r = RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops()).with_spread(SpreadMethod::Repeat);
+        assert!(r.to_svg().contains(r#"spreadMethod="repeat""#) && r.has_v3_fields());
+    }
+
+    #[test]
+    fn a_transform_that_cannot_be_undone_counts_as_none() {
+        let zero = Transform::Matrix(Matrix2D { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 });
+        assert!(usable_transform(&Some(zero.clone())).is_none());
+        assert!(usable_transform(&Some(Transform::Scale { x: 0.0, y: 1.0 })).is_none());
+        assert!(usable_transform(&Some(Transform::Translate { x: f64::NAN, y: 0.0 })).is_none());
+        assert!(usable_transform(&Some(Transform::Scale { x: 2.0, y: 3.0 })).is_some());
+        // The gradient keeps the field, but it moves nothing and is not written to SVG.
+        let l = LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.0, two_stops()).with_transform(zero);
+        assert!(!l.to_svg().contains("gradientTransform"), "{}", l.to_svg());
+        let m = gradient_matrix(GradientUnits::UserSpace, &l.transform, None).unwrap();
+        assert!(m.is_identity());
+    }
+
+    #[test]
+    fn an_empty_transform_counts_as_none() {
+        let l = LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.0, two_stops()).with_transform(Transform::None);
+        assert!(l.transform.is_none() && !l.has_v3_fields());
+        assert!(!l.to_svg().contains("gradientTransform"));
+    }
+
+    #[test]
+    fn names_and_bytes_roundtrip() {
+        for s in [SpreadMethod::Pad, SpreadMethod::Reflect, SpreadMethod::Repeat] {
+            assert_eq!(SpreadMethod::from_name(s.name()), Some(s));
+            assert_eq!(SpreadMethod::from_byte(s.to_byte()), Some(s));
+        }
+        for u in [GradientUnits::ObjectBoundingBox, GradientUnits::UserSpace] {
+            assert_eq!(GradientUnits::from_name(u.name()), Some(u));
+        }
+        assert_eq!(SpreadMethod::from_byte(3), None);
+        assert_eq!(SpreadMethod::from_name("mirror"), None);
+        assert_eq!(GradientUnits::from_name("userSpaceOnUse"), None, "source uses the snake case names");
+    }
+
+    #[test]
+    fn the_gradient_matrix_maps_gradient_space_to_local_space() {
+        let bbox = Some((10.0, 20.0, 100.0, 50.0));
+        let m = gradient_matrix(GradientUnits::ObjectBoundingBox, &None, bbox).unwrap();
+        let p = m.transform_point(crate::primitives::Point::new(0.5, 1.0));
+        assert!((p.x - 60.0).abs() < 1e-9 && (p.y - 70.0).abs() < 1e-9);
+        // The transform acts inside the box: here it moves the gradient half a box to the right.
+        let t = Some(Transform::Translate { x: 0.5, y: 0.0 });
+        let m = gradient_matrix(GradientUnits::ObjectBoundingBox, &t, bbox).unwrap();
+        let p = m.transform_point(crate::primitives::Point::new(0.0, 0.0));
+        assert!((p.x - 60.0).abs() < 1e-9 && (p.y - 20.0).abs() < 1e-9);
+        // User space ignores the box, even one without area.
+        let m = gradient_matrix(GradientUnits::UserSpace, &t, None).unwrap();
+        assert!((m.e - 0.5).abs() < 1e-12 && m.a == 1.0);
+        let m = gradient_matrix(GradientUnits::UserSpace, &None, Some((0.0, 0.0, 0.0, 0.0))).unwrap();
+        assert!(m.is_identity());
+    }
+
+    #[test]
+    fn a_box_without_area_leaves_nothing_to_paint_in_box_units() {
+        assert!(gradient_matrix(GradientUnits::ObjectBoundingBox, &None, None).is_none());
+        assert!(gradient_matrix(GradientUnits::ObjectBoundingBox, &None, Some((0.0, 0.0, 0.0, 5.0))).is_none());
+        assert!(gradient_matrix(GradientUnits::ObjectBoundingBox, &None, Some((0.0, 0.0, f64::NAN, 5.0))).is_none());
+    }
+}

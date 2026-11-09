@@ -5,9 +5,9 @@ use std::io;
 
 use msx_ast::{
     AnimatedProperty, AnimationTrack, Canvas, Circle, ConicGradient, Def, Easing, Element,
-    Ellipse, GaussianSplat, Group, Image, Keyframe, Layer, Line, LinearGradient, LoopMode,
-    MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
-    ShaderUniform, ShaderUniformValue, Stop, Text, Use, ViewBox,
+    Ellipse, GaussianSplat, GradientUnits, Group, Image, Keyframe, Layer, Line, LinearGradient,
+    LoopMode, MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
+    ShaderUniform, ShaderUniformValue, SpreadMethod, Stop, Text, Transform, Use, ViewBox,
 };
 
 use crate::decoder::*;
@@ -144,10 +144,20 @@ fn decode_animations(
 
 // ── Def decoding ─────────────────────────────────────────────────────────────
 
+/// The flags byte of a version 3 gradient and the transform it announces.
+fn read_gradient_space(data: &[u8], cursor: &mut usize) -> io::Result<(GradientUnits, SpreadMethod, Option<Transform>)> {
+    let flags = read_u8(data, cursor)?;
+    let units = if flags & GRAD_FLAG_USER_SPACE != 0 { GradientUnits::UserSpace } else { GradientUnits::ObjectBoundingBox };
+    let spread = SpreadMethod::from_byte((flags & GRAD_SPREAD_MASK) >> GRAD_SPREAD_SHIFT)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "gradient: spread method is not pad, reflect or repeat"))?;
+    let transform = if flags & GRAD_FLAG_TRANSFORM != 0 { Some(read_transform(data, cursor)?) } else { None };
+    Ok((units, spread, transform))
+}
+
 fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<Def> {
     let tag = read_u8(data, cursor)?;
     match tag {
-        TAG_LINEAR_GRADIENT => {
+        TAG_LINEAR_GRADIENT | TAG_LINEAR_GRADIENT_V3 => {
             let id_idx = read_u16(data, cursor)?;
             let id     = pool.get(id_idx as usize).cloned().unwrap_or_default();
             let x1 = read_f32(data, cursor)?;
@@ -155,9 +165,16 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let x2 = read_f32(data, cursor)?;
             let y2 = read_f32(data, cursor)?;
             let stops = read_stops(data, cursor)?;
-            Ok(Def::LinearGradient(LinearGradient::new(id, x1, y1, x2, y2, stops)))
+            let mut g = LinearGradient::new(id, x1, y1, x2, y2, stops);
+            if tag == TAG_LINEAR_GRADIENT_V3 {
+                let (units, spread, transform) = read_gradient_space(data, cursor)?;
+                g.units = units;
+                g.spread = spread;
+                g.transform = transform;
+            }
+            Ok(Def::LinearGradient(g))
         }
-        TAG_RADIAL_GRADIENT => {
+        TAG_RADIAL_GRADIENT | TAG_RADIAL_GRADIENT_V3 => {
             let id_idx = read_u16(data, cursor)?;
             let id     = pool.get(id_idx as usize).cloned().unwrap_or_default();
             let cx = read_f32(data, cursor)?;
@@ -166,7 +183,14 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let fx = read_f32(data, cursor)?;
             let fy = read_f32(data, cursor)?;
             let stops = read_stops(data, cursor)?;
-            Ok(Def::RadialGradient(RadialGradient::new(id, cx, cy, r, fx, fy, stops)))
+            let mut g = RadialGradient::new(id, cx, cy, r, fx, fy, stops);
+            if tag == TAG_RADIAL_GRADIENT_V3 {
+                let (units, spread, transform) = read_gradient_space(data, cursor)?;
+                g.units = units;
+                g.spread = spread;
+                g.transform = transform;
+            }
+            Ok(Def::RadialGradient(g))
         }
         TAG_CONIC_GRADIENT => {
             let id_idx = read_u16(data, cursor)?;
@@ -483,4 +507,32 @@ fn decode_splat(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<
         None
     };
     Ok(Element::Splat(GaussianSplat { x, y, sigma_x, sigma_y, rotation, color, fill, opacity, id }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gradient_flags_byte_is_read_field_by_field() {
+        let (units, spread, transform) = read_gradient_space(&[0b0000_0011], &mut 0).unwrap();
+        assert_eq!((units, spread), (GradientUnits::UserSpace, SpreadMethod::Reflect));
+        assert!(transform.is_none());
+        let (units, spread, _) = read_gradient_space(&[0b0000_0101], &mut 0).unwrap();
+        assert_eq!((units, spread), (GradientUnits::UserSpace, SpreadMethod::Repeat));
+        let (units, spread, _) = read_gradient_space(&[0b0000_0100], &mut 0).unwrap();
+        assert_eq!((units, spread), (GradientUnits::ObjectBoundingBox, SpreadMethod::Repeat));
+    }
+
+    #[test]
+    fn a_spread_that_does_not_exist_is_an_error() {
+        assert!(read_gradient_space(&[0b0000_0110], &mut 0).is_err());
+    }
+
+    #[test]
+    fn a_missing_or_cut_off_flags_byte_or_transform_is_an_error() {
+        assert!(read_gradient_space(&[], &mut 0).is_err());
+        // The transform bit is set but nothing follows it.
+        assert!(read_gradient_space(&[0b0000_1000], &mut 0).is_err());
+    }
 }

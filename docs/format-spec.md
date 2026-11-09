@@ -304,10 +304,13 @@ Defined in the `defs::` group array. Referenced via `"url(#id)"` in paint values
 {
   type = "linear_gradient"
   id   = <string>
-  x1   = <float>    // 0.0..1.0, a fraction of the bounding box of the element that uses the gradient
+  x1   = <float>    // a fraction of the bounding box of the element that uses the gradient, or a local coordinate with units = "user_space"
   y1   = <float>
   x2   = <float>
   y2   = <float>
+  units     = <string>?  // "object_bounding_box" (default) | "user_space"        (version 3)
+  spread    = <string>?  // "pad" (default) | "reflect" | "repeat"               (version 3)
+  transform = <string>?  // SVG transform list, applied inside the units          (version 3)
   stops = [
     { offset = <float>, color = <color>, opacity = <float> }
     ...
@@ -326,6 +329,9 @@ Defined in the `defs::` group array. Referenced via `"url(#id)"` in paint values
   r    = <float>    // radius
   fx   = <float>?   // focal point x (defaults to cx)
   fy   = <float>?
+  units     = <string>?  // as for linear_gradient                                (version 3)
+  spread    = <string>?                                                           // (version 3)
+  transform = <string>?                                                           // (version 3)
   stops = [ ... ]
 }
 ```
@@ -503,7 +509,7 @@ MSX source supports DixScript interpolated strings for parametric paths:
 | Offset | Size | Field | Type | Notes |
 |---|---|---|---|---|
 | 0 | 4 | magic | `[u8; 4]` | `0x4D 0x53 0x58 0x00` — "MSX\0" |
-| 4 | 1 | version | `u8` | `2` or `3`. A file carries the lowest version that can hold its content, so a scene that uses nothing newer is written as `2`. `3` marks the style extension block (see "Style Block"). A reader accepts `2` to `3` and refuses anything else. Bumped when bytes an old decoder would misread are added; new tags and flags that an old decoder never meets or safely ignores (Image/Audio, the animations flag below) do **not** bump it. See "Wire-format versioning" below. |
+| 4 | 1 | version | `u8` | `2` or `3`. A file carries the lowest version that can hold its content, so a scene that uses nothing newer is written as `2`. `3` marks the style extension block (see "Style Block") and the gradient tags `0x13` and `0x14`. A reader accepts `2` to `3` and refuses anything else. Bumped when bytes an old decoder would misread are added; new tags and flags that an old decoder never meets or safely ignores (Image/Audio, the animations flag below) do **not** bump it. See "Wire-format versioning" below. |
 | 5 | 1 | compress | `u8` | `0`=none `1`=mbfa |
 | 6 | 1 | flags | `u8` | bit0=has_viewbox bit1=has_metadata bit2=has_defs bit3=has_animations |
 | 7 | 1 | reserved | `u8` | zero |
@@ -523,7 +529,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread` and `transform`, in tags `0x13` and `0x14` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -561,6 +567,8 @@ The `TAG_END` sentinel is always written after the element stream, regardless of
 | `0x10` | Shader (def only) | v0.3 |
 | `0x11` | Image | v0.4 |
 | `0x12` | Audio (def only) | v0.4 |
+| `0x13` | LinearGradient with units, spread or transform (def only) | wire version 3 |
+| `0x14` | RadialGradient with units, spread or transform (def only) | wire version 3 |
 | `0xFF` | End sentinel | v0.1 |
 
 ("Since" tracks when each tag was added to `tags.rs`, not the file-header `version` byte — see "Wire-format versioning" above for why those two numbers don't move together.)
@@ -601,6 +609,10 @@ The `TAG_END` sentinel is always written after the element stream, regardless of
 | `0x10` Shader | `[u16 id_str_idx source_ref_str_idx entry_point_str_idx] [u8 r g b a fallback_color] [u16 uniform_count] ([u16 name_str_idx] [uniform_value])*` |
 | `0x11` Image | `[media_source] [f32 x y width height] [u8 anchor]`, then the shared style block |
 | `0x12` Audio | `[u16 id_str_idx] [media_source]` — no style block, def only |
+| `0x13` LinearGradient (v3) | as `0x0A`, then `[u8 flags] [transform]?` |
+| `0x14` RadialGradient (v3) | as `0x0B`, then `[u8 flags] [transform]?` |
+
+The flags byte of `0x13` and `0x14`: bit 0 is set for `user_space` units, bits 1 and 2 hold the spread (0 pad, 1 reflect, 2 repeat, 3 is invalid), and bit 3 says that a transform follows, in the same encoding as an element transform. The other bits are 0. A gradient that uses none of the three is written with `0x0A` or `0x0B`, so its bytes and the file version are as before.
 
 #### Gradient stop
 

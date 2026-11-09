@@ -22,11 +22,6 @@ impl BBox {
     pub fn has_area(&self) -> bool {
         self.w > 0.0 && self.h > 0.0 && self.w.is_finite() && self.h.is_finite()
     }
-
-    /// The matrix that maps the unit square onto this box.
-    pub fn unit_to_box(&self) -> Matrix2D {
-        Matrix2D { a: self.w, b: 0.0, c: 0.0, d: self.h, e: self.x, f: self.y }
-    }
 }
 
 pub fn invert(m: Matrix2D) -> Option<Matrix2D> {

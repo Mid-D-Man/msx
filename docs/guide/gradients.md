@@ -20,9 +20,27 @@ The reference is a quoted string. The `id` of every def must be present, and a r
 
 ## Coordinates
 
-Gradient coordinates are fractions of the bounding box of the element that uses the gradient, not canvas pixels. A linear gradient from `x1 = 0` to `x2 = 1` runs from the left edge of the element to its right edge, whatever the element's position or size. Reusing one gradient on shapes of different sizes therefore needs no change.
+By default gradient coordinates are fractions of the bounding box of the element that uses the gradient, not canvas pixels. A linear gradient from `x1 = 0` to `x2 = 1` runs from the left edge of the element to its right edge, whatever the element's position or size. Reusing one gradient on shapes of different sizes therefore needs no change.
 
-A shape whose bounding box has no width or no height has nothing to map the gradient onto. A perfectly horizontal line is the usual case. A fill or stroke that references a gradient then draws nothing, which is what SVG does. The bounding box covers the geometry without its stroke, and for text it is the text box.
+A shape whose bounding box has no width or no height has nothing to map the gradient onto in these units. A perfectly horizontal line is the usual case. A fill or stroke that references a gradient then draws nothing, which is what SVG does. The bounding box covers the geometry without its stroke, and for text it is the text box.
+
+## Units, spread and transform
+
+Linear and radial gradients take three more keys, which work like SVG's `gradientUnits`, `spreadMethod` and `gradientTransform`. A gradient that sets any of them is written as binary version 3, and a gradient that sets none is written as before (see [Binary format](binary-format.md#versions)).
+
+| Field | Meaning | Default |
+|---|---|---|
+| `units` | `"object_bounding_box"` or `"user_space"` | `"object_bounding_box"` |
+| `spread` | What lies beyond the end points: `"pad"`, `"reflect"` or `"repeat"` | `"pad"` |
+| `transform` | A transform string such as `"rotate(45) scale(2 1)"`, applied inside the units | none |
+
+With `user_space` the coordinates are in the local coordinates of the element that uses the gradient, so the gradient stays put when the element moves or changes size, and it paints a shape with no box area, such as a horizontal line. The transform acts inside the units: with box units it turns, stretches or moves the gradient inside the box, so a radial gradient under `scale(2 1)` becomes an ellipse. A transform that cannot be undone (a zero scale, or a value that is not a number) counts as no transform, as in resvg.
+
+```dixscript
+{ type = "linear_gradient", id = "stripes", x1 = 0, y1 = 0, x2 = 20, y2 = 0,
+  units = "user_space", spread = "repeat", transform = "rotate(30)",
+  stops = [ { offset = 0, color = #ff0000, opacity = 1 }, { offset = 1, color = #0000ff, opacity = 1 } ] }
+```
 
 ## Linear gradient
 
@@ -45,7 +63,7 @@ The default runs left to right. A vertical gradient uses `x2 = 0.0` and `y2 = 1.
 | `fx`, `fy` | Focal point | the center |
 | `stops` | The color stops | none |
 
-The defaults describe a circle that touches the edges of the bounding box. A focal point outside the circle moves onto the circle edge. A radius of 0 paints the last stop color.
+The defaults describe a circle that touches the edges of the bounding box. The focal point is where the gradient starts, and the circle is where it ends. A focal point outside the circle makes a cone: the gradient covers the area between the two tangent lines from the focal point and the area beyond the circle inside them, and nothing is painted outside it, which is how SVG 2 and the canvas define it. A radius of 0 paints the last stop color.
 
 ## Conic gradient
 

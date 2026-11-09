@@ -48,7 +48,7 @@ use msx_ast::{
     Scene, Style, Use,
 };
 
-use crate::gradient::{self, Bbox, GradientDesc, NO_GRADIENT};
+use crate::gradient::{self, Bbox, GradientDesc, UvMap, NO_GRADIENT};
 use crate::shader::PendingShaderShape;
 
 #[repr(C)]
@@ -345,9 +345,9 @@ fn fill_and_stroke(
         if !routed_to_shader {
             match resolve_paint(fill, opacity * style.fill_opacity.unwrap_or(1.0).clamp(0.0, 1.0), defs, bbox) {
                 Some(ResolvedPaint::Flat(rgba)) => fill_path(path, fill_rule, rgba, transform, canvas, &mut batch.buffers),
-                Some(ResolvedPaint::Gradient(desc, b)) => {
+                Some(ResolvedPaint::Gradient(desc, uv)) => {
                     let grad = batch.push_gradient(*desc);
-                    fill_path_gradient(path, fill_rule, grad, b, transform, canvas, &mut batch.buffers);
+                    fill_path_gradient(path, fill_rule, grad, uv, transform, canvas, &mut batch.buffers);
                 }
                 None => {}
             }
@@ -366,9 +366,9 @@ fn stroke_with_paint(path: &LyonPath, style: &Style, transform: Matrix2D, canvas
     let opacity = style.opacity.unwrap_or(1.0) * style.stroke_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
     match resolve_paint(stroke, opacity, defs, bbox) {
         Some(ResolvedPaint::Flat(rgba)) => stroke_path(path, rgba, width, transform, canvas, &mut batch.buffers),
-        Some(ResolvedPaint::Gradient(desc, b)) => {
+        Some(ResolvedPaint::Gradient(desc, uv)) => {
             let grad = batch.push_gradient(*desc);
-            stroke_path_gradient(path, width, grad, b, transform, canvas, &mut batch.buffers);
+            stroke_path_gradient(path, width, grad, uv, transform, canvas, &mut batch.buffers);
         }
         None => {}
     }
@@ -377,8 +377,8 @@ fn stroke_with_paint(path: &LyonPath, style: &Style, transform: Matrix2D, canvas
 /// A paint ready to tessellate with.
 enum ResolvedPaint {
     Flat([f32; 4]),
-    /// Boxed gradient record plus the bounding box its `uv` is measured against.
-    Gradient(Box<GradientDesc>, Bbox),
+    /// Boxed gradient record plus the map from a vertex to the `uv` it is measured in.
+    Gradient(Box<GradientDesc>, UvMap),
 }
 
 /// Resolve a fill or stroke paint. A gradient reference with an empty
@@ -389,7 +389,7 @@ fn resolve_paint(paint: &Paint, opacity: f64, defs: &Defs, bbox: Option<Bbox>) -
         let id = reference.strip_prefix("url(#")?.strip_suffix(')')?;
         let def = defs.get(id)?;
         match gradient::resolve(def, bbox, opacity as f32) {
-            Some(gradient::Resolved::Gradient(desc)) => return bbox.map(|b| ResolvedPaint::Gradient(desc, b)),
+            Some(gradient::Resolved::Gradient(desc, uv)) => return Some(ResolvedPaint::Gradient(desc, uv)),
             Some(gradient::Resolved::Nothing) => return None,
             None => {}
         }
@@ -467,30 +467,31 @@ fn fill_path_positions(
     (buffers.vertices, buffers.indices)
 }
 
-fn fill_path_gradient(path: &LyonPath, fill_rule: LyonFillRule, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
+fn fill_path_gradient(path: &LyonPath, fill_rule: LyonFillRule, grad: u32, uv: UvMap, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
     let mut tess = FillTessellator::new();
     let _ = tess.tessellate_path(
         path,
         &FillOptions::default().with_fill_rule(fill_rule),
-        &mut BuffersBuilder::new(buffers, |v: FillVertex| gradient_vertex(v.position().x, v.position().y, grad, bbox, transform, canvas)),
+        &mut BuffersBuilder::new(buffers, |v: FillVertex| gradient_vertex(v.position().x, v.position().y, grad, uv, transform, canvas)),
     );
 }
 
-fn stroke_path_gradient(path: &LyonPath, width: f32, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
+fn stroke_path_gradient(path: &LyonPath, width: f32, grad: u32, uv: UvMap, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
     let mut tess = StrokeTessellator::new();
     let options = StrokeOptions::default().with_line_width(width);
     let _ = tess.tessellate_path(
         path,
         &options,
-        &mut BuffersBuilder::new(buffers, |v: StrokeVertex| gradient_vertex(v.position().x, v.position().y, grad, bbox, transform, canvas)),
+        &mut BuffersBuilder::new(buffers, |v: StrokeVertex| gradient_vertex(v.position().x, v.position().y, grad, uv, transform, canvas)),
     );
 }
 
-/// A vertex whose color comes from gradient record `grad`. `uv` is measured
-/// from the untransformed local position, so it is exact under any transform.
-fn gradient_vertex(x: f32, y: f32, grad: u32, bbox: Bbox, transform: Matrix2D, canvas: (f32, f32)) -> Vertex {
+/// A vertex whose color comes from gradient record `grad`. `uv` is the local
+/// position mapped into gradient space, measured before the element transform,
+/// so it is exact under any transform.
+fn gradient_vertex(x: f32, y: f32, grad: u32, uv: UvMap, transform: Matrix2D, canvas: (f32, f32)) -> Vertex {
     let (tx, ty) = apply_matrix(transform, (x, y));
-    Vertex { position: to_clip_space(tx, ty, canvas.0, canvas.1), color: [1.0, 1.0, 1.0, 1.0], uv: bbox.uv(x, y), grad }
+    Vertex { position: to_clip_space(tx, ty, canvas.0, canvas.1), color: [1.0, 1.0, 1.0, 1.0], uv: uv.apply(x, y), grad }
 }
 
 fn stroke_path(path: &LyonPath, rgba: [f32; 4], width: f32, transform: Matrix2D, canvas: (f32, f32), buffers: &mut VertexBuffers<Vertex, u32>) {
@@ -942,11 +943,11 @@ mod shader_routing_tests {
     #[test]
     fn gradient_ref_is_not_mistaken_for_a_shader_ref() {
         let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
-        scene.defs.push(Def::LinearGradient(msx_ast::LinearGradient {
-            id: "grad_1".to_string(),
-            x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0,
-            stops: vec![msx_ast::Stop::new(0.0, Color::rgb(255, 0, 0))],
-        }));
+        scene.defs.push(Def::LinearGradient(msx_ast::LinearGradient::new(
+            "grad_1".to_string(),
+            0.0, 0.0, 1.0, 0.0,
+            vec![msx_ast::Stop::new(0.0, Color::rgb(255, 0, 0))],
+        )));
         let style = Style { fill: Some(Paint::Ref("url(#grad_1)".to_string())), ..flat_style() };
         scene.elements.push(rect(style));
 

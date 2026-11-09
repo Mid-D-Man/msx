@@ -19,7 +19,7 @@
 use bytemuck::{Pod, Zeroable};
 use lyon::algorithms::aabb::bounding_box;
 use lyon::path::Path as LyonPath;
-use msx_ast::{Def, Stop};
+use msx_ast::{gradient_matrix, Def, Matrix2D, SpreadMethod, Stop};
 
 /// Most stops a record holds. A gradient with more stops is resampled to
 /// this many evenly spaced stops, which softens hard stops past the limit.
@@ -35,6 +35,10 @@ pub(crate) const KIND_CONIC: u32 = 3;
 
 /// One gradient record, mirrored by `GradientDesc` in `vector.wgsl`.
 ///
+/// The gradient geometry below is in the space the vertex `uv` is measured in:
+/// bounding-box units or user space, then inside `gradientTransform` (see
+/// [`UvMap`]).
+///
 /// Field use by `kind`:
 /// - linear: `a = (x1, y1, x2, y2)`
 /// - radial: `a = (cx, cy, fx, fy)`, `b.x = r`
@@ -47,7 +51,9 @@ pub(crate) const KIND_CONIC: u32 = 3;
 pub struct GradientDesc {
     pub(crate) kind: u32,
     pub(crate) count: u32,
-    pub(crate) pad: [u32; 2],
+    /// 0 pad, 1 reflect, 2 repeat, applied to the gradient parameter.
+    pub(crate) spread: u32,
+    pub(crate) pad: u32,
     pub(crate) a: [f32; 4],
     pub(crate) b: [f32; 4],
     pub(crate) colors: [[f32; 4]; MAX_STOPS],
@@ -86,10 +92,44 @@ impl Bbox {
     }
 }
 
+/// Maps a local (pre-transform) position to the position the shader measures
+/// its gradient in. It is affine, so the rasterizer interpolates the mapped
+/// `uv` exactly across each triangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UvMap {
+    /// `a, b, c, d, e, f` of the matrix local space to gradient space.
+    m: [f32; 6],
+}
+
+impl UvMap {
+    pub fn apply(&self, x: f32, y: f32) -> [f32; 2] {
+        let m = self.m;
+        [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+    }
+
+    /// The map for a gradient whose space is the unit square of `b`.
+    pub fn from_bbox(b: Bbox) -> UvMap {
+        UvMap { m: [1.0 / b.w, 0.0, 0.0, 1.0 / b.h, -b.x / b.w, -b.y / b.h] }
+    }
+
+    /// The map that undoes `gradient_to_local`. `None` when it cannot be undone.
+    fn inverse_of(gradient_to_local: Matrix2D) -> Option<UvMap> {
+        let m = gradient_to_local;
+        let det = m.a * m.d - m.b * m.c;
+        if !det.is_finite() || det.abs() < 1e-18 {
+            return None;
+        }
+        let (a, b, c, d) = (m.d / det, -m.b / det, -m.c / det, m.a / det);
+        let (e, f) = (-(a * m.e + c * m.f), -(b * m.e + d * m.f));
+        Some(UvMap { m: [a as f32, b as f32, c as f32, d as f32, e as f32, f as f32] })
+    }
+}
+
 /// Outcome of resolving a gradient reference.
 pub(crate) enum Resolved {
-    /// Boxed: the record is 688 bytes and `Nothing` carries none.
-    Gradient(Box<GradientDesc>),
+    /// Boxed: the record is 688 bytes and `Nothing` carries none. The map
+    /// takes a vertex to the `uv` its record is measured in.
+    Gradient(Box<GradientDesc>, UvMap),
     /// A valid reference that paints nothing, for example an empty bounding box.
     Nothing,
 }
@@ -107,44 +147,58 @@ pub(crate) fn resolve(def: &Def, bbox: Option<Bbox>, opacity: f32) -> Option<Res
     if norm.is_empty() {
         return Some(Resolved::Nothing);
     }
-    let Some(b) = bbox.filter(Bbox::usable) else {
-        return Some(Resolved::Nothing);
-    };
+    let b = bbox.filter(Bbox::usable);
+    let bbox_f64 = b.map(|b| (f64::from(b.x), f64::from(b.y), f64::from(b.w), f64::from(b.h)));
     let last = norm[norm.len() - 1].1;
+    // A gradient in bounding-box units has nothing to paint with a box that has no area;
+    // one in user-space units does not need the box at all.
+    let space = |units, transform: &Option<msx_ast::Transform>| gradient_matrix(units, transform, bbox_f64).and_then(UvMap::inverse_of);
 
-    let desc = match def {
+    let (mut desc, uv) = match def {
         Def::LinearGradient(g) => {
+            let Some(uv) = space(g.units, &g.transform) else { return Some(Resolved::Nothing) };
             let (x1, y1, x2, y2) = (g.x1 as f32, g.y1 as f32, g.x2 as f32, g.y2 as f32);
             let (dx, dy) = (x2 - x1, y2 - y1);
-            if dx * dx + dy * dy <= 1e-12 {
+            let desc = if dx * dx + dy * dy <= 1e-12 {
                 // SVG paints the last stop color when both points coincide.
                 solid(last)
             } else {
-                build(KIND_LINEAR, [x1, y1, x2, y2], [0.0; 4], &norm)
-            }
+                let mut d = build(KIND_LINEAR, [x1, y1, x2, y2], [0.0; 4], &norm);
+                d.spread = spread_code(g.spread);
+                d
+            };
+            (desc, uv)
         }
         Def::RadialGradient(g) => {
+            let Some(uv) = space(g.units, &g.transform) else { return Some(Resolved::Nothing) };
             let r = g.r as f32;
-            if r <= 0.0 {
+            let desc = if r <= 0.0 {
                 solid(last)
             } else {
                 let (cx, cy) = (g.cx as f32, g.cy as f32);
-                let (mut fx, mut fy) = (g.fx as f32, g.fy as f32);
-                let (dx, dy) = (fx - cx, fy - cy);
-                let dist = (dx * dx + dy * dy).sqrt();
-                let max = 0.999 * r;
-                if dist > max {
-                    let k = max / dist;
-                    fx = cx + dx * k;
-                    fy = cy + dy * k;
-                }
-                build(KIND_RADIAL, [cx, cy, fx, fy], [r, 0.0, 0.0, 0.0], &norm)
-            }
+                let (fx, fy) = (g.fx as f32, g.fy as f32);
+                let mut d = build(KIND_RADIAL, [cx, cy, fx, fy], [r, 0.0, 0.0, 0.0], &norm);
+                d.spread = spread_code(g.spread);
+                d
+            };
+            (desc, uv)
         }
-        Def::ConicGradient(g) => build(KIND_CONIC, [g.cx as f32, g.cy as f32, g.angle as f32, 0.0], [b.w, b.h, 0.0, 0.0], &norm),
+        Def::ConicGradient(g) => {
+            let Some(b) = b else { return Some(Resolved::Nothing) };
+            (build(KIND_CONIC, [g.cx as f32, g.cy as f32, g.angle as f32, 0.0], [b.w, b.h, 0.0, 0.0], &norm), UvMap::from_bbox(b))
+        }
         Def::Shader(_) | Def::Audio(_) => return None,
     };
-    Some(Resolved::Gradient(Box::new(desc)))
+    desc.pad = 0;
+    Some(Resolved::Gradient(Box::new(desc), uv))
+}
+
+fn spread_code(s: SpreadMethod) -> u32 {
+    match s {
+        SpreadMethod::Pad => 0,
+        SpreadMethod::Reflect => 1,
+        SpreadMethod::Repeat => 2,
+    }
 }
 
 fn solid(color: [f32; 4]) -> GradientDesc {
@@ -245,7 +299,7 @@ mod tests {
     #[test]
     fn linear_record_carries_endpoints_and_stops() {
         let def = Def::LinearGradient(LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.5, red_blue()));
-        let Some(Resolved::Gradient(d)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_LINEAR);
         assert_eq!(d.count, 2);
         assert_eq!(d.a, [0.0, 0.0, 1.0, 0.5]);
@@ -257,24 +311,23 @@ mod tests {
     #[test]
     fn coincident_linear_points_paint_the_last_stop() {
         let def = Def::LinearGradient(LinearGradient::new("g".into(), 0.3, 0.3, 0.3, 0.3, red_blue()));
-        let Some(Resolved::Gradient(d)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_SOLID);
         assert_eq!(d.colors[0], [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
-    fn radial_focal_point_is_clamped_inside_the_circle() {
+    fn radial_focal_point_outside_the_circle_is_kept_for_the_cone() {
         let def = Def::RadialGradient(RadialGradient::new("g".into(), 0.5, 0.5, 0.5, 5.0, 0.5, red_blue()));
-        let Some(Resolved::Gradient(d)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_RADIAL);
-        let (dx, dy) = (d.a[2] - d.a[0], d.a[3] - d.a[1]);
-        assert!((dx * dx + dy * dy).sqrt() <= 0.5 * 0.999 + 1e-6);
+        assert_eq!((d.a[2], d.a[3]), (5.0, 0.5), "the focal point is not moved");
     }
 
     #[test]
     fn radial_with_zero_radius_paints_the_last_stop() {
         let def = Def::RadialGradient(RadialGradient::new("g".into(), 0.5, 0.5, 0.0, 0.5, 0.5, red_blue()));
-        let Some(Resolved::Gradient(d)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_SOLID);
         assert_eq!(d.colors[0], [0.0, 0.0, 1.0, 1.0]);
     }
@@ -283,7 +336,7 @@ mod tests {
     fn conic_record_carries_center_angle_and_box_size() {
         let def = Def::ConicGradient(ConicGradient::new("g".into(), 0.25, 0.75, 30.0, red_blue()));
         let bbox = Some(Bbox { x: 0.0, y: 0.0, w: 40.0, h: 20.0 });
-        let Some(Resolved::Gradient(d)) = resolve(&def, bbox, 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, bbox, 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_CONIC);
         assert_eq!(d.a, [0.25, 0.75, 30.0, 0.0]);
         assert_eq!(&d.b[..2], &[40.0, 20.0]);
@@ -318,7 +371,7 @@ mod tests {
     fn more_than_max_stops_are_resampled() {
         let stops: Vec<Stop> = (0..50).map(|i| Stop::new(i as f64 / 49.0, Color::rgb((i * 5) as u8, 0, 0))).collect();
         let def = Def::LinearGradient(LinearGradient::new("g".into(), 0.0, 0.0, 1.0, 0.0, stops));
-        let Some(Resolved::Gradient(d)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.count as usize, MAX_STOPS);
         assert_eq!(d.offsets[0][0], 0.0);
         assert!((d.offsets[MAX_STOPS / 4 - 1][3] - 1.0).abs() < 1e-6);
@@ -331,6 +384,40 @@ mod tests {
         assert_eq!(color_at(&s, 0.75), [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(color_at(&s, 0.0), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(color_at(&s, 1.0), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn uv_map_from_a_box_matches_the_box_uv() {
+        let b = Bbox { x: 100.0, y: 50.0, w: 200.0, h: 40.0 };
+        let m = UvMap::from_bbox(b);
+        assert_eq!(m.apply(100.0, 50.0), [0.0, 0.0]);
+        assert_eq!(m.apply(300.0, 90.0), [1.0, 1.0]);
+        assert_eq!(m.apply(200.0, 70.0), b.uv(200.0, 70.0));
+    }
+
+    #[test]
+    fn the_uv_map_undoes_the_gradient_matrix() {
+        let m = Matrix2D { a: 2.0, b: 0.5, c: -0.5, d: 3.0, e: 10.0, f: -4.0 };
+        let uv = UvMap::inverse_of(m).unwrap();
+        // A point in gradient space, taken to local space by `m` and back.
+        let (gx, gy) = (0.25f64, 0.75f64);
+        let (lx, ly) = (m.a * gx + m.c * gy + m.e, m.b * gx + m.d * gy + m.f);
+        let back = uv.apply(lx as f32, ly as f32);
+        assert!((f64::from(back[0]) - gx).abs() < 1e-5 && (f64::from(back[1]) - gy).abs() < 1e-5, "{back:?}");
+        assert!(UvMap::inverse_of(Matrix2D { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 }).is_none());
+    }
+
+    #[test]
+    fn spread_and_units_reach_the_record_and_the_map() {
+        use msx_ast::{GradientUnits, LinearGradient};
+        let stops = vec![Stop::new(0.0, msx_ast::Color::rgb(255, 0, 0)), Stop::new(1.0, msx_ast::Color::rgb(0, 0, 255))];
+        let g = LinearGradient::new("g".into(), 10.0, 0.0, 90.0, 0.0, stops).with_units(GradientUnits::UserSpace).with_spread(SpreadMethod::Repeat);
+        // User space needs no box.
+        let Some(Resolved::Gradient(desc, uv)) = resolve(&Def::LinearGradient(g.clone()), None, 1.0) else { panic!("a gradient") };
+        assert_eq!(desc.spread, 2);
+        assert_eq!(uv.apply(40.0, 7.0), [40.0, 7.0], "user space is the local space");
+        let boxed = LinearGradient { units: GradientUnits::ObjectBoundingBox, ..g };
+        assert!(matches!(resolve(&Def::LinearGradient(boxed), None, 1.0), Some(Resolved::Nothing)), "box units need a box");
     }
 
     #[test]

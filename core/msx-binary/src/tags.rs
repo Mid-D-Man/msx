@@ -23,7 +23,15 @@ pub const TAG_LAYER:           u8 = 0x0F; // v0.2
 pub const TAG_SHADER:          u8 = 0x10; // def only — v0.3
 pub const TAG_IMAGE:           u8 = 0x11; // v0.4
 pub const TAG_AUDIO:           u8 = 0x12; // def only — v0.4
+pub const TAG_LINEAR_GRADIENT_V3: u8 = 0x13; // def only — wire version 3: units, spread, transform
+pub const TAG_RADIAL_GRADIENT_V3: u8 = 0x14; // def only — wire version 3: units, spread, transform
 pub const TAG_END:             u8 = 0xFF;
+
+// ── Gradient flags byte (wire version 3), after the stops ────────────────────
+pub const GRAD_FLAG_USER_SPACE:    u8 = 1 << 0;
+pub const GRAD_SPREAD_SHIFT:       u8 = 1;
+pub const GRAD_SPREAD_MASK:        u8 = 0b11 << GRAD_SPREAD_SHIFT;
+pub const GRAD_FLAG_TRANSFORM:     u8 = 1 << 3;
 
 // ── Path command tags ───────────────────────────────────────────────────────
 pub const CMD_MOVE_TO:       u8 = 0x00;

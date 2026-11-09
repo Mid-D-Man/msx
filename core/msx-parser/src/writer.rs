@@ -276,25 +276,43 @@ fn stops_array(stops: &[Stop]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+/// The `units`, `spread` and `transform` keys of a gradient, each only when it
+/// is not the default. Starts with a comma when it is not empty.
+fn gradient_space(units: msx_ast::GradientUnits, spread: msx_ast::SpreadMethod, transform: &Option<Transform>) -> String {
+    let mut s = String::new();
+    if units != msx_ast::GradientUnits::default() {
+        let _ = write!(s, ", units = {}", quote(units.name()));
+    }
+    if spread != msx_ast::SpreadMethod::default() {
+        let _ = write!(s, ", spread = {}", quote(spread.name()));
+    }
+    if let Some(t) = transform.as_ref().and_then(transform_text) {
+        let _ = write!(s, ", transform = {}", quote(&t));
+    }
+    s
+}
+
 fn def_object(def: &Def) -> Result<String, WriteError> {
     Ok(match def {
         Def::LinearGradient(g) => format!(
-            "{{ type = \"linear_gradient\", id = {}, x1 = {}, y1 = {}, x2 = {}, y2 = {}, stops = {} }}",
+            "{{ type = \"linear_gradient\", id = {}, x1 = {}, y1 = {}, x2 = {}, y2 = {}{}, stops = {} }}",
             quote(&g.id),
             num(g.x1),
             num(g.y1),
             num(g.x2),
             num(g.y2),
+            gradient_space(g.units, g.spread, &g.transform),
             stops_array(&g.stops)
         ),
         Def::RadialGradient(g) => format!(
-            "{{ type = \"radial_gradient\", id = {}, cx = {}, cy = {}, r = {}, fx = {}, fy = {}, stops = {} }}",
+            "{{ type = \"radial_gradient\", id = {}, cx = {}, cy = {}, r = {}, fx = {}, fy = {}{}, stops = {} }}",
             quote(&g.id),
             num(g.cx),
             num(g.cy),
             num(g.r),
             num(g.fx),
             num(g.fy),
+            gradient_space(g.units, g.spread, &g.transform),
             stops_array(&g.stops)
         ),
         Def::ConicGradient(g) => format!(
@@ -684,6 +702,25 @@ mod tests {
             Def::ConicGradient(ConicGradient::new("c".into(), 0.5, 0.5, 45.0, stops)),
         ];
         assert_roundtrip(&scene_with(defs, vec![]));
+    }
+
+    #[test]
+    fn gradient_units_spread_and_transform_roundtrip() {
+        let stops = vec![Stop::new(0.0, Color::rgb(255, 0, 0)), Stop::new(1.0, Color::rgb(0, 0, 255))];
+        let m = Transform::Matrix(Matrix2D { a: 0.001, b: 0.25, c: -0.25, d: 1.5, e: 12.5, f: -3.0 });
+        let defs = vec![
+            Def::LinearGradient(LinearGradient::new("l".into(), 10.0, 0.0, 90.0, 0.0, stops.clone()).with_units(msx_ast::GradientUnits::UserSpace).with_spread(msx_ast::SpreadMethod::Reflect).with_transform(m.clone())),
+            Def::RadialGradient(RadialGradient::new("r".into(), 0.5, 0.5, 0.4, 0.3, 0.35, stops.clone()).with_spread(msx_ast::SpreadMethod::Repeat)),
+            Def::RadialGradient(RadialGradient::new("t".into(), 0.5, 0.5, 0.5, 0.5, 0.5, stops).with_transform(Transform::Rotate { angle: 30.0, cx: None, cy: None })),
+        ];
+        assert_roundtrip(&scene_with(defs, vec![]));
+    }
+
+    #[test]
+    fn a_default_gradient_is_written_without_the_new_keys() {
+        let stops = vec![Stop::new(0.0, Color::rgb(255, 0, 0)), Stop::new(1.0, Color::rgb(0, 0, 255))];
+        let text = scene_to_msx(&scene_with(vec![Def::LinearGradient(LinearGradient::new("l".into(), 0.0, 0.0, 1.0, 0.0, stops))], vec![])).unwrap();
+        assert!(!text.contains("units") && !text.contains("spread") && !text.contains("transform"), "{text}");
     }
 
     #[test]

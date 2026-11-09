@@ -449,26 +449,30 @@ fn bounding_box_gradient_is_kept_as_is() {
 }
 
 #[test]
-fn user_space_gradient_is_converted_to_the_shapes_unit_square() {
-    // t = x / 100 in user space. The rect spans x = 50..150, so across the
-    // rect t runs 0.5 to 1.5, which in unit coordinates is u + 0.5.
+fn user_space_gradient_keeps_its_units_and_coordinates() {
+    // The rect spans x = 50..150 and the gradient t = x / 100 in user space, with no conversion.
     let i = imp(&doc(
         r##"<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="100" y2="0"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
             <rect x="50" y="0" width="100" height="50" fill="url(#g)"/>"##,
     ));
     let g = linear(&i, 0);
-    assert!(close(g.x1, -0.5) && close(g.y1, 0.0) && close(g.x2, 0.5) && close(g.y2, 0.0), "got {g:?}");
+    assert_eq!(g.units, msx_ast::GradientUnits::UserSpace);
+    assert!(close(g.x1, 0.0) && close(g.y1, 0.0) && close(g.x2, 100.0) && close(g.y2, 0.0), "got {g:?}");
+    assert!(g.transform.is_none() && g.spread == msx_ast::SpreadMethod::Pad);
 }
 
 #[test]
-fn gradient_transform_is_applied() {
-    // rotate(90) turns an x-direction gradient into a y-direction one.
+fn gradient_transform_is_carried_as_a_transform() {
+    // rotate(90) stays a transform on the gradient, applied inside the box.
     let i = imp(&doc(
         r##"<defs><linearGradient id="g" gradientTransform="rotate(90)" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
             <rect width="10" height="10" fill="url(#g)"/>"##,
     ));
     let g = linear(&i, 0);
-    assert!(close(g.x1, 0.0) && close(g.y1, 0.0) && close(g.x2, 0.0) && close(g.y2, 1.0), "got {g:?}");
+    assert!(close(g.x1, 0.0) && close(g.y1, 0.0) && close(g.x2, 1.0) && close(g.y2, 0.0), "the end points are as written: {g:?}");
+    assert_eq!(g.units, msx_ast::GradientUnits::ObjectBoundingBox);
+    let m = g.transform.as_ref().expect("a transform").to_matrix();
+    assert!(close(m.a, 0.0) && close(m.b, 1.0) && close(m.c, -1.0) && close(m.d, 0.0), "{m:?}");
 }
 
 #[test]
@@ -500,17 +504,17 @@ fn fill_opacity_is_folded_into_gradient_stops_and_variants_get_their_own_def() {
 }
 
 #[test]
-fn shapes_that_share_a_gradient_and_box_share_one_def() {
+fn shapes_that_share_a_gradient_share_one_def_whatever_their_box() {
     let i = imp(&doc(
         r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
-            <rect width="10" height="10" fill="url(#g)"/><rect x="50" width="10" height="10" fill="url(#g)"/>"##,
+            <rect width="10" height="10" fill="url(#g)"/><rect x="50" width="30" height="10" fill="url(#g)"/>"##,
     ));
-    assert_eq!(i.scene.defs.len(), 2, "different boxes need different user-space conversions");
+    assert_eq!(i.scene.defs.len(), 1, "the gradient does not depend on the box any more");
     let i = imp(&doc(
         r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
-            <rect width="10" height="10" fill="url(#g)"/><rect width="10" height="10" fill="url(#g)" stroke="url(#g)"/>"##,
+            <rect width="10" height="10" fill="url(#g)" fill-opacity="0.5"/><rect width="10" height="10" fill="url(#g)"/>"##,
     ));
-    assert_eq!(i.scene.defs.len(), 1, "same gradient, same opacity, same box: one def");
+    assert_eq!(i.scene.defs.len(), 2, "the opacity is folded into the stops, so each opacity is its own def");
 }
 
 #[test]
@@ -539,46 +543,76 @@ fn a_current_color_fallback_uses_the_color_property() {
 }
 
 #[test]
-fn radial_gradient_and_spread_method_warning() {
+fn radial_gradient_and_spread_method_are_carried() {
     let i = imp(&doc(
         r##"<defs><radialGradient id="r" cx="0.5" cy="0.5" r="0.5" fx="0.3" fy="0.3" spreadMethod="reflect"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
             <circle cx="10" cy="10" r="5" fill="url(#r)"/>"##,
     ));
     let Def::RadialGradient(g) = &i.scene.defs[0] else { panic!("radial") };
     assert_eq!((g.cx, g.cy, g.r, g.fx, g.fy), (0.5, 0.5, 0.5, 0.3, 0.3));
-    assert!(has_warning(&i, "spreadMethod"));
+    assert_eq!(g.spread, msx_ast::SpreadMethod::Reflect);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let repeat = imp(&doc(
+        r##"<defs><linearGradient id="g" spreadMethod="repeat"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
+            <rect width="10" height="10" fill="url(#g)"/>"##,
+    ));
+    assert_eq!(linear(&repeat, 0).spread, msx_ast::SpreadMethod::Repeat);
+    let bad = imp(&doc(
+        r##"<defs><linearGradient id="g" spreadMethod="mirror"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
+            <rect width="10" height="10" fill="url(#g)"/>"##,
+    ));
+    assert!(has_warning(&bad, "spreadMethod"), "{:?}", bad.warnings);
+    assert_eq!(linear(&bad, 0).spread, msx_ast::SpreadMethod::Pad);
 }
 
 #[test]
-fn user_space_radial_under_uniform_scale_is_exact_and_stretched_is_flagged() {
-    // A circle of radius 25 around (50, 50) on a 100x100 box is the unit
-    // circle of radius 0.25 around (0.5, 0.5).
-    let exact = imp(&doc(
-        r##"<defs><radialGradient id="r" gradientUnits="userSpaceOnUse" cx="50" cy="50" r="25"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
-            <rect width="100" height="100" fill="url(#r)"/>"##,
-    ));
-    let Def::RadialGradient(g) = &exact.scene.defs[0] else { panic!("radial") };
-    assert!(close(g.cx, 0.5) && close(g.cy, 0.5) && close(g.r, 0.25), "got {g:?}");
-    assert!(exact.warnings.is_empty());
-
-    // The same gradient on a 100x50 box is an ellipse in unit space.
+fn user_space_radial_keeps_its_circle_under_any_box_and_any_transform() {
+    for (cy, h) in [("50", "100"), ("25", "50")] {
+        let i = imp(&doc(&format!(
+            r##"<defs><radialGradient id="r" gradientUnits="userSpaceOnUse" cx="50" cy="{cy}" r="25"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
+                <rect width="100" height="{h}" fill="url(#r)"/>"##,
+        )));
+        let Def::RadialGradient(g) = &i.scene.defs[0] else { panic!("radial") };
+        assert!(close(g.cx, 50.0) && close(g.r, 25.0) && g.units == msx_ast::GradientUnits::UserSpace, "got {g:?}");
+        assert!(i.warnings.is_empty(), "no approximation to report: {:?}", i.warnings);
+    }
+    // A stretch stays a transform, so the circle really is an ellipse and nothing is approximated.
     let stretched = imp(&doc(
-        r##"<defs><radialGradient id="r" gradientUnits="userSpaceOnUse" cx="50" cy="25" r="25"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
+        r##"<defs><radialGradient id="r" gradientTransform="scale(2 0.5)" cx="0.25" cy="1" r="0.25"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
             <rect width="100" height="50" fill="url(#r)"/>"##,
     ));
-    assert!(has_warning(&stretched, "approximated"));
+    let Def::RadialGradient(g) = &stretched.scene.defs[0] else { panic!("radial") };
+    let m = g.transform.as_ref().expect("a transform").to_matrix();
+    assert!(close(m.a, 2.0) && close(m.d, 0.5), "{m:?}");
+    assert!(stretched.warnings.is_empty(), "{:?}", stretched.warnings);
 }
 
 #[test]
-fn user_space_gradient_on_a_straight_line_becomes_its_average_color() {
+fn user_space_gradient_on_a_straight_line_is_a_gradient() {
+    // A horizontal line has no box area, but a user-space gradient does not need one.
     let i = imp(&doc(
         r##"<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="100"><stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></linearGradient></defs>
             <line x1="0" y1="10" x2="100" y2="10" stroke="url(#g)" stroke-width="4"/>"##,
     ));
-    assert!(i.scene.defs.is_empty());
-    assert!(has_warning(&i, "empty bounding box"));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(i.scene.defs.len(), 1);
+    assert_eq!(linear(&i, 0).units, msx_ast::GradientUnits::UserSpace);
     let Element::Line(l) = &i.scene.elements[0] else { panic!("line") };
-    assert_eq!(stroke(&l.style), Color::rgb(128, 128, 128));
+    assert_eq!(l.style.stroke, Some(Paint::Ref("url(#g)".into())));
+}
+
+#[test]
+fn a_fallback_color_is_not_shared_with_a_shape_that_has_none() {
+    // The same gradient and the same box shape, once with a fallback and once without.
+    let i = imp(&doc(
+        r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
+            <line x1="0" y1="5" x2="10" y2="5" stroke="url(#g) #00ff00" stroke-width="2"/>
+            <line x1="0" y1="9" x2="10" y2="9" stroke="url(#g)" stroke-width="2"/>"##,
+    ));
+    let Element::Line(a) = &i.scene.elements[0] else { panic!("line") };
+    let Element::Line(b) = &i.scene.elements[1] else { panic!("line") };
+    assert_eq!(stroke(&a.style), Color::rgb(0, 255, 0));
+    assert_eq!(b.style.stroke, Some(Paint::None));
 }
 
 // ── Text ─────────────────────────────────────────────────────────────────────
@@ -623,15 +657,25 @@ fn text_dx_dy_and_empty_text() {
 }
 
 #[test]
-fn text_with_a_gradient_gets_the_text_box_as_its_bounding_box() {
+fn text_with_a_user_space_gradient_keeps_its_own_coordinates() {
     let i = imp(&doc(
         r##"<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="10" y1="0" x2="110" y2="0"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
             <text x="10" y="50" font-size="20" fill="url(#g)">Gradient</text>"##,
     ));
     let g = linear(&i, 0);
-    // The text starts at x = 10, so its box starts at the gradient start: t = 0 at u = 0.
-    assert!(close(g.x1, 0.0), "gradient start should sit at the left edge of the text box, got {}", g.x1);
-    assert!(g.x2 > 0.0 && g.y1 == g.y2);
+    assert_eq!(g.units, msx_ast::GradientUnits::UserSpace);
+    assert!(close(g.x1, 10.0) && close(g.x2, 110.0) && g.y1 == g.y2, "{g:?}");
+}
+
+#[test]
+fn text_with_a_box_gradient_is_painted_against_the_text_box() {
+    let i = imp(&doc(
+        r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
+            <text x="10" y="50" font-size="20" fill="url(#g)">Gradient</text>"##,
+    ));
+    let g = linear(&i, 0);
+    assert_eq!(g.units, msx_ast::GradientUnits::ObjectBoundingBox);
+    assert!(close(g.x1, 0.0) && close(g.x2, 1.0), "{g:?}");
 }
 
 #[test]
@@ -861,13 +905,15 @@ fn ignored_text_and_stroke_properties_are_reported() {
 }
 
 #[test]
-fn radial_gradient_features_msx_lacks_are_reported() {
+fn radial_gradient_fr_is_reported() {
     let i = imp(&doc(
         r##"<defs><radialGradient id="r" cx="0.2" cy="0.2" r="0.2" fx="0.9" fy="0.9" fr="0.1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
             <rect width="10" height="10" fill="url(#r)"/>"##,
     ));
     assert!(has_warning(&i, "fr"));
-    assert!(has_warning(&i, "focal point outside"));
+    assert!(!has_warning(&i, "focal point"), "a focal point outside the circle is a cone now, not an error: {:?}", i.warnings);
+    let Def::RadialGradient(g) = &i.scene.defs[0] else { panic!("radial") };
+    assert_eq!((g.fx, g.fy), (0.9, 0.9), "the focal point is carried as written");
 }
 
 #[test]
@@ -3221,3 +3267,21 @@ fn steps_on_a_transform_survive_write_and_parse() {
     let back = msx_parser::parse_scene(&text).expect("parsed");
     assert_eq!(format!("{:?}", back.animations), format!("{:?}", i.scene.animations));
 }
+
+#[test]
+fn imported_gradients_survive_write_and_parse() {
+    let i = imp(&doc(
+        r##"<defs>
+          <linearGradient id="l" gradientUnits="userSpaceOnUse" x1="10" x2="40" spreadMethod="reflect" gradientTransform="skewX(15)">
+            <stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient>
+          <radialGradient id="r" cx="0.3" cy="0.5" r="0.3" fx="0.9" spreadMethod="repeat" gradientTransform="scale(1.5 1)">
+            <stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
+        </defs>
+        <rect width="50" height="60" fill="url(#l)"/><rect x="50" width="50" height="60" fill="url(#r)"/>"##,
+    ));
+    let text = msx_parser::scene_to_msx(&i.scene).expect("written");
+    assert!(text.contains("units = \"user_space\"") && text.contains("spread = \"reflect\"") && text.contains("spread = \"repeat\""), "{text}");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    assert_eq!(format!("{:?}", back.defs), format!("{:?}", i.scene.defs));
+}
+

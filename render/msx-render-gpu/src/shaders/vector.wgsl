@@ -11,7 +11,7 @@
 struct GradientDesc {
     kind: u32,
     count: u32,
-    pad0: u32,
+    spread: u32,
     pad1: u32,
     a: vec4<f32>,
     b: vec4<f32>,
@@ -76,38 +76,77 @@ fn ramp(i: u32, t: f32) -> vec4<f32> {
     return gradients[i].colors[n - 1u];
 }
 
-fn gradient_t(i: u32, uv: vec2<f32>) -> f32 {
+// The parameter of gradient `i` at `uv` in `x`, and in `y` 1.0 when the
+// gradient paints there or 0.0 when it does not (outside a cone).
+fn gradient_t(i: u32, uv: vec2<f32>) -> vec2<f32> {
     let kind = gradients[i].kind;
     let a = gradients[i].a;
     let b = gradients[i].b;
     if (kind == KIND_LINEAR) {
         let d = a.zw - a.xy;
-        return dot(uv - a.xy, d) / dot(d, d);
+        return vec2<f32>(dot(uv - a.xy, d) / dot(d, d), 1.0);
     }
     if (kind == KIND_RADIAL) {
-        // Two-point conical gradient: focal point (radius 0) to the center
-        // circle (radius r). Pick the non-negative root of
-        // |p - f - t (c - f)| = t r.
+        // Two-point conical gradient between the focal circle (center f,
+        // radius r0 = b.y) at t = 0 and the circle (center c, radius r) at
+        // t = 1. Take the largest t whose circle has a positive radius and
+        // passes through the point, the rule the canvas and SVG 2 define.
+        let r1 = b.x;
+        let r0 = b.y;
         let cd = a.xy - a.zw;
         let pd = uv - a.zw;
-        let r = b.x;
-        let aa = dot(cd, cd) - r * r;
-        let bb = dot(pd, cd);
-        let cc = dot(pd, pd);
-        let disc = max(bb * bb - aa * cc, 0.0);
-        return (bb - sqrt(disc)) / aa;
+        let dr = r1 - r0;
+        let aa = dot(cd, cd) - dr * dr;
+        let bb = dot(pd, cd) + r0 * dr;
+        let cc = dot(pd, pd) - r0 * r0;
+        if (abs(aa) < 1e-9) {
+            // The circles touch: one root, if the point is on the right side.
+            if (abs(bb) < 1e-12) {
+                return vec2<f32>(0.0, 0.0);
+            }
+            let t = cc / (2.0 * bb);
+            return vec2<f32>(t, select(0.0, 1.0, r0 + t * dr >= 0.0));
+        }
+        let disc = bb * bb - aa * cc;
+        if (disc < 0.0) {
+            return vec2<f32>(0.0, 0.0);
+        }
+        let root = sqrt(disc);
+        let t1 = (bb + root) / aa;
+        let t2 = (bb - root) / aa;
+        let hi = max(t1, t2);
+        let lo = min(t1, t2);
+        if (r0 + hi * dr >= 0.0) {
+            return vec2<f32>(hi, 1.0);
+        }
+        if (r0 + lo * dr >= 0.0) {
+            return vec2<f32>(lo, 1.0);
+        }
+        return vec2<f32>(0.0, 0.0);
     }
     if (kind == KIND_CONIC) {
         // Angle is measured in local space, so scale the bounding-box
         // offset back by the box size. 0 degrees is the top, clockwise.
         let delta = (uv - a.xy) * b.xy;
         if (dot(delta, delta) < 1e-12) {
-            return 0.0;
+            return vec2<f32>(0.0, 1.0);
         }
         let deg = degrees(atan2(delta.y, delta.x)) + 90.0 - a.z;
-        return fract(deg / 360.0);
+        return vec2<f32>(fract(deg / 360.0), 1.0);
     }
-    return 0.0;
+    return vec2<f32>(0.0, 1.0);
+}
+
+// What lies beyond the first and last stop: 0 pad, 1 reflect, 2 repeat.
+fn spread_t(mode: u32, t: f32) -> f32 {
+    if (mode == 1u) {
+        let m = t - 2.0 * floor(t * 0.5);
+        return select(m, 2.0 - m, m > 1.0);
+    }
+    if (mode == 2u) {
+        return t - floor(t);
+    }
+    return clamp(t, 0.0, 1.0);
 }
 
 @fragment
@@ -117,6 +156,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // standard ALPHA_BLENDING to match.
         return input.color;
     }
-    let t = clamp(gradient_t(input.grad, input.uv), 0.0, 1.0);
+    let g = gradient_t(input.grad, input.uv);
+    if (g.y < 0.5) {
+        discard;
+    }
+    let t = spread_t(gradients[input.grad].spread, g.x);
     return ramp(input.grad, t);
 }

@@ -1,8 +1,9 @@
 // render/msx-render-cpu/src/gradient.rs
 //! Gradient paint for the CPU renderer.
 //!
-//! Linear and radial gradients become real `tiny-skia` shaders mapped
-//! through `objectBoundingBox` units, like the SVG output. `tiny-skia` 0.11
+//! Linear and radial gradients become real `tiny-skia` shaders. Their units
+//! (bounding box or user space), `spread` and `transform` follow the SVG
+//! output, and a gradient in bounding-box units needs a box with area. `tiny-skia` 0.11
 //! has no conic shader, so conic gradients are drawn by rasterizing the
 //! shape coverage into a scratch pixmap and recoloring each covered pixel.
 //!
@@ -10,7 +11,7 @@
 //! `conic-gradient`, measured in local space so the sweep is not distorted
 //! by the bounding box aspect ratio.
 
-use msx_ast::{Color, Def, Matrix2D, Stop};
+use msx_ast::{gradient_matrix, Color, Def, Matrix2D, SpreadMethod, Stop};
 use tiny_skia::{
     Color as SkColor, FillRule as SkFillRule, GradientStop, LinearGradient, Paint as SkPaint, Path as SkPath,
     PixmapPaint, Point, RadialGradient, SpreadMode, Stroke, Transform,
@@ -110,49 +111,66 @@ pub(crate) fn resolve(def: &Def, bbox: Option<Bbox>, opacity: f32) -> Option<Res
     if norm.is_empty() {
         return Some(ResolvedPaint::Nothing);
     }
-    let Some(b) = bbox.filter(Bbox::usable) else {
-        return Some(ResolvedPaint::Nothing);
-    };
-    let to_bbox = Transform::from_row(b.w, 0.0, 0.0, b.h, b.x, b.y);
+    let b = bbox.filter(Bbox::usable);
+    let bbox_f64 = b.map(|b| (f64::from(b.x), f64::from(b.y), f64::from(b.w), f64::from(b.h)));
+    // A gradient in bounding-box units has nothing to paint with a box that has no area;
+    // one in user-space units does not need the box at all.
+    let space = |units, transform: &Option<msx_ast::Transform>| gradient_matrix(units, transform, bbox_f64).map(sk_transform);
 
     match def {
         Def::LinearGradient(g) => {
+            let Some(to_local) = space(g.units, &g.transform) else {
+                return Some(ResolvedPaint::Nothing);
+            };
             let start = Point::from_xy(g.x1 as f32, g.y1 as f32);
             let end = Point::from_xy(g.x2 as f32, g.y2 as f32);
-            Some(shader_paint(LinearGradient::new(start, end, sk_stops(&norm), SpreadMode::Pad, to_bbox)))
+            Some(shader_paint(LinearGradient::new(start, end, sk_stops(&norm), spread_mode(g.spread), to_local)))
         }
         Def::RadialGradient(g) => {
+            let Some(to_local) = space(g.units, &g.transform) else {
+                return Some(ResolvedPaint::Nothing);
+            };
             let r = g.r as f32;
             if r <= 0.0 {
                 // SVG paints the last stop color when the radius is zero.
                 return Some(ResolvedPaint::Shader(solid(norm[norm.len() - 1].1)));
             }
+            // A focal point outside the circle makes a cone, with nothing painted outside it,
+            // as SVG 2 and the two-point conical gradient of the shader library define it.
             let (cx, cy) = (g.cx as f32, g.cy as f32);
-            let (mut fx, mut fy) = (g.fx as f32, g.fy as f32);
-            let (dx, dy) = (fx - cx, fy - cy);
-            let dist = (dx * dx + dy * dy).sqrt();
-            let max = 0.999 * r;
-            if dist > max {
-                let k = max / dist;
-                fx = cx + dx * k;
-                fy = cy + dy * k;
-            }
+            let (fx, fy) = (g.fx as f32, g.fy as f32);
             Some(shader_paint(RadialGradient::new(
                 Point::from_xy(fx, fy),
                 Point::from_xy(cx, cy),
                 r,
                 sk_stops(&norm),
-                SpreadMode::Pad,
-                to_bbox,
+                spread_mode(g.spread),
+                to_local,
             )))
         }
-        Def::ConicGradient(g) => Some(ResolvedPaint::Conic(ConicPaint {
-            cx: b.x + g.cx as f32 * b.w,
-            cy: b.y + g.cy as f32 * b.h,
-            angle_deg: g.angle as f32,
-            stops: norm,
-        })),
+        Def::ConicGradient(g) => {
+            let b = b?;
+            Some(ResolvedPaint::Conic(ConicPaint {
+                cx: b.x + g.cx as f32 * b.w,
+                cy: b.y + g.cy as f32 * b.h,
+                angle_deg: g.angle as f32,
+                stops: norm,
+            }))
+        }
         Def::Shader(_) | Def::Audio(_) => None,
+    }
+}
+
+/// A gradient-space matrix as a `tiny-skia` transform.
+fn sk_transform(m: Matrix2D) -> Transform {
+    Transform::from_row(m.a as f32, m.b as f32, m.c as f32, m.d as f32, m.e as f32, m.f as f32)
+}
+
+fn spread_mode(s: SpreadMethod) -> SpreadMode {
+    match s {
+        SpreadMethod::Pad => SpreadMode::Pad,
+        SpreadMethod::Reflect => SpreadMode::Reflect,
+        SpreadMethod::Repeat => SpreadMode::Repeat,
     }
 }
 

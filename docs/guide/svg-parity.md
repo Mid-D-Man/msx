@@ -27,9 +27,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | SVG feature | State | Notes |
 |---|---|---|
 | `linearGradient` | Expanded | Exact under any transform |
-| `radialGradient` | Expanded, partly | Exact under uniform scale, rotation and translation. A stretch or skew is approximated by a circle of equal area |
-| `gradientUnits`, `gradientTransform` | Expanded | Converted into the bounding box of each shape, because the format has neither |
-| `spreadMethod` `reflect` and `repeat` | Gap | Imported as `pad` |
+| `radialGradient` | Native | Circle, focal point and cone as written, under any units and transform. `fr` is a gap |
+| `gradientUnits`, `gradientTransform`, `spreadMethod` | Native | Carried as they are from binary version 3 |
 | Focal point outside the circle, `fr` | Gap | Clamped onto the circle, `fr` ignored |
 | Conic gradient | Native, MSX only | CPU and GPU draw it, the SVG output cannot |
 | `pattern` on a fill | Expanded | Tiles clipped to the shape, with units, `viewBox`, `patternTransform`, `href` inheritance and nesting. See [Importing SVG](svg-import.md) |
@@ -100,7 +99,7 @@ Imported files do not depend on the rows marked No, because the importer writes 
 The remaining gaps share a few causes, so they are closed in this order.
 
 1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks followed on the same layer machinery and are done too.
-2. Gradient units, a gradient matrix, spread modes and focal points in the format. This makes every gradient exact.
+2. Done: gradient units, a gradient matrix, spread modes and focal points in the format (binary version 3). What is left of it is `fr`.
 3. Patterns. Done for fills by tile expansion in the importer. What is left is a real pattern def in the format, which would also give strokes and avoid one group per tile.
 4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.

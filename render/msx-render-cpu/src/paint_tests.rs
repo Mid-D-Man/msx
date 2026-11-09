@@ -343,3 +343,107 @@ fn fill_opacity_multiplies_with_opacity_and_applies_to_gradients_and_is_held_to_
     let p = render_to_pixmap(&scene(40.0, 40.0, vec![], vec![rect(0.0, 0.0, 40.0, 40.0, over)]));
     assert_eq!(px(&p, 20, 20), [255, 0, 0, 255], "a value above 1 counts as 1");
 }
+
+// ── gradient units, spread and transform ─────────────────────────────────────
+
+use msx_ast::{GradientUnits, SpreadMethod, Transform};
+
+fn lin(units: GradientUnits, spread: SpreadMethod, x1: f64, x2: f64) -> LinearGradient {
+    LinearGradient::new("g".into(), x1, 0.0, x2, 0.0, red_blue()).with_units(units).with_spread(spread)
+}
+
+fn paint_rect(def: Def, x: f64, y: f64, w: f64, h: f64, canvas: (f64, f64)) -> Pixmap {
+    render_to_pixmap(&scene(canvas.0, canvas.1, vec![def], vec![rect(x, y, w, h, fill_style(url("g")))]))
+}
+
+#[test]
+fn reflect_runs_the_gradient_back_and_forth() {
+    // The gradient covers the middle half of the box, so each end of the box is spread.
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Reflect, 0.25, 0.75));
+    let p = paint_rect(def, 0.0, 0.0, 100.0, 20.0, (100.0, 20.0));
+    let (a, b) = (px(&p, 12, 10), px(&p, 37, 10));
+    assert!(a[0].abs_diff(b[0]) <= 6 && a[2].abs_diff(b[2]) <= 6, "mirrored about the start: {a:?} {b:?}");
+    let pad = paint_rect(Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Pad, 0.25, 0.75)), 0.0, 0.0, 100.0, 20.0, (100.0, 20.0));
+    assert!(px(&pad, 5, 10)[0] > 250, "pad holds the first color");
+    assert!(px(&p, 5, 10)[2] > 80, "reflect has already turned toward blue at x=5: {:?}", px(&p, 5, 10));
+}
+
+#[test]
+fn repeat_starts_the_gradient_again() {
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Repeat, 0.25, 0.75));
+    let p = paint_rect(def, 0.0, 0.0, 100.0, 20.0, (100.0, 20.0));
+    // 62 is 0.37 of the way through the second period, so is 12 (0.37 - 0.5 before the start).
+    let (a, b) = (px(&p, 12, 10), px(&p, 62, 10));
+    assert!(a[0].abs_diff(b[0]) <= 6 && a[2].abs_diff(b[2]) <= 6, "one period apart: {a:?} {b:?}");
+    assert!(px(&p, 2, 10)[2] > px(&p, 48, 10)[2] - 10, "the sweep from blue back to red starts at the edge of each period");
+}
+
+#[test]
+fn user_space_units_ignore_the_shape() {
+    // A gradient over the whole 300 wide canvas, on a rect that sits in its middle third.
+    let def = Def::LinearGradient(lin(GradientUnits::UserSpace, SpreadMethod::Pad, 0.0, 300.0));
+    let p = paint_rect(def, 100.0, 0.0, 100.0, 20.0, (300.0, 20.0));
+    let left = px(&p, 102, 10);
+    let right = px(&p, 197, 10);
+    assert!(left[0] > 150 && left[2] > 60 && left[2] < 140, "a third of the way: {left:?}");
+    assert!(right[2] > 150 && right[0] > 60 && right[0] < 140, "two thirds of the way: {right:?}");
+    // In bounding-box units the same numbers would put pure red far to the left of the rect.
+    let boxed = paint_rect(Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Pad, 0.0, 1.0)), 100.0, 0.0, 100.0, 20.0, (300.0, 20.0));
+    assert!(px(&boxed, 102, 10)[2] < 20 && px(&boxed, 197, 10)[2] > 235);
+}
+
+#[test]
+fn a_user_space_gradient_paints_a_line_that_has_no_box_area() {
+    let line = |units| {
+        let def = Def::LinearGradient(lin(units, SpreadMethod::Pad, 10.0, 90.0));
+        let el = Element::Line(Line { x1: 10.0, y1: 50.0, x2: 90.0, y2: 50.0, id: None, transform: None, style: stroke_style(url("g"), 10.0) });
+        render_to_pixmap(&scene(100.0, 100.0, vec![def], vec![el]))
+    };
+    let user = line(GradientUnits::UserSpace);
+    assert!(px(&user, 14, 50)[0] > 200 && px(&user, 86, 50)[2] > 200, "red at the left end, blue at the right: {:?} {:?}", px(&user, 14, 50), px(&user, 86, 50));
+    let boxed = line(GradientUnits::ObjectBoundingBox);
+    assert_eq!(px(&boxed, 50, 50), [0, 0, 0, 0], "a box without area paints nothing in box units");
+}
+
+#[test]
+fn a_gradient_transform_turns_the_gradient_inside_the_box() {
+    // Rotated a quarter turn about the middle of the box, a left to right gradient runs top to bottom.
+    let def = Def::LinearGradient(lin(GradientUnits::ObjectBoundingBox, SpreadMethod::Pad, 0.0, 1.0).with_transform(Transform::Rotate { angle: 90.0, cx: Some(0.5), cy: Some(0.5) }));
+    let p = paint_rect(def, 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let (top, bottom, left, right) = (px(&p, 50, 5), px(&p, 50, 94), px(&p, 5, 50), px(&p, 94, 50));
+    assert!(top[0] > 200 && bottom[2] > 200, "red at the top, blue at the bottom: {top:?} {bottom:?}");
+    assert!(left[0].abs_diff(right[0]) <= 6 && left[2].abs_diff(right[2]) <= 6, "even across: {left:?} {right:?}");
+}
+
+#[test]
+fn a_radial_gradient_under_a_stretch_is_an_ellipse() {
+    // A circle of radius 25 about (25, 50), stretched twice as wide: an ellipse about (50, 50), 50 by 25.
+    let stops = vec![Stop::new(0.0, Color::rgb(255, 255, 255)), Stop::new(1.0, Color::rgb(0, 0, 0))];
+    let g = RadialGradient::new("g".into(), 25.0, 50.0, 25.0, 25.0, 50.0, stops)
+        .with_units(GradientUnits::UserSpace)
+        .with_transform(Transform::Scale { x: 2.0, y: 1.0 });
+    let p = paint_rect(Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let (wide, tall) = (px(&p, 90, 50), px(&p, 50, 70));
+    assert!(wide[0].abs_diff(tall[0]) <= 8, "0.8 of the way out along either axis: {wide:?} {tall:?}");
+    assert!(px(&p, 50, 50)[0] > 245, "white in the middle");
+    assert!(px(&p, 50, 90)[0] < 5, "past the short radius it is the last color");
+}
+
+#[test]
+fn a_gradient_transform_that_cannot_be_undone_is_ignored() {
+    // resvg draws the plain gradient for matrix(0 0 0 0 0 0), and so do we.
+    let def = Def::LinearGradient(lin(GradientUnits::UserSpace, SpreadMethod::Pad, 0.0, 40.0).with_transform(Transform::Scale { x: 0.0, y: 1.0 }));
+    let p = paint_rect(def, 0.0, 0.0, 40.0, 40.0, (40.0, 40.0));
+    assert!(px(&p, 3, 20)[0] > 200 && px(&p, 37, 20)[2] > 200, "red to blue as if there were no transform: {:?} {:?}", px(&p, 3, 20), px(&p, 37, 20));
+}
+
+#[test]
+fn a_focal_point_outside_the_circle_makes_a_cone() {
+    // Circle of radius 20 about (50, 50), focal point at (95, 50) well outside it.
+    let g = RadialGradient::new("g".into(), 50.0, 50.0, 20.0, 95.0, 50.0, red_blue()).with_units(GradientUnits::UserSpace);
+    let p = paint_rect(Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    assert!(px(&p, 70, 50)[3] == 255, "between the focal point and the circle is inside the cone");
+    assert!(px(&p, 10, 50)[3] == 255 && px(&p, 10, 50)[2] > 200, "past the circle on the axis the last color continues: {:?}", px(&p, 10, 50));
+    assert_eq!(px(&p, 95, 10), [0, 0, 0, 0], "to the side of the focal point is outside the cone");
+    assert_eq!(px(&p, 50, 95), [0, 0, 0, 0], "and so is below the circle");
+}
