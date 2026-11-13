@@ -195,7 +195,8 @@ fn fill_and_stroke(pixmap: &mut Pixmap, path: Option<SkPath>, style: &Style, loc
     if let Some(fill) = style.fill.as_ref().filter(|p| !p.is_none()) {
         match resolve_paint(fill, geo.opacity * unit(style.fill_opacity), defs, geo.bbox) {
             Some(ResolvedPaint::Shader(paint)) => pixmap.fill_path(&path, &paint, sk_fill_rule(style), geo.transform, None),
-            Some(ResolvedPaint::Conic(conic)) => gradient::conic_fill(pixmap, &path, &conic, sk_fill_rule(style), geo.transform, geo.matrix),
+            Some(ResolvedPaint::Conic(conic)) => gradient::pixel_fill(pixmap, &path, &conic, sk_fill_rule(style), geo.transform, geo.matrix),
+            Some(ResolvedPaint::TwoPoint(paint)) => gradient::pixel_fill(pixmap, &path, &paint, sk_fill_rule(style), geo.transform, geo.matrix),
             Some(ResolvedPaint::Nothing) | None => {}
         }
     }
@@ -224,7 +225,8 @@ fn stroke_with_paint(pixmap: &mut Pixmap, path: &SkPath, style: &Style, geo: &Dr
     let stroke = build_stroke(style, width);
     match resolve_paint(stroke_paint, geo.opacity * unit(style.stroke_opacity), defs, geo.bbox) {
         Some(ResolvedPaint::Shader(paint)) => pixmap.stroke_path(path, &paint, &stroke, geo.transform, None),
-        Some(ResolvedPaint::Conic(conic)) => gradient::conic_stroke(pixmap, path, &conic, &stroke, geo.transform, geo.matrix),
+        Some(ResolvedPaint::Conic(conic)) => gradient::pixel_stroke(pixmap, path, &conic, &stroke, geo.transform, geo.matrix),
+        Some(ResolvedPaint::TwoPoint(paint)) => gradient::pixel_stroke(pixmap, path, &paint, &stroke, geo.transform, geo.matrix),
         Some(ResolvedPaint::Nothing) | None => {}
     }
 }

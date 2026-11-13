@@ -26,8 +26,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 
 | SVG feature | State | Notes |
 |---|---|---|
-| `linearGradient` | Expanded | Exact under any transform |
-| `radialGradient` | Native | Circle, focal point and cone as written, under any units and transform. `fr` is a gap |
+| `linearGradient` | Native | Units, spread and transform as written, from binary version 3 |
+| `radialGradient` | Native | Circle, focal point, focal radius `fr` and cone as written, under any units and transform |
 | `gradientUnits`, `gradientTransform`, `spreadMethod` | Native | Carried as they are from binary version 3 |
 | Focal point outside the circle, `fr` | Gap | Clamped onto the circle, `fr` ignored |
 | Conic gradient | Native, MSX only | CPU and GPU draw it, the SVG output cannot |
@@ -99,7 +99,7 @@ Imported files do not depend on the rows marked No, because the importer writes 
 The remaining gaps share a few causes, so they are closed in this order.
 
 1. Done: a clip path on layers. It closes `clip-path` and the `symbol` and nested `svg` viewport clipping. What is left of it is the clip on a clip path child and the basic shapes. Masks followed on the same layer machinery and are done too.
-2. Done: gradient units, a gradient matrix, spread modes and focal points in the format (binary version 3). What is left of it is `fr`.
+2. Done: gradient units, a gradient matrix, spread modes, focal points and `fr` in the format (binary version 3).
 3. Patterns. Done for fills by tile expansion in the importer. What is left is a real pattern def in the format, which would also give strokes and avoid one group per tile.
 4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.

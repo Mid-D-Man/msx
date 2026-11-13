@@ -14,7 +14,7 @@
 //! - a bounding-box gradient on a shape without area, which paints the
 //!   fallback color or nothing.
 //!
-//! `fr` is not carried yet and is reported.
+//! The focal radius `fr` is carried too, and a negative one counts as 0.
 
 use msx_ast::{Color, Def, GradientUnits, LinearGradient, Paint, RadialGradient, SpreadMethod, Stop, Transform};
 use roxmltree::Node;
@@ -166,7 +166,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             let raw = if own_lookup { own(name) } else { shared(name) };
             let base = if along_x { vp.0 } else { vp.1 };
             match raw.and_then(parse_length) {
-                Some(l) if user => l.to_px(16.0, if name == "r" { diagonal(vp) } else { base }),
+                Some(l) if user => l.to_px(16.0, if name == "r" || name == "fr" { diagonal(vp) } else { base }),
                 Some(l) => match l.unit {
                     crate::parse::Unit::Percent => l.value / 100.0,
                     _ => l.value,
@@ -186,14 +186,13 @@ impl<'a, 'i> Importer<'a, 'i> {
             let r = coord("r", 0.5, true, true);
             let fx = if own("fx").is_some() { coord("fx", 0.5, true, true) } else { cx };
             let fy = if own("fy").is_some() { coord("fy", 0.5, false, true) } else { cy };
-            if own("fr").and_then(parse_length).is_some_and(|l| l.value != 0.0) {
-                self.warn(format!("radial gradient #{base_id} uses fr, which is not supported; ignored"));
-            }
+            // A radius of 0 is a focal point. A negative one is an error in SVG and counts as 0.
+            let fr = if own("fr").is_some() { coord("fr", 0.0, true, true) } else { 0.0 };
             if r <= 0.0 {
                 // A radius of zero paints the last stop color.
                 return Some(Paint::Color(last));
             }
-            Def::RadialGradient(RadialGradient::new(def_id.clone(), cx, cy, r, fx, fy, msx_stops).with_units(units).with_spread(spread))
+            Def::RadialGradient(RadialGradient::new(def_id.clone(), cx, cy, r, fx, fy, msx_stops).with_units(units).with_spread(spread).with_fr(fr))
         } else {
             let p1 = (coord("x1", 0.0, true, true), coord("y1", 0.0, false, true));
             let p2 = (coord("x2", 1.0, true, true), coord("y2", 0.0, false, true));

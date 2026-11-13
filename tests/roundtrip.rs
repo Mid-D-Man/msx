@@ -907,7 +907,7 @@ const V3_GRADIENT_SOURCE: &str = r#"
       units = "user_space", spread = "repeat", transform = "rotate(30)",
       stops = [ { offset = 0.0, color = #ff0000, opacity = 1.0 },
                 { offset = 1.0, color = #0000ff, opacity = 1.0 } ] }
-    { type = "radial_gradient", id = "cone", cx = 0.4, cy = 0.5, r = 0.2, fx = 0.9, fy = 0.5,
+    { type = "radial_gradient", id = "cone", cx = 0.4, cy = 0.5, r = 0.2, fx = 0.9, fy = 0.5, fr = 0.05,
       spread = "reflect", transform = "scale(1 0.5)",
       stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 },
                 { offset = 1.0, color = #000000, opacity = 1.0 } ] }
@@ -930,4 +930,5 @@ fn roundtrip_gradient_units_spread_and_transform() {
     assert!(svg.contains("gradientUnits=\"userSpaceOnUse\""), "{svg}");
     assert!(svg.contains("spreadMethod=\"repeat\"") && svg.contains("spreadMethod=\"reflect\""), "{svg}");
     assert!(svg.matches("gradientTransform=\"matrix(").count() == 2, "{svg}");
+    assert!(svg.contains("fr=\"0.05\""), "{svg}");
 }

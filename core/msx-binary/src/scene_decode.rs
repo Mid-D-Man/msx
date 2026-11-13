@@ -145,13 +145,21 @@ fn decode_animations(
 // ── Def decoding ─────────────────────────────────────────────────────────────
 
 /// The flags byte of a version 3 gradient and the transform it announces.
-fn read_gradient_space(data: &[u8], cursor: &mut usize) -> io::Result<(GradientUnits, SpreadMethod, Option<Transform>)> {
+fn read_gradient_space(data: &[u8], cursor: &mut usize, radial: bool) -> io::Result<(GradientUnits, SpreadMethod, Option<Transform>, f64)> {
     let flags = read_u8(data, cursor)?;
     let units = if flags & GRAD_FLAG_USER_SPACE != 0 { GradientUnits::UserSpace } else { GradientUnits::ObjectBoundingBox };
     let spread = SpreadMethod::from_byte((flags & GRAD_SPREAD_MASK) >> GRAD_SPREAD_SHIFT)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "gradient: spread method is not pad, reflect or repeat"))?;
     let transform = if flags & GRAD_FLAG_TRANSFORM != 0 { Some(read_transform(data, cursor)?) } else { None };
-    Ok((units, spread, transform))
+    let fr = if flags & GRAD_FLAG_FR != 0 {
+        if !radial {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "gradient: a linear gradient has no focal radius"));
+        }
+        read_f32(data, cursor)?
+    } else {
+        0.0
+    };
+    Ok((units, spread, transform, fr))
 }
 
 fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<Def> {
@@ -167,7 +175,7 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let stops = read_stops(data, cursor)?;
             let mut g = LinearGradient::new(id, x1, y1, x2, y2, stops);
             if tag == TAG_LINEAR_GRADIENT_V3 {
-                let (units, spread, transform) = read_gradient_space(data, cursor)?;
+                let (units, spread, transform, _) = read_gradient_space(data, cursor, false)?;
                 g.units = units;
                 g.spread = spread;
                 g.transform = transform;
@@ -185,10 +193,11 @@ fn decode_def(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Result<De
             let stops = read_stops(data, cursor)?;
             let mut g = RadialGradient::new(id, cx, cy, r, fx, fy, stops);
             if tag == TAG_RADIAL_GRADIENT_V3 {
-                let (units, spread, transform) = read_gradient_space(data, cursor)?;
+                let (units, spread, transform, fr) = read_gradient_space(data, cursor, true)?;
                 g.units = units;
                 g.spread = spread;
                 g.transform = transform;
+                g = g.with_fr(fr);
             }
             Ok(Def::RadialGradient(g))
         }
@@ -515,24 +524,46 @@ mod tests {
 
     #[test]
     fn the_gradient_flags_byte_is_read_field_by_field() {
-        let (units, spread, transform) = read_gradient_space(&[0b0000_0011], &mut 0).unwrap();
-        assert_eq!((units, spread), (GradientUnits::UserSpace, SpreadMethod::Reflect));
+        let (units, spread, transform, fr) = read_gradient_space(&[0b0000_0011], &mut 0, false).unwrap();
+        assert_eq!((units, spread, fr), (GradientUnits::UserSpace, SpreadMethod::Reflect, 0.0));
         assert!(transform.is_none());
-        let (units, spread, _) = read_gradient_space(&[0b0000_0101], &mut 0).unwrap();
+        let (units, spread, ..) = read_gradient_space(&[0b0000_0101], &mut 0, false).unwrap();
         assert_eq!((units, spread), (GradientUnits::UserSpace, SpreadMethod::Repeat));
-        let (units, spread, _) = read_gradient_space(&[0b0000_0100], &mut 0).unwrap();
+        let (units, spread, ..) = read_gradient_space(&[0b0000_0100], &mut 0, true).unwrap();
         assert_eq!((units, spread), (GradientUnits::ObjectBoundingBox, SpreadMethod::Repeat));
     }
 
     #[test]
+    fn a_focal_radius_follows_the_flags_of_a_radial_gradient() {
+        let mut bytes = vec![GRAD_FLAG_FR];
+        bytes.extend_from_slice(&0.25f32.to_le_bytes());
+        let mut cursor = 0;
+        let (.., fr) = read_gradient_space(&bytes, &mut cursor, true).unwrap();
+        assert_eq!(fr, 0.25);
+        assert_eq!(cursor, bytes.len());
+    }
+
+    #[test]
+    fn a_linear_gradient_cannot_have_a_focal_radius() {
+        let mut bytes = vec![GRAD_FLAG_FR];
+        bytes.extend_from_slice(&0.25f32.to_le_bytes());
+        assert!(read_gradient_space(&bytes, &mut 0, false).is_err());
+    }
+
+    #[test]
+    fn a_cut_off_focal_radius_is_an_error() {
+        assert!(read_gradient_space(&[GRAD_FLAG_FR, 0, 0], &mut 0, true).is_err());
+    }
+
+    #[test]
     fn a_spread_that_does_not_exist_is_an_error() {
-        assert!(read_gradient_space(&[0b0000_0110], &mut 0).is_err());
+        assert!(read_gradient_space(&[0b0000_0110], &mut 0, false).is_err());
     }
 
     #[test]
     fn a_missing_or_cut_off_flags_byte_or_transform_is_an_error() {
-        assert!(read_gradient_space(&[], &mut 0).is_err());
+        assert!(read_gradient_space(&[], &mut 0, false).is_err());
         // The transform bit is set but nothing follows it.
-        assert!(read_gradient_space(&[0b0000_1000], &mut 0).is_err());
+        assert!(read_gradient_space(&[0b0000_1000], &mut 0, false).is_err());
     }
 }

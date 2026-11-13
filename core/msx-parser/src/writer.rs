@@ -305,13 +305,14 @@ fn def_object(def: &Def) -> Result<String, WriteError> {
             stops_array(&g.stops)
         ),
         Def::RadialGradient(g) => format!(
-            "{{ type = \"radial_gradient\", id = {}, cx = {}, cy = {}, r = {}, fx = {}, fy = {}{}, stops = {} }}",
+            "{{ type = \"radial_gradient\", id = {}, cx = {}, cy = {}, r = {}, fx = {}, fy = {}{}{}, stops = {} }}",
             quote(&g.id),
             num(g.cx),
             num(g.cy),
             num(g.r),
             num(g.fx),
             num(g.fy),
+            if g.fr > 0.0 { format!(", fr = {}", num(g.fr)) } else { String::new() },
             gradient_space(g.units, g.spread, &g.transform),
             stops_array(&g.stops)
         ),
@@ -710,7 +711,7 @@ mod tests {
         let m = Transform::Matrix(Matrix2D { a: 0.001, b: 0.25, c: -0.25, d: 1.5, e: 12.5, f: -3.0 });
         let defs = vec![
             Def::LinearGradient(LinearGradient::new("l".into(), 10.0, 0.0, 90.0, 0.0, stops.clone()).with_units(msx_ast::GradientUnits::UserSpace).with_spread(msx_ast::SpreadMethod::Reflect).with_transform(m.clone())),
-            Def::RadialGradient(RadialGradient::new("r".into(), 0.5, 0.5, 0.4, 0.3, 0.35, stops.clone()).with_spread(msx_ast::SpreadMethod::Repeat)),
+            Def::RadialGradient(RadialGradient::new("r".into(), 0.5, 0.5, 0.4, 0.3, 0.35, stops.clone()).with_spread(msx_ast::SpreadMethod::Repeat).with_fr(0.125)),
             Def::RadialGradient(RadialGradient::new("t".into(), 0.5, 0.5, 0.5, 0.5, 0.5, stops).with_transform(Transform::Rotate { angle: 30.0, cx: None, cy: None })),
         ];
         assert_roundtrip(&scene_with(defs, vec![]));

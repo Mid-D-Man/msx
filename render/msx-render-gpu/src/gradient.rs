@@ -86,7 +86,9 @@ impl Bbox {
         self.w > 0.0 && self.h > 0.0 && self.x.is_finite() && self.y.is_finite() && self.w.is_finite() && self.h.is_finite()
     }
 
-    /// Position in bounding-box units. Only meaningful when `usable()`.
+    /// Position in bounding-box units. Only meaningful when `usable()`. The renderer maps
+    /// through [`UvMap`]; this stays as the reference the map is tested against.
+    #[cfg(test)]
     pub fn uv(&self, x: f32, y: f32) -> [f32; 2] {
         [(x - self.x) / self.w, (y - self.y) / self.h]
     }
@@ -177,7 +179,7 @@ pub(crate) fn resolve(def: &Def, bbox: Option<Bbox>, opacity: f32) -> Option<Res
             } else {
                 let (cx, cy) = (g.cx as f32, g.cy as f32);
                 let (fx, fy) = (g.fx as f32, g.fy as f32);
-                let mut d = build(KIND_RADIAL, [cx, cy, fx, fy], [r, 0.0, 0.0, 0.0], &norm);
+                let mut d = build(KIND_RADIAL, [cx, cy, fx, fy], [r, g.fr as f32, 0.0, 0.0], &norm);
                 d.spread = spread_code(g.spread);
                 d
             };
@@ -322,6 +324,13 @@ mod tests {
         let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
         assert_eq!(d.kind, KIND_RADIAL);
         assert_eq!((d.a[2], d.a[3]), (5.0, 0.5), "the focal point is not moved");
+    }
+
+    #[test]
+    fn radial_fr_reaches_the_record() {
+        let def = Def::RadialGradient(RadialGradient::new("g".into(), 0.5, 0.5, 0.5, 0.5, 0.5, red_blue()).with_fr(0.2));
+        let Some(Resolved::Gradient(d, _)) = resolve(&def, unit(), 1.0) else { panic!("expected a gradient") };
+        assert_eq!((d.b[0], d.b[1]), (0.5, 0.2));
     }
 
     #[test]

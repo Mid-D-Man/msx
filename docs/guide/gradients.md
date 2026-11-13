@@ -65,6 +65,8 @@ The default runs left to right. A vertical gradient uses `x2 = 0.0` and `y2 = 1.
 
 The defaults describe a circle that touches the edges of the bounding box. The focal point is where the gradient starts, and the circle is where it ends. A focal point outside the circle makes a cone: the gradient covers the area between the two tangent lines from the focal point and the area beyond the circle inside them, and nothing is painted outside it, which is how SVG 2 and the canvas define it. A radius of 0 paints the last stop color.
 
+`fr` is the radius of the focal circle, 0 by default, which makes the focal point a point. With `fr` above 0 the gradient starts on a ring: a point is colored by the largest `t` for which the circle that runs from the focal circle (`t = 0`) to the main circle (`t = 1`) passes through it and has a positive radius. In the usual concentric case that means the first stop color inside `fr`, the gradient between `fr` and `r`, and the last stop color outside `r`. An `fr` larger than `r` runs the gradient inward. A negative `fr`, or one that is not a number, counts as 0. An `fr` above 0 needs binary version 3.
+
 ## Conic gradient
 
 | Field | Meaning | Default |

@@ -57,7 +57,8 @@ fn parse_def(data: &DixData, prefix: &str) -> Result<Def, String> {
             let fy = opt::<f64>(data, prefix, "fy")?.unwrap_or(cy);
             let stops = parse_stops(data, prefix, "stops")?;
             let (units, spread, transform) = parse_gradient_space(data, prefix)?;
-            let mut g = RadialGradient::new(id, cx, cy, r, fx, fy, stops).with_units(units).with_spread(spread);
+            let fr = opt::<f64>(data, prefix, "fr")?.unwrap_or(0.0);
+            let mut g = RadialGradient::new(id, cx, cy, r, fx, fy, stops).with_units(units).with_spread(spread).with_fr(fr);
             if let Some(t) = transform { g = g.with_transform(t); }
             Ok(Def::RadialGradient(g))
         }

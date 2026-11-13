@@ -228,6 +228,9 @@ pub struct RadialGradient {
     pub r:     f64,
     pub fx:    f64,
     pub fy:    f64,
+    /// Radius of the focal circle, where the gradient starts. 0 is a focal point.
+    /// Needs wire version 3 when it is above 0. Set it with [`RadialGradient::with_fr`].
+    pub fr:    f64,
     pub stops: Vec<Stop>,
     /// Coordinate system of the circle and focal point. Needs wire version 3 when not the default.
     pub units:     GradientUnits,
@@ -238,8 +241,15 @@ pub struct RadialGradient {
 }
 
 impl RadialGradient {
+    /// Sets `fr`. A value that is not above 0 or not a number counts as 0, which is what
+    /// resvg draws for a negative `fr`, so every renderer sees only 0 or a real radius.
+    pub fn with_fr(mut self, fr: f64) -> Self {
+        self.fr = if fr.is_finite() && fr > 0.0 { fr } else { 0.0 };
+        self
+    }
+
     pub fn new(id: String, cx: f64, cy: f64, r: f64, fx: f64, fy: f64, stops: Vec<Stop>) -> Self {
-        RadialGradient { id, cx, cy, r, fx, fy, stops, units: GradientUnits::default(), spread: SpreadMethod::default(), transform: None }
+        RadialGradient { id, cx, cy, r, fx, fy, fr: 0.0, stops, units: GradientUnits::default(), spread: SpreadMethod::default(), transform: None }
     }
 
     pub fn with_units(mut self, units: GradientUnits) -> Self { self.units = units; self }
@@ -248,7 +258,7 @@ impl RadialGradient {
 
     /// Whether the gradient sets a field that only wire version 3 can hold.
     pub fn has_v3_fields(&self) -> bool {
-        self.units != GradientUnits::default() || self.spread != SpreadMethod::default() || self.transform.as_ref().is_some_and(|t| !t.is_none())
+        self.fr > 0.0 || self.units != GradientUnits::default() || self.spread != SpreadMethod::default() || self.transform.as_ref().is_some_and(|t| !t.is_none())
     }
 
     pub fn to_svg(&self) -> String {
@@ -258,9 +268,11 @@ impl RadialGradient {
         )).collect::<Vec<_>>().join("");
         let fmt = if self.units == GradientUnits::UserSpace { fmt_fine } else { fmt_f64 };
         format!(
-            r#"<radialGradient id="{}" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" gradientUnits="{}"{}>{}</radialGradient>"#,
+            r#"<radialGradient id="{}" cx="{}" cy="{}" r="{}" fx="{}" fy="{}"{} gradientUnits="{}"{}>{}</radialGradient>"#,
             self.id, fmt(self.cx), fmt(self.cy), fmt(self.r),
-            fmt(self.fx), fmt(self.fy), self.units.svg_name(),
+            fmt(self.fx), fmt(self.fy),
+            if self.fr > 0.0 { format!(r#" fr="{}""#, fmt(self.fr)) } else { String::new() },
+            self.units.svg_name(),
             extra_svg_attrs(self.spread, &self.transform), stops_svg,
         )
     }
@@ -489,6 +501,18 @@ mod tests {
         assert!(!l.to_svg().contains("gradientTransform"), "{}", l.to_svg());
         let m = gradient_matrix(GradientUnits::UserSpace, &l.transform, None).unwrap();
         assert!(m.is_identity());
+    }
+
+    #[test]
+    fn fr_is_a_radius_or_nothing() {
+        let g = |fr| RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops()).with_fr(fr);
+        assert_eq!(g(0.2).fr, 0.2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(g(bad).fr, 0.0, "{bad}");
+        }
+        assert!(g(0.2).has_v3_fields() && !g(0.0).has_v3_fields() && !g(-1.0).has_v3_fields());
+        assert!(g(0.2).to_svg().contains(r#" fr="0.2" gradientUnits"#), "{}", g(0.2).to_svg());
+        assert!(!g(-1.0).to_svg().contains("fr="), "a negative fr is not written");
     }
 
     #[test]

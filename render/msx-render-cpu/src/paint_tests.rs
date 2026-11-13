@@ -447,3 +447,45 @@ fn a_focal_point_outside_the_circle_makes_a_cone() {
     assert_eq!(px(&p, 95, 10), [0, 0, 0, 0], "to the side of the focal point is outside the cone");
     assert_eq!(px(&p, 50, 95), [0, 0, 0, 0], "and so is below the circle");
 }
+
+// ── fr: a radial gradient with a focal circle ───────────────────────────────
+
+fn white_black() -> Vec<Stop> {
+    vec![Stop::new(0.0, Color::rgb(255, 255, 255)), Stop::new(1.0, Color::rgb(0, 0, 0))]
+}
+
+fn radial_user(cx: f64, cy: f64, r: f64, fx: f64, fy: f64, fr: f64) -> RadialGradient {
+    RadialGradient::new("g".into(), cx, cy, r, fx, fy, white_black()).with_units(GradientUnits::UserSpace).with_fr(fr)
+}
+
+#[test]
+fn fr_starts_the_gradient_on_a_ring() {
+    // Inside the focal circle (radius 20) the first color holds, then it runs out to radius 40.
+    let g = radial_user(50.0, 50.0, 40.0, 50.0, 50.0, 20.0);
+    let p = paint_rect(Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    assert!(px(&p, 50, 50)[0] > 250, "white inside the focal circle: {:?}", px(&p, 50, 50));
+    let mid = px(&p, 80, 50);
+    // The centre of pixel 80 is 30.5 from the middle, a little past half way (121 of 255).
+    assert!((mid[0] as i32 - 121).abs() <= 4, "half way between the circles: {mid:?}");
+    assert!(px(&p, 95, 50)[0] < 5, "black beyond the outer circle: {:?}", px(&p, 95, 50));
+}
+
+#[test]
+fn an_fr_larger_than_r_runs_the_gradient_inward() {
+    // The start circle (70) is bigger than the end circle (50): black in the middle, white at radius 70.
+    let g = radial_user(100.0, 100.0, 50.0, 100.0, 100.0, 70.0);
+    let p = paint_rect(Def::RadialGradient(g), 0.0, 0.0, 200.0, 200.0, (200.0, 200.0));
+    assert!(px(&p, 100, 100)[0] < 5, "black in the middle: {:?}", px(&p, 100, 100));
+    let ring = px(&p, 160, 100);
+    assert!((ring[0] as i32 - 134).abs() <= 4, "just under half way at radius 60.5 (t = 0.475): {ring:?}");
+    assert!(px(&p, 190, 100)[0] > 250, "white past the start circle: {:?}", px(&p, 190, 100));
+}
+
+#[test]
+fn fr_follows_units_and_the_gradient_transform() {
+    // In box units, stretched twice as wide: the rings are ellipses.
+    let g = RadialGradient::new("g".into(), 0.25, 0.5, 0.2, 0.25, 0.5, white_black()).with_fr(0.1).with_transform(Transform::Scale { x: 2.0, y: 1.0 });
+    let p = paint_rect(Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    let (wide, tall) = (px(&p, 50 + 15, 50), px(&p, 50, 50 + 15));
+    assert!(wide[0] > tall[0] + 40, "the horizontal radius is twice the vertical: {wide:?} {tall:?}");
+}

@@ -32,6 +32,7 @@ pub const GRAD_FLAG_USER_SPACE:    u8 = 1 << 0;
 pub const GRAD_SPREAD_SHIFT:       u8 = 1;
 pub const GRAD_SPREAD_MASK:        u8 = 0b11 << GRAD_SPREAD_SHIFT;
 pub const GRAD_FLAG_TRANSFORM:     u8 = 1 << 3;
+pub const GRAD_FLAG_FR:            u8 = 1 << 4; // radial only: an f32 focal radius follows the transform
 
 // ── Path command tags ───────────────────────────────────────────────────────
 pub const CMD_MOVE_TO:       u8 = 0x00;

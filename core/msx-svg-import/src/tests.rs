@@ -905,15 +905,24 @@ fn ignored_text_and_stroke_properties_are_reported() {
 }
 
 #[test]
-fn radial_gradient_fr_is_reported() {
+fn radial_gradient_fr_and_an_outside_focal_point_are_carried() {
     let i = imp(&doc(
         r##"<defs><radialGradient id="r" cx="0.2" cy="0.2" r="0.2" fx="0.9" fy="0.9" fr="0.1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
             <rect width="10" height="10" fill="url(#r)"/>"##,
     ));
-    assert!(has_warning(&i, "fr"));
-    assert!(!has_warning(&i, "focal point"), "a focal point outside the circle is a cone now, not an error: {:?}", i.warnings);
+    assert!(i.warnings.is_empty(), "nothing to report: {:?}", i.warnings);
     let Def::RadialGradient(g) = &i.scene.defs[0] else { panic!("radial") };
     assert_eq!((g.fx, g.fy), (0.9, 0.9), "the focal point is carried as written");
+    assert_eq!(g.fr, 0.1);
+    // Percentages, user units, and the values that count as no fr.
+    for (attr, units, want) in [("fr=\"10%\"", "", 0.1), ("fr=\"-1\"", "", 0.0), ("fr=\"0\"", "", 0.0), ("fr=\"20\"", "gradientUnits=\"userSpaceOnUse\" ", 20.0), ("", "", 0.0)] {
+        let i = imp(&doc(&format!(
+            r##"<defs><radialGradient id="r" {units}cx="0.5" cy="0.5" r="0.5" {attr}><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs>
+                <rect width="10" height="10" fill="url(#r)"/>"##,
+        )));
+        let Def::RadialGradient(g) = &i.scene.defs[0] else { panic!("radial") };
+        assert!((g.fr - want).abs() < 1e-9, "{attr} {units}: {}", g.fr);
+    }
 }
 
 #[test]

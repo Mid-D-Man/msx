@@ -601,3 +601,50 @@ fn a_focal_point_outside_the_circle_makes_a_cone() {
     assert!(!painted(95, 10), "to the side of the focal point is outside the cone: {:?}", t.get_pixel(95, 10));
     assert!(!painted(50, 95), "and so is below the circle: {:?}", t.get_pixel(50, 95));
 }
+
+// ── fr: a radial gradient with a focal circle ───────────────────────────────
+
+fn white_black() -> Vec<Stop> {
+    vec![Stop::new(0.0, Color::rgb(255, 255, 255)), Stop::new(1.0, Color::rgb(0, 0, 0))]
+}
+
+fn radial_user(cx: f64, cy: f64, r: f64, fx: f64, fy: f64, fr: f64) -> RadialGradient {
+    RadialGradient::new("g".into(), cx, cy, r, fx, fy, white_black()).with_units(GradientUnits::UserSpace).with_fr(fr)
+}
+
+#[test]
+fn fr_starts_the_gradient_on_a_ring() {
+    let Some(r) = gpu() else { return };
+    let g = radial_user(50.0, 50.0, 40.0, 50.0, 50.0, 20.0);
+    let t = paint_rect(&r, Def::RadialGradient(g), 0.0, 0.0, 100.0, 100.0, (100.0, 100.0));
+    assert!(t.get_pixel(50, 50)[0] > 250, "white inside the focal circle: {:?}", t.get_pixel(50, 50));
+    assert!((t.get_pixel(80, 50)[0] as i32 - 128).abs() <= 8, "half way between the circles: {:?}", t.get_pixel(80, 50));
+    assert!(t.get_pixel(95, 50)[0] < 5, "black beyond the outer circle");
+}
+
+#[test]
+fn an_fr_larger_than_r_runs_the_gradient_inward() {
+    let Some(r) = gpu() else { return };
+    let g = radial_user(100.0, 100.0, 50.0, 100.0, 100.0, 70.0);
+    let t = paint_rect(&r, Def::RadialGradient(g), 0.0, 0.0, 200.0, 200.0, (200.0, 200.0));
+    assert!(t.get_pixel(100, 100)[0] < 5, "black in the middle");
+    assert!((t.get_pixel(160, 100)[0] as i32 - 128).abs() <= 8, "half way at radius 60: {:?}", t.get_pixel(160, 100));
+    assert!(t.get_pixel(190, 100)[0] > 250, "white past the start circle");
+}
+
+#[test]
+fn gpu_and_cpu_agree_on_a_focal_circle_off_centre_with_repeat() {
+    let Some(r) = gpu() else { return };
+    let g = radial_user(60.0, 50.0, 40.0, 40.0, 50.0, 10.0).with_spread(SpreadMethod::Repeat);
+    let sc = scene(120.0, 100.0, vec![Def::RadialGradient(g)], vec![rect(0.0, 0.0, 120.0, 100.0, fill_style(url("g")))]);
+    let gpu_px = render_gpu(&r, &sc);
+    let cpu_px = msx_render_cpu::render_to_pixmap(&sc);
+    let mut worst = 0;
+    for (x, y) in [(5u32, 5u32), (30, 50), (50, 20), (70, 60), (100, 90), (115, 10)] {
+        let g = gpu_px.get_pixel(x, y);
+        let i = ((y * cpu_px.width() + x) * 4) as usize;
+        let c = &cpu_px.data()[i..i + 3];
+        worst = worst.max((0..3).map(|k| (g[k] as i32 - c[k] as i32).abs()).max().unwrap());
+    }
+    assert!(worst <= 14, "GPU and CPU differ by up to {worst} levels");
+}

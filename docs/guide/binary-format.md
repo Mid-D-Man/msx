@@ -50,7 +50,7 @@ The style block stores fill, stroke, opacity, stroke width, fill rule, line cap,
 
 ## Versions
 
-A file carries the lowest version that can hold its content. A scene that uses none of the version 3 features is written as version 2, byte for byte as before, and opens in a version 2 reader. The version 3 features are `fill_opacity`, `stroke_opacity` and `dominant_baseline` on a style, which sit in an extension block after the visibility byte, and `units`, `spread` and `transform` on a linear or radial gradient, which use their own tags. A version 2 reader would misread both, so a scene that uses one is written as version 3. A version 2 reader refuses a version 3 file at the header with an error. A reader of this release opens versions 2 and 3, and files written before version 3 decode with the three keys unset. `msx info` prints the version of a binary.
+A file carries the lowest version that can hold its content. A scene that uses none of the version 3 features is written as version 2, byte for byte as before, and opens in a version 2 reader. The version 3 features are `fill_opacity`, `stroke_opacity` and `dominant_baseline` on a style, which sit in an extension block after the visibility byte, and `units`, `spread`, `transform` and, on a radial gradient, `fr`, which use their own tags. A version 2 reader would misread both, so a scene that uses one is written as version 3. A version 2 reader refuses a version 3 file at the header with an error. A reader of this release opens versions 2 and 3, and files written before version 3 decode with the three keys unset. `msx info` prints the version of a binary.
 
 ## Embedded media
 

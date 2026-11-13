@@ -121,14 +121,16 @@ pub fn compile(scene: &Scene, compress: bool) -> io::Result<Vec<u8>> {
 /// The flags byte of a version 3 gradient, then its transform when it has one.
 /// A reader of version 2 does not know the tags this follows, so a scene that
 /// gets here is written as version 3.
-fn write_gradient_space(out: &mut Vec<u8>, units: GradientUnits, spread: SpreadMethod, transform: &Option<Transform>) {
+fn write_gradient_space(out: &mut Vec<u8>, units: GradientUnits, spread: SpreadMethod, transform: &Option<Transform>, fr: f64) {
     crate::version::require(3);
     let t = transform.as_ref().filter(|t| !t.is_none());
     let mut flags = spread.to_byte() << GRAD_SPREAD_SHIFT;
     if units == GradientUnits::UserSpace { flags |= GRAD_FLAG_USER_SPACE; }
     if t.is_some() { flags |= GRAD_FLAG_TRANSFORM; }
+    if fr > 0.0 { flags |= GRAD_FLAG_FR; }
     write_u8(out, flags);
     if let Some(t) = t { write_transform(out, t); }
+    if fr > 0.0 { write_f32(out, fr); }
 }
 
 fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
@@ -142,7 +144,7 @@ fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
             write_f32(out, g.x2); write_f32(out, g.y2);
             write_u16(out, g.stops.len() as u16);
             for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
-            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform); }
+            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform, 0.0); }
         }
         Def::RadialGradient(g) => {
             let v3 = g.has_v3_fields();
@@ -153,7 +155,7 @@ fn encode_def(def: &Def, out: &mut Vec<u8>, pool: &mut Vec<String>) {
             write_f32(out, g.fx); write_f32(out, g.fy);
             write_u16(out, g.stops.len() as u16);
             for stop in &g.stops { out.extend_from_slice(&stop.to_bytes()); }
-            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform); }
+            if v3 { write_gradient_space(out, g.units, g.spread, &g.transform, g.fr); }
         }
         Def::ConicGradient(g) => {
             write_u8(out, TAG_CONIC_GRADIENT);
@@ -634,6 +636,19 @@ mod tests {
                 assert_eq!(format!("{:?}", crate::decode(&data).unwrap().defs), format!("{:?}", vec![def.clone()]), "compress={compress}");
             }
         }
+    }
+
+    #[test]
+    fn fr_alone_is_enough_for_version_3_and_survives() {
+        let g = msx_ast::RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops()).with_fr(0.2);
+        let data = compile(&gradient_scene(Def::RadialGradient(g.clone())), false).unwrap();
+        assert_eq!(version_of(&data), 3);
+        let back = crate::decode(&data).unwrap();
+        let Def::RadialGradient(b) = &back.defs[0] else { panic!("radial") };
+        assert!((b.fr - 0.2).abs() < 1e-6 && b.units == g.units && b.spread == g.spread);
+        // A negative fr is no fr: nothing needs version 3.
+        let none = msx_ast::RadialGradient::new("r".into(), 0.5, 0.5, 0.5, 0.5, 0.5, two_stops()).with_fr(-1.0);
+        assert_eq!(version_of(&compile(&gradient_scene(Def::RadialGradient(none)), false).unwrap()), 2);
     }
 
     #[test]

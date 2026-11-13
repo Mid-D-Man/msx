@@ -329,6 +329,7 @@ Defined in the `defs::` group array. Referenced via `"url(#id)"` in paint values
   r    = <float>    // radius
   fx   = <float>?   // focal point x (defaults to cx)
   fy   = <float>?
+  fr   = <float>?   // radius of the focal circle, 0 when absent or not above 0     (version 3)
   units     = <string>?  // as for linear_gradient                                (version 3)
   spread    = <string>?                                                           // (version 3)
   transform = <string>?                                                           // (version 3)
@@ -529,7 +530,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread` and `transform`, in tags `0x13` and `0x14` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -612,7 +613,7 @@ The `TAG_END` sentinel is always written after the element stream, regardless of
 | `0x13` LinearGradient (v3) | as `0x0A`, then `[u8 flags] [transform]?` |
 | `0x14` RadialGradient (v3) | as `0x0B`, then `[u8 flags] [transform]?` |
 
-The flags byte of `0x13` and `0x14`: bit 0 is set for `user_space` units, bits 1 and 2 hold the spread (0 pad, 1 reflect, 2 repeat, 3 is invalid), and bit 3 says that a transform follows, in the same encoding as an element transform. The other bits are 0. A gradient that uses none of the three is written with `0x0A` or `0x0B`, so its bytes and the file version are as before.
+The flags byte of `0x13` and `0x14`: bit 0 is set for `user_space` units, bits 1 and 2 hold the spread (0 pad, 1 reflect, 2 repeat, 3 is invalid), bit 3 says that a transform follows, in the same encoding as an element transform, and bit 4 (radial only) says that an `f32` focal radius follows the transform. A linear gradient with bit 4 set is invalid. The other bits are 0. A gradient that uses none of these, with no `fr` either, is written with `0x0A` or `0x0B`, so its bytes and the file version are as before.
 
 #### Gradient stop
 

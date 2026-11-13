@@ -52,6 +52,8 @@ pub(crate) enum ResolvedPaint {
     Shader(SkPaint<'static>),
     /// Conic gradient, drawn through the recolor path.
     Conic(ConicPaint),
+    /// Radial gradient with a focal circle, also drawn through the recolor path.
+    TwoPoint(TwoPointPaint),
     /// Valid reference that paints nothing (for example an empty bounding box).
     Nothing,
 }
@@ -73,28 +75,112 @@ impl ConicPaint {
     }
 
     pub fn color_at(&self, t: f32) -> [f32; 4] {
-        let first = self.stops[0];
-        let last = self.stops[self.stops.len() - 1];
-        if t <= first.0 {
-            return first.1;
+        stops_color(&self.stops, t)
+    }
+}
+
+/// The color at `t` between straight-alpha stops. Before the first stop and after
+/// the last one the end colors hold.
+fn stops_color(stops: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
+    let first = stops[0];
+    let last = stops[stops.len() - 1];
+    if t <= first.0 {
+        return first.1;
+    }
+    if t >= last.0 {
+        return last.1;
+    }
+    for pair in stops.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if t >= a.0 && t <= b.0 {
+            let span = b.0 - a.0;
+            let k = if span <= f32::EPSILON { 1.0 } else { (t - a.0) / span };
+            return [
+                a.1[0] + (b.1[0] - a.1[0]) * k,
+                a.1[1] + (b.1[1] - a.1[1]) * k,
+                a.1[2] + (b.1[2] - a.1[2]) * k,
+                a.1[3] + (b.1[3] - a.1[3]) * k,
+            ];
         }
-        if t >= last.0 {
-            return last.1;
-        }
-        for pair in self.stops.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            if t >= a.0 && t <= b.0 {
-                let span = b.0 - a.0;
-                let k = if span <= f32::EPSILON { 1.0 } else { (t - a.0) / span };
-                return [
-                    a.1[0] + (b.1[0] - a.1[0]) * k,
-                    a.1[1] + (b.1[1] - a.1[1]) * k,
-                    a.1[2] + (b.1[2] - a.1[2]) * k,
-                    a.1[3] + (b.1[3] - a.1[3]) * k,
-                ];
+    }
+    last.1
+}
+
+/// A radial gradient between a focal circle (center `f`, radius `fr`) at `t = 0`
+/// and the circle (center `c`, radius `r`) at `t = 1`. `tiny-skia` only takes a
+/// focal point, so a gradient with `fr > 0` is evaluated per pixel here.
+pub(crate) struct TwoPointPaint {
+    /// Local space to gradient space.
+    to_gradient: Matrix2D,
+    c: (f64, f64),
+    r: f64,
+    f: (f64, f64),
+    fr: f64,
+    spread: SpreadMethod,
+    stops: Vec<(f32, [f32; 4])>,
+}
+
+impl TwoPointPaint {
+    /// The largest `t` whose circle has a positive radius and passes through the
+    /// point, which is the rule the canvas and SVG 2 give. `None` outside the cone.
+    fn parameter(&self, gx: f64, gy: f64) -> Option<f64> {
+        let (cdx, cdy) = (self.c.0 - self.f.0, self.c.1 - self.f.1);
+        let (pdx, pdy) = (gx - self.f.0, gy - self.f.1);
+        let dr = self.r - self.fr;
+        let a = cdx * cdx + cdy * cdy - dr * dr;
+        let b = pdx * cdx + pdy * cdy + self.fr * dr;
+        let c = pdx * pdx + pdy * pdy - self.fr * self.fr;
+        let radius_ok = |t: f64| self.fr + t * dr >= 0.0;
+        if a.abs() < 1e-9 {
+            // The circles touch: one root.
+            if b.abs() < 1e-12 {
+                return None;
             }
+            let t = c / (2.0 * b);
+            return radius_ok(t).then_some(t);
         }
-        last.1
+        let disc = b * b - a * c;
+        if disc < 0.0 {
+            return None;
+        }
+        let root = disc.sqrt();
+        let (t1, t2) = ((b + root) / a, (b - root) / a);
+        let (hi, lo) = (t1.max(t2), t1.min(t2));
+        if radius_ok(hi) {
+            Some(hi)
+        } else if radius_ok(lo) {
+            Some(lo)
+        } else {
+            None
+        }
+    }
+}
+
+/// A paint that colors a pixel from where it lies in local space.
+pub(crate) trait Recolor {
+    /// The straight-alpha color there, or `None` where the paint draws nothing.
+    fn color_at_local(&self, lx: f32, ly: f32) -> Option<[f32; 4]>;
+}
+
+impl Recolor for ConicPaint {
+    fn color_at_local(&self, lx: f32, ly: f32) -> Option<[f32; 4]> {
+        Some(self.color_at(self.t_at(lx, ly)))
+    }
+}
+
+impl Recolor for TwoPointPaint {
+    fn color_at_local(&self, lx: f32, ly: f32) -> Option<[f32; 4]> {
+        let (gx, gy) = apply_matrix(self.to_gradient, (lx, ly));
+        let t = self.parameter(f64::from(gx), f64::from(gy))? as f32;
+        let t = match self.spread {
+            SpreadMethod::Pad => t.clamp(0.0, 1.0),
+            SpreadMethod::Repeat => t - t.floor(),
+            SpreadMethod::Reflect => {
+                let m = t - 2.0 * (t * 0.5).floor();
+                if m > 1.0 { 2.0 - m } else { m }
+            }
+        };
+        Some(stops_color(&self.stops, t))
     }
 }
 
@@ -134,6 +220,23 @@ pub(crate) fn resolve(def: &Def, bbox: Option<Bbox>, opacity: f32) -> Option<Res
             if r <= 0.0 {
                 // SVG paints the last stop color when the radius is zero.
                 return Some(ResolvedPaint::Shader(solid(norm[norm.len() - 1].1)));
+            }
+            if g.fr > 0.0 {
+                let Some(m) = gradient_matrix(g.units, &g.transform, bbox_f64) else {
+                    return Some(ResolvedPaint::Nothing);
+                };
+                let Some(to_gradient) = invert_matrix(m) else {
+                    return Some(ResolvedPaint::Nothing);
+                };
+                return Some(ResolvedPaint::TwoPoint(TwoPointPaint {
+                    to_gradient,
+                    c: (g.cx, g.cy),
+                    r: g.r,
+                    f: (g.fx, g.fy),
+                    fr: g.fr,
+                    spread: g.spread,
+                    stops: norm,
+                }));
             }
             // A focal point outside the circle makes a cone, with nothing painted outside it,
             // as SVG 2 and the two-point conical gradient of the shader library define it.
@@ -212,15 +315,15 @@ fn normalize_stops(stops: &[Stop], opacity: f32) -> Vec<(f32, [f32; 4])> {
         .collect()
 }
 
-/// Fill `path` with a conic gradient.
-pub(crate) fn conic_fill(target: &mut Pixmap, path: &SkPath, conic: &ConicPaint, rule: SkFillRule, transform: Transform, matrix: Matrix2D) {
+/// Fill `path` with a paint that colors each pixel itself.
+pub(crate) fn pixel_fill(target: &mut Pixmap, path: &SkPath, conic: &dyn Recolor, rule: SkFillRule, transform: Transform, matrix: Matrix2D) {
     let Some(mut cov) = Pixmap::new(target.width(), target.height()) else { return };
     cov.fill_path(path, &white(), rule, transform, None);
     recolor_and_composite(target, cov, conic, matrix);
 }
 
-/// Stroke `path` with a conic gradient.
-pub(crate) fn conic_stroke(target: &mut Pixmap, path: &SkPath, conic: &ConicPaint, stroke: &Stroke, transform: Transform, matrix: Matrix2D) {
+/// Stroke `path` with a paint that colors each pixel itself.
+pub(crate) fn pixel_stroke(target: &mut Pixmap, path: &SkPath, conic: &dyn Recolor, stroke: &Stroke, transform: Transform, matrix: Matrix2D) {
     let Some(mut cov) = Pixmap::new(target.width(), target.height()) else { return };
     cov.stroke_path(path, &white(), stroke, transform, None);
     recolor_and_composite(target, cov, conic, matrix);
@@ -234,9 +337,9 @@ fn white() -> SkPaint<'static> {
 }
 
 /// `cov` holds opaque white where the shape covers (alpha = coverage). Map
-/// each covered pixel centre back to local space, look up the conic color
+/// each covered pixel centre back to local space, look up the paint color
 /// and write it premultiplied, then draw the result onto `target`.
-fn recolor_and_composite(target: &mut Pixmap, mut cov: Pixmap, conic: &ConicPaint, matrix: Matrix2D) {
+fn recolor_and_composite(target: &mut Pixmap, mut cov: Pixmap, conic: &dyn Recolor, matrix: Matrix2D) {
     let Some(inv) = invert_matrix(matrix) else { return };
     let width = cov.width() as usize;
     for (i, px) in cov.data_mut().chunks_exact_mut(4).enumerate() {
@@ -247,7 +350,10 @@ fn recolor_and_composite(target: &mut Pixmap, mut cov: Pixmap, conic: &ConicPain
         let x = (i % width) as f32 + 0.5;
         let y = (i / width) as f32 + 0.5;
         let (lx, ly) = apply_matrix(inv, (x, y));
-        let [r, g, b, a] = conic.color_at(conic.t_at(lx, ly));
+        let Some([r, g, b, a]) = conic.color_at_local(lx, ly) else {
+            px.copy_from_slice(&[0, 0, 0, 0]);
+            continue;
+        };
         let alpha = a * (coverage as f32 / 255.0);
         let q = |v: f32| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
         px[0] = q(r * alpha);
