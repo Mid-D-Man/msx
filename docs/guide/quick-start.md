@@ -81,7 +81,7 @@ cargo run --release --features gpu -- rasterize-gpu examples/shader_orb.msx -o o
 cargo run --release --features gpu -- animate-gpu examples/shader_orb.msx -o out.gif --duration 4 --fps 24
 ```
 
-The [Command line reference](cli.md) lists every command and flag. To try a scene without installing anything, the [playground](/playground/) runs the SVG renderer in the browser and plays keyframe animation.
+The [Command line reference](cli.md) lists every command and flag. To try a scene without installing anything, the [playground](/playground/) runs the SVG renderer in the browser and plays keyframe animation. It has a dropdown of every example in the repository, and a link such as `/playground/#example=blend_modes` opens one directly.
 
 ## Run the tests
 

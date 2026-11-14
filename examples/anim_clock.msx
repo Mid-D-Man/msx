@@ -1,0 +1,79 @@
+// examples/anim_clock.msx
+// A time-lapse clock: a minute hand that turns in 12 seconds and a second hand that
+// turns in 1. Made from examples/svg/clock.svg with `msx import`. Each hand is a
+// rotate track about the dial center, and the two periods share a 12 second loop.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 240, height = 240, background = "#00000000" }
+  duration = 12.0
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 240, height = 240, style = { fill = #0f1220 } }
+    { type = "circle", cx = 120, cy = 120, r = 100, style = { fill = #161b2e, stroke = #4a9eff, stroke_width = 4 } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 42, style = { fill = "none", stroke = #e2e8f0, stroke_width = 4, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(30 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(60 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 42, transform = "rotate(90 120 120)", style = { fill = "none", stroke = #e2e8f0, stroke_width = 4, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(120 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(150 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 42, transform = "rotate(180 120 120)", style = { fill = "none", stroke = #e2e8f0, stroke_width = 4, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(210 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(240 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 42, transform = "rotate(270 120 120)", style = { fill = "none", stroke = #e2e8f0, stroke_width = 4, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(300 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "line", x1 = 120, y1 = 26, x2 = 120, y2 = 36, transform = "rotate(330 120 120)", style = { fill = "none", stroke = #64748b, stroke_width = 2, stroke_linecap = "round" } }
+    { type = "group", transform = "translate(120 120)",
+      elements = [
+        { type = "group", id = "anim1",
+          elements = [
+            { type = "group", transform = "translate(-120 -120)",
+              elements = [
+                { type = "line", x1 = 120, y1 = 120, x2 = 120, y2 = 52, style = { fill = "none", stroke = #e2e8f0, stroke_width = 6, stroke_linecap = "round" } }
+              ] }
+          ] }
+      ] }
+    { type = "group", transform = "translate(120 120)",
+      elements = [
+        { type = "group", id = "anim2",
+          elements = [
+            { type = "group", transform = "translate(-120 -120)",
+              elements = [
+                { type = "line", x1 = 120, y1 = 132, x2 = 120, y2 = 34, style = { fill = "none", stroke = #f2545b, stroke_width = 2, stroke_linecap = "round" } }
+              ] }
+          ] }
+      ] }
+    { type = "circle", cx = 120, cy = 120, r = 7, style = { fill = #f2545b } }
+  animations::
+    { target_id = "anim1", property = "rotate",
+      keyframes = [
+        { time = 0.0, value = 0.0 },
+        { time = 12.0, value = 360.0 }
+      ] }
+    { target_id = "anim2", property = "rotate",
+      keyframes = [
+        { time = 0.0, value = 0.0 },
+        { time = 0.999, value = 359.64 },
+        { time = 1.0, value = 0.0 },
+        { time = 1.999, value = 359.64 },
+        { time = 2.0, value = 0.0 },
+        { time = 2.999, value = 359.64 },
+        { time = 3.0, value = 0.0 },
+        { time = 3.999, value = 359.64 },
+        { time = 4.0, value = 0.0 },
+        { time = 4.999, value = 359.64 },
+        { time = 5.0, value = 0.0 },
+        { time = 5.999, value = 359.64 },
+        { time = 6.0, value = 0.0 },
+        { time = 6.999, value = 359.64 },
+        { time = 7.0, value = 0.0 },
+        { time = 7.999, value = 359.64 },
+        { time = 8.0, value = 0.0 },
+        { time = 8.999, value = 359.64 },
+        { time = 9.0, value = 0.0 },
+        { time = 9.999, value = 359.64 },
+        { time = 10.0, value = 0.0 },
+        { time = 10.999, value = 359.64 },
+        { time = 11.0, value = 0.0 },
+        { time = 12.0, value = 360.0 }
+      ] }
+)

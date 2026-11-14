@@ -91,7 +91,7 @@ Children of a group or a layer can be targets too, wherever they sit in the tree
 
 ## Playing an animation
 
-- The [playground](/playground/) plays any scene with keyframe tracks and shows a play bar with a position slider. Editing the source while it plays keeps it playing from the same position.
+- The [playground](/playground/) plays any scene with keyframe tracks and shows a play bar with a position slider. Editing the source while it plays keeps it playing from the same position. The animated examples in its dropdown are marked with a triangle.
 - `msx animate` samples the timeline on the CPU and writes a looping GIF.
 - `msx animate-gpu` does the same on the GPU. It also advances the shader `time` uniform, so keyframes and shaders animate together.
 - `msx-viewer` plays a keyframed scene live in a native window.

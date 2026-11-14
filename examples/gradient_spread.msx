@@ -1,0 +1,36 @@
+// examples/gradient_spread.msx
+// One gradient, three spread modes. Each gradient covers only the middle half of
+// its bar (x1 = 0.25 to x2 = 0.75), so the first and last quarter show what
+// `spread` does: pad holds the end colors, reflect runs back and forth, and
+// repeat starts again. The last row is a radial gradient that repeats in rings.
+// `spread` needs binary version 3, which `msx compile` picks by itself.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 330, background = #0f1220 }
+  defs::
+    { type = "linear_gradient", id = "pad", x1 = 0.25, y1 = 0.0, x2 = 0.75, y2 = 0.0, spread = "pad",
+      stops = [ { offset = 0.0, color = #f7971e, opacity = 1.0 }, { offset = 0.5, color = #e94560, opacity = 1.0 }, { offset = 1.0, color = #4a9eff, opacity = 1.0 } ] }
+    { type = "linear_gradient", id = "reflect", x1 = 0.25, y1 = 0.0, x2 = 0.75, y2 = 0.0, spread = "reflect",
+      stops = [ { offset = 0.0, color = #f7971e, opacity = 1.0 }, { offset = 0.5, color = #e94560, opacity = 1.0 }, { offset = 1.0, color = #4a9eff, opacity = 1.0 } ] }
+    { type = "linear_gradient", id = "repeat", x1 = 0.25, y1 = 0.0, x2 = 0.75, y2 = 0.0, spread = "repeat",
+      stops = [ { offset = 0.0, color = #f7971e, opacity = 1.0 }, { offset = 0.5, color = #e94560, opacity = 1.0 }, { offset = 1.0, color = #4a9eff, opacity = 1.0 } ] }
+    { type = "radial_gradient", id = "rings", cx = 0.5, cy = 0.5, r = 0.12, fx = 0.5, fy = 0.5, spread = "repeat",
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #1b2a5c, opacity = 1.0 } ] }
+  elements::
+    { type = "rect", x = 20, y = 20, width = 440, height = 56,
+      style = { fill = "url(#pad)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 480, y = 54, content = "spread: pad",
+      style = { fill = #cbd5e1, font_size = 14, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 20, y = 92, width = 440, height = 56,
+      style = { fill = "url(#reflect)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 480, y = 126, content = "spread: reflect",
+      style = { fill = #cbd5e1, font_size = 14, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 20, y = 164, width = 440, height = 56,
+      style = { fill = "url(#repeat)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 480, y = 198, content = "spread: repeat",
+      style = { fill = #cbd5e1, font_size = 14, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 20, y = 236, width = 440, height = 74,
+      style = { fill = "url(#rings)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 480, y = 278, content = "radial, repeat",
+      style = { fill = #cbd5e1, font_size = 14, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

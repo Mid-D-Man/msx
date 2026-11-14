@@ -23,6 +23,7 @@ loader writes its failure message into them.
 """
 
 import json
+import pathlib
 
 from templates import page
 
@@ -304,12 +305,21 @@ baseName = __DEFAULT__.replace(/\s+/g, '-');
 """
 
 
-def build_convert_page() -> str:
+def _repo_examples(repo_root) -> dict:
+    """The SVG files in examples/svg/, named after their file with spaces for underscores."""
+    if repo_root is None:
+        return {}
+    svg_dir = pathlib.Path(repo_root) / "examples" / "svg"
+    return {p.stem.replace("_", " "): p.read_text(encoding="utf-8") for p in sorted(svg_dir.glob("*.svg"))}
+
+
+def build_convert_page(repo_root=None) -> str:
+    examples = {**EXAMPLES, **_repo_examples(repo_root)}
     buttons = "".join(
-        f'<button type="button" data-example="{name}">{name}</button>' for name in EXAMPLES
+        f'<button type="button" data-example="{name}">{name}</button>' for name in examples
     )
     script = (
-        SCRIPT.replace("__EXAMPLES__", json.dumps(EXAMPLES))
+        SCRIPT.replace("__EXAMPLES__", json.dumps(examples))
         .replace("__DEFAULT__", json.dumps(DEFAULT_EXAMPLE))
     )
     body = f'''<h1>Convert SVG to MSX</h1>

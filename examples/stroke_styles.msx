@@ -1,0 +1,50 @@
+// examples/stroke_styles.msx
+// Dashes, line caps and line joins. The thin white lines mark the true ends of the
+// thick strokes, so the extra length of the round and square caps is visible.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 330, background = #0f1220 }
+  elements::
+    { type = "line", x1 = 30, y1 = 40, x2 = 300, y2 = 40,
+      style = { fill = "none", stroke = #4a9eff, stroke_width = 6, opacity = 1.0 } }
+    { type = "line", x1 = 30, y1 = 70, x2 = 300, y2 = 70,
+      style = { fill = "none", stroke = #4a9eff, stroke_width = 6, stroke_dasharray = [14, 8], opacity = 1.0 } }
+    { type = "line", x1 = 30, y1 = 100, x2 = 300, y2 = 100,
+      style = { fill = "none", stroke = #4a9eff, stroke_width = 6, stroke_dasharray = [1, 12], stroke_linecap = "round", opacity = 1.0 } }
+    { type = "line", x1 = 30, y1 = 130, x2 = 300, y2 = 130,
+      style = { fill = "none", stroke = #4a9eff, stroke_width = 6, stroke_dasharray = [24, 8, 4, 8], stroke_dashoffset = 10, opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 190, x2 = 240, y2 = 190,
+      style = { fill = "none", stroke = #f7971e, stroke_width = 22, stroke_linecap = "butt", opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 190, x2 = 240, y2 = 190,
+      style = { fill = "none", stroke = #ffffff, stroke_width = 1, opacity = 1.0 } }
+    { type = "text", x = 290, y = 195, content = "cap: butt",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 230, x2 = 240, y2 = 230,
+      style = { fill = "none", stroke = #f7971e, stroke_width = 22, stroke_linecap = "round", opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 230, x2 = 240, y2 = 230,
+      style = { fill = "none", stroke = #ffffff, stroke_width = 1, opacity = 1.0 } }
+    { type = "text", x = 290, y = 235, content = "cap: round",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 270, x2 = 240, y2 = 270,
+      style = { fill = "none", stroke = #f7971e, stroke_width = 22, stroke_linecap = "square", opacity = 1.0 } }
+    { type = "line", x1 = 60, y1 = 270, x2 = 240, y2 = 270,
+      style = { fill = "none", stroke = #ffffff, stroke_width = 1, opacity = 1.0 } }
+    { type = "text", x = 290, y = 275, content = "cap: square",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "path", d = "M 360 170 L 395 90 L 430 170",
+      style = { fill = "none", stroke = #e94560, stroke_width = 22, stroke_linejoin = "miter", opacity = 1.0 } }
+    { type = "text", x = 395, y = 200, content = "miter",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "path", d = "M 455 170 L 490 90 L 525 170",
+      style = { fill = "none", stroke = #e94560, stroke_width = 22, stroke_linejoin = "round", opacity = 1.0 } }
+    { type = "text", x = 490, y = 200, content = "round",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "path", d = "M 550 170 L 585 90 L 620 170",
+      style = { fill = "none", stroke = #e94560, stroke_width = 22, stroke_linejoin = "bevel", opacity = 1.0 } }
+    { type = "text", x = 585, y = 200, content = "bevel",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "path", d = "M 360 260 L 395 230 L 430 260 L 465 230 L 500 260 L 535 230 L 570 260",
+      style = { fill = "none", stroke = #2ecc71, stroke_width = 6, stroke_linejoin = "round", stroke_linecap = "round", stroke_dasharray = [10, 10], opacity = 1.0 } }
+    { type = "text", x = 465, y = 300, content = "dashed, round join and cap",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

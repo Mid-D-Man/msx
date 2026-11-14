@@ -1,0 +1,31 @@
+// examples/gradient_user_space.msx
+// Gradient units and transform. `sweep` is in user space, so its coordinates are
+// canvas coordinates: one gradient runs across a circle, a rect and a line, and the
+// line has no box area, which a bounding-box gradient could not paint. `stripes`
+// is a short repeating gradient turned 35 degrees by its `transform`.
+// Needs binary version 3 (units, spread, transform).
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 300, background = #0f1220 }
+  defs::
+    { type = "linear_gradient", id = "sweep", x1 = 0.0, y1 = 0.0, x2 = 640.0, y2 = 0.0, units = "user_space",
+      stops = [ { offset = 0.0, color = #f7971e, opacity = 1.0 }, { offset = 0.5, color = #e94560, opacity = 1.0 }, { offset = 1.0, color = #4a9eff, opacity = 1.0 } ] }
+    { type = "linear_gradient", id = "stripes", x1 = 0.0, y1 = 0.0, x2 = 18.0, y2 = 0.0, units = "user_space",
+      spread = "repeat", transform = "rotate(35)",
+      stops = [ { offset = 0.0, color = #f5a623, opacity = 1.0 }, { offset = 0.5, color = #f5a623, opacity = 1.0 }, { offset = 0.5, color = #1d2540, opacity = 1.0 }, { offset = 1.0, color = #1d2540, opacity = 1.0 } ] }
+  elements::
+    { type = "circle", cx = 110, cy = 100, r = 70,
+      style = { fill = "url(#sweep)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 230, y = 40, width = 160, height = 120,
+      style = { fill = "url(#sweep)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 420, y = 40, width = 200, height = 120,
+      style = { fill = "url(#stripes)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "line", x1 = 20, y1 = 230, x2 = 620, y2 = 230,
+      style = { fill = "none", stroke = "url(#sweep)", stroke_width = 14, stroke_linecap = "round", opacity = 1.0 } }
+    { type = "text", x = 110, y = 188, content = "one gradient, three shapes",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 520, y = 188, content = "rotate(35), repeat",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 320, y = 268, content = "a line has no box area",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

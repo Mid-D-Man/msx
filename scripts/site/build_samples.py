@@ -13,6 +13,7 @@ rasterize failure is non-fatal to the corpus step).
 """
 
 import html
+import urllib.parse
 import json
 
 from templates import page
@@ -114,6 +115,7 @@ def build_samples_page(examples: list) -> str:
   <div class="sample-preview">{_preview(ex)}</div>
   <div class="sample-meta">
     <div class="name">{html.escape(ex["name"])}</div>
+    <div class="sample-open"><a href="/playground/#example={urllib.parse.quote(ex["name"])}">Open in playground</a></div>
     {_badges(ex)}
     {_gpu_note(ex)}
   </div>

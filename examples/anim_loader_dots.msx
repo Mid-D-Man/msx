@@ -1,0 +1,118 @@
+// examples/anim_loader_dots.msx
+// A three-dot loader. Made from examples/svg/loader_dots.svg with `msx import`, so it
+// shows what the importer writes for SVG `animate` on `r` and `opacity` with delayed
+// `begin` times: scale and opacity tracks, one phase-shifted copy per dot, looping.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 200, height = 80, background = "#00000000" }
+  duration = 1.2
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 200, height = 80, style = { fill = #0f1220 } }
+    { type = "layer", blend_mode = "normal", opacity = 1, id = "anim2",
+      elements = [
+        { type = "group", transform = "translate(50 40)",
+          elements = [
+            { type = "group", id = "anim1",
+              elements = [
+                { type = "group", transform = "translate(-50 -40)",
+                  elements = [
+                    { type = "circle", cx = 50, cy = 40, r = 10, style = { fill = #4a9eff } }
+                  ] }
+              ] }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1, id = "anim4",
+      elements = [
+        { type = "group", transform = "translate(100 40)",
+          elements = [
+            { type = "group", id = "anim3",
+              elements = [
+                { type = "group", transform = "translate(-100 -40)",
+                  elements = [
+                    { type = "circle", cx = 100, cy = 40, r = 10, style = { fill = #4a9eff } }
+                  ] }
+              ] }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1, id = "anim6",
+      elements = [
+        { type = "group", transform = "translate(150 40)",
+          elements = [
+            { type = "group", id = "anim5",
+              elements = [
+                { type = "group", transform = "translate(-150 -40)",
+                  elements = [
+                    { type = "circle", cx = 150, cy = 40, r = 10, style = { fill = #4a9eff } }
+                  ] }
+              ] }
+          ] }
+      ] }
+  animations::
+    { target_id = "anim1", property = "scale_x",
+      keyframes = [
+        { time = 0.0, value = 1.0 },
+        { time = 0.6, value = 1.6 },
+        { time = 1.2, value = 1.0 }
+      ] }
+    { target_id = "anim1", property = "scale_y",
+      keyframes = [
+        { time = 0.0, value = 1.0 },
+        { time = 0.6, value = 1.6 },
+        { time = 1.2, value = 1.0 }
+      ] }
+    { target_id = "anim2", property = "opacity",
+      keyframes = [
+        { time = 0.0, value = 1.0 },
+        { time = 0.6, value = 0.35 },
+        { time = 1.2, value = 1.0 }
+      ] }
+    { target_id = "anim3", property = "scale_x",
+      keyframes = [
+        { time = 0.0, value = 1.2 },
+        { time = 0.19899999999999995, value = 1.001 },
+        { time = 0.19999999999999996, value = 1.0 },
+        { time = 0.7999999999999999, value = 1.6 },
+        { time = 1.2, value = 1.2 }
+      ] }
+    { target_id = "anim3", property = "scale_y",
+      keyframes = [
+        { time = 0.0, value = 1.2 },
+        { time = 0.19899999999999995, value = 1.001 },
+        { time = 0.19999999999999996, value = 1.0 },
+        { time = 0.7999999999999999, value = 1.6 },
+        { time = 1.2, value = 1.2 }
+      ] }
+    { target_id = "anim4", property = "opacity",
+      keyframes = [
+        { time = 0.0, value = 0.7833333333333334 },
+        { time = 0.19899999999999995, value = 0.9989166666666667 },
+        { time = 0.19999999999999996, value = 1.0 },
+        { time = 0.7999999999999999, value = 0.35 },
+        { time = 1.2, value = 0.7833333333333334 }
+      ] }
+    { target_id = "anim5", property = "scale_x",
+      keyframes = [
+        { time = 0.0, value = 1.4000000000000001 },
+        { time = 0.399, value = 1.001 },
+        { time = 0.4, value = 1.0 },
+        { time = 1.0, value = 1.6 },
+        { time = 1.2, value = 1.4000000000000001 }
+      ] }
+    { target_id = "anim5", property = "scale_y",
+      keyframes = [
+        { time = 0.0, value = 1.4000000000000001 },
+        { time = 0.399, value = 1.001 },
+        { time = 0.4, value = 1.0 },
+        { time = 1.0, value = 1.6 },
+        { time = 1.2, value = 1.4000000000000001 }
+      ] }
+    { target_id = "anim6", property = "opacity",
+      keyframes = [
+        { time = 0.0, value = 0.5666666666666667 },
+        { time = 0.399, value = 0.9989166666666667 },
+        { time = 0.4, value = 1.0 },
+        { time = 1.0, value = 0.35 },
+        { time = 1.2, value = 0.5666666666666667 }
+      ] }
+)

@@ -13,6 +13,7 @@ example on a docs page cannot drift from the file it shows.
 """
 
 import html
+import urllib.parse
 import pathlib
 import re
 import sys
@@ -235,6 +236,7 @@ def make_directive(repo_root: pathlib.Path, examples: list):
         open_attr = " open" if line_count <= 30 else ""
         caption = (
             f'<figcaption><code>examples/{html.escape(name)}.msx</code> · {line_count} lines · '
+            f'<a href="/playground/#example={urllib.parse.quote(name)}">open in playground</a> · '
             f'<a href="/samples/">all samples</a></figcaption>'
         )
         if "nosource" in opts:

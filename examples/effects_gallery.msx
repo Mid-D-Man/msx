@@ -1,0 +1,44 @@
+// examples/effects_gallery.msx
+// The five layer effects on the same circle. Effects apply to the whole layer after
+// its children are composited, in the order listed. The GPU renderer applies only
+// `blur`; the SVG renderer and the CPU rasterizer draw all five.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 230, background = #2b3248 }
+  elements::
+    { type = "layer", effects = [ { type = "blur", radius = 4 } ],
+      elements = [
+        { type = "circle", cx = 64, cy = 100, r = 38,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 64, y = 190, content = "blur",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", effects = [ { type = "drop_shadow", offset_x = 6, offset_y = 8, blur_radius = 6, color = #000000, opacity = 0.6 } ],
+      elements = [
+        { type = "circle", cx = 192, cy = 100, r = 38,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 192, y = 190, content = "drop_shadow",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", effects = [ { type = "inner_shadow", offset_x = 4, offset_y = 6, blur_radius = 6, color = #000000, opacity = 0.7 } ],
+      elements = [
+        { type = "circle", cx = 320, cy = 100, r = 38,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 320, y = 190, content = "inner_shadow",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", effects = [ { type = "outer_glow", color = #4a9eff, blur_radius = 14, spread = 2, opacity = 0.9 } ],
+      elements = [
+        { type = "circle", cx = 448, cy = 100, r = 38,
+          style = { fill = #1d2540, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 448, y = 190, content = "outer_glow",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", effects = [ { type = "inner_glow", color = #ffffff, blur_radius = 14, opacity = 0.9 } ],
+      elements = [
+        { type = "circle", cx = 576, cy = 100, r = 38,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 576, y = 190, content = "inner_glow",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

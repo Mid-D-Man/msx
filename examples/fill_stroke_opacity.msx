@@ -1,0 +1,23 @@
+// examples/fill_stroke_opacity.msx
+// `fill_opacity` and `stroke_opacity` fade one channel each, and they multiply with
+// `opacity`. The light band behind the circles shows the transparency.
+// Both keys need binary version 3 in a compiled file.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 250, background = #0f1220 }
+  elements::
+    { type = "rect", x = 0, y = 95, width = 640, height = 40,
+      style = { fill = #e2e8f0, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "circle", cx = 120, cy = 115, r = 55,
+      style = { fill = #4a9eff, stroke = #f2545b, stroke_width = 18, fill_opacity = 0.25, opacity = 1.0 } }
+    { type = "text", x = 120, y = 205, content = "fill_opacity = 0.25",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "circle", cx = 320, cy = 115, r = 55,
+      style = { fill = #4a9eff, stroke = #f2545b, stroke_width = 18, stroke_opacity = 0.25, opacity = 1.0 } }
+    { type = "text", x = 320, y = 205, content = "stroke_opacity = 0.25",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "circle", cx = 520, cy = 115, r = 55,
+      style = { fill = #4a9eff, stroke = #f2545b, stroke_width = 18, fill_opacity = 0.5, stroke_opacity = 0.5, opacity = 0.8 } }
+    { type = "text", x = 520, y = 205, content = "both 0.5, opacity 0.8",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

@@ -28,6 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from build_docs import build_all as build_all_docs
 from build_convert import build_convert_page
+from build_examples import write as write_examples
 from build_home import build_home_page
 from build_playground import build_playground_page
 from build_samples import build_samples_page
@@ -80,8 +81,11 @@ def main():
     print("Building playground page...")
     _write(out_dir, "playground/index.html", build_playground_page())
 
+    print("Publishing examples for the playground...")
+    write_examples(repo_root, out_dir / "playground" / "examples")
+
     print("Building converter page...")
-    _write(out_dir, "convert/index.html", build_convert_page())
+    _write(out_dir, "convert/index.html", build_convert_page(repo_root))
 
     static_src = pathlib.Path(__file__).parent / "static"
     if static_src.exists():

@@ -1,0 +1,262 @@
+{
+  "categories": [
+    {
+      "id": "start",
+      "title": "Getting started"
+    },
+    {
+      "id": "paint",
+      "title": "Gradients and paint"
+    },
+    {
+      "id": "layers",
+      "title": "Layers and compositing"
+    },
+    {
+      "id": "anim",
+      "title": "Animation"
+    },
+    {
+      "id": "sdf",
+      "title": "SDF and splats"
+    },
+    {
+      "id": "native",
+      "title": "Needs a native renderer"
+    },
+    {
+      "id": "more",
+      "title": "More"
+    }
+  ],
+  "hidden": [
+    "shader_placeholder(1).msx"
+  ],
+  "examples": [
+    {
+      "file": "basic_shapes.msx",
+      "title": "Basic shapes",
+      "category": "start",
+      "description": "A QuickFunc that builds a shape from a type name, used for a circle and its label."
+    },
+    {
+      "file": "path_demo.msx",
+      "title": "Paths",
+      "category": "start",
+      "description": "Straight, cubic and arc path commands, filled and stroked."
+    },
+    {
+      "file": "text_demo.msx",
+      "title": "Text",
+      "category": "start",
+      "description": "A gradient title, bold and regular text, accents and the three text anchors."
+    },
+    {
+      "file": "stroke_styles.msx",
+      "title": "Stroke styles",
+      "category": "start",
+      "description": "Dash arrays, line caps and line joins, with the true ends of the strokes marked."
+    },
+    {
+      "file": "groups_and_use.msx",
+      "title": "Groups and use",
+      "category": "start",
+      "description": "One group built once and drawn six times with use."
+    },
+    {
+      "file": "parametric.msx",
+      "title": "Parametric badges",
+      "category": "start",
+      "description": "Badges built by a QuickFunc that returns a group, called with different labels and colors."
+    },
+    {
+      "file": "gradients.msx",
+      "title": "Gradients",
+      "category": "paint",
+      "description": "Two linear gradients and a radial gradient on rectangles and a circle."
+    },
+    {
+      "file": "gradient_demo.msx",
+      "title": "Gradient gallery",
+      "category": "paint",
+      "description": "Linear, radial and conic gradients on rectangles and circles."
+    },
+    {
+      "file": "gradient_spread.msx",
+      "title": "Gradient spread",
+      "category": "paint",
+      "description": "pad, reflect and repeat on the same gradient, and a radial gradient that repeats in rings."
+    },
+    {
+      "file": "gradient_user_space.msx",
+      "title": "Gradient units and transform",
+      "category": "paint",
+      "description": "A user-space gradient shared by a circle, a rect and a line, and a repeating stripe gradient turned by a transform."
+    },
+    {
+      "file": "gradient_radial_focal.msx",
+      "title": "Radial focal point and fr",
+      "category": "paint",
+      "description": "A focal point inside and outside the circle, and fr as a ring and larger than r."
+    },
+    {
+      "file": "fill_stroke_opacity.msx",
+      "title": "Fill and stroke opacity",
+      "category": "paint",
+      "description": "fill_opacity and stroke_opacity fade one channel each, over a light band."
+    },
+    {
+      "file": "blend_modes.msx",
+      "title": "Blend modes",
+      "category": "layers",
+      "description": "Eight blend modes on the same circle over the same gradient."
+    },
+    {
+      "file": "effects_gallery.msx",
+      "title": "Layer effects",
+      "category": "layers",
+      "description": "blur, drop shadow, inner shadow, outer glow and inner glow on one circle.",
+      "note": "The GPU renderer draws only the blur. This preview is the SVG renderer, which draws all five."
+    },
+    {
+      "file": "clip_and_mask.msx",
+      "title": "Clip path and mask",
+      "category": "layers",
+      "description": "A layer cut by a clip path, and a layer faded by a luminance mask."
+    },
+    {
+      "file": "layer_swap_front.msx",
+      "title": "Layers: opacity swap",
+      "category": "layers",
+      "description": "Two overlapping layers that trade places by animating opacity."
+    },
+    {
+      "file": "layer_z_index_swap.msx",
+      "title": "Layers: z_index swap",
+      "category": "layers",
+      "description": "Two layers whose paint order really swaps over time through z_index."
+    },
+    {
+      "file": "orbit_pulse.msx",
+      "title": "Orbit and pulse",
+      "category": "anim",
+      "description": "A wobbling box and a dot that moves, scales and fades with eased keyframes."
+    },
+    {
+      "file": "anim_loader_dots.msx",
+      "title": "Loader dots",
+      "category": "anim",
+      "description": "A three-dot loader with delayed, repeating scale and opacity, made by importing an SVG."
+    },
+    {
+      "file": "anim_clock.msx",
+      "title": "Clock",
+      "category": "anim",
+      "description": "A time-lapse clock with two rotating hands, made by importing an SVG."
+    },
+    {
+      "file": "anim_motion_path.msx",
+      "title": "Motion path",
+      "category": "anim",
+      "description": "An arrow that follows a curve and turns with it, and a square that ping-pongs, made by importing animateMotion."
+    },
+    {
+      "file": "anim_set_and_steps.msx",
+      "title": "Set, visibility and steps",
+      "category": "anim",
+      "description": "Elements that appear on a set, a blinking dot and a bar that fills in five jumps, made by importing SVG."
+    },
+    {
+      "file": "sdf_shapes.msx",
+      "title": "SDF shapes",
+      "category": "sdf",
+      "description": "Signed distance primitives and their boolean operations, with smooth blending."
+    },
+    {
+      "file": "sdf_logo.msx",
+      "title": "SDF logo",
+      "category": "sdf",
+      "description": "The letters M, S and X built from SDF primitives, lit by splats."
+    },
+    {
+      "file": "sdf_splat_mixed.msx",
+      "title": "SDF and splats together",
+      "category": "sdf",
+      "description": "Hard vector shapes, SDF booleans and Gaussian splat atmosphere in one scene."
+    },
+    {
+      "file": "sdf_splat_orbit(3).msx",
+      "title": "SDF and splats, animated",
+      "category": "sdf",
+      "description": "The mixed scene with a splat bloom that breathes in step with the SDF blob.",
+      "id": "sdf_splat_orbit"
+    },
+    {
+      "file": "splat_atmosphere.msx",
+      "title": "Splat atmosphere",
+      "category": "sdf",
+      "description": "Gaussian splats as soft, additive glowing ellipses."
+    },
+    {
+      "file": "splat_gradient_fill.msx",
+      "title": "Splat with a gradient fill",
+      "category": "sdf",
+      "description": "A Gaussian splat filled by a gradient reference."
+    },
+    {
+      "file": "shader_placeholder.msx",
+      "title": "Shader: plasma",
+      "category": "native",
+      "description": "A shape filled by a WGSL plasma shader.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "shader_checkerboard.msx",
+      "title": "Shader: checkerboard",
+      "category": "native",
+      "description": "A diagnostic checkerboard shader on a shape.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "shader_orb.msx",
+      "title": "Shader: raymarched orb",
+      "category": "native",
+      "description": "A raymarched, rim-lit orb from a WGSL shader.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "layer_shader_fill.msx",
+      "title": "Shader fills inside a layer",
+      "category": "native",
+      "description": "Shader fills on a shape, an SDF node and a splat that sit inside a layer.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "sdf_shader_fill.msx",
+      "title": "SDF with a shader fill",
+      "category": "native",
+      "description": "A shader masked to the true silhouette of an SDF node.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "splat_shader_fill.msx",
+      "title": "Splat with a shader fill",
+      "category": "native",
+      "description": "A shader masked to the falloff of a Gaussian splat.",
+      "note": "Shader fills run in the GPU renderer. This preview is the SVG renderer, which draws the shape without the shader."
+    },
+    {
+      "file": "image_audio_demo.msx",
+      "title": "Image and audio",
+      "category": "native",
+      "description": "Embedded and referenced images, and an audio def.",
+      "note": "Audio is not played here, and an image that is a file path cannot be read by the browser."
+    },
+    {
+      "file": "mid-qr-k.msx",
+      "title": "QR code",
+      "category": "more",
+      "description": "A QR code drawn with paths and rectangles by the mid-qr generator."
+    }
+  ]
+}

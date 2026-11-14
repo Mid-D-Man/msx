@@ -1,0 +1,84 @@
+// examples/blend_modes.msx
+// Eight blend modes. Every cell paints the same gradient, then an orange circle in a
+// layer whose `blend_mode` is named under the cell. The circle is blended with
+// whatever is painted below the layer.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 430, background = #0f1220 }
+  defs::
+    { type = "linear_gradient", id = "backdrop", x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 1.0,
+      stops = [ { offset = 0.0, color = #2c7be5, opacity = 1.0 }, { offset = 0.35, color = #2ecc71, opacity = 1.0 }, { offset = 0.65, color = #f1c40f, opacity = 1.0 }, { offset = 1.0, color = #e74c3c, opacity = 1.0 } ] }
+  elements::
+    { type = "rect", x = 20, y = 20, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "multiply",
+      elements = [
+        { type = "circle", cx = 90, cy = 90, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 90, y = 182, content = "multiply",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 175, y = 20, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "screen",
+      elements = [
+        { type = "circle", cx = 245, cy = 90, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 245, y = 182, content = "screen",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 330, y = 20, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "overlay",
+      elements = [
+        { type = "circle", cx = 400, cy = 90, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 400, y = 182, content = "overlay",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 485, y = 20, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "difference",
+      elements = [
+        { type = "circle", cx = 555, cy = 90, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 555, y = 182, content = "difference",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 20, y = 220, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "color_dodge",
+      elements = [
+        { type = "circle", cx = 90, cy = 290, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 90, y = 382, content = "color_dodge",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 175, y = 220, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "hue",
+      elements = [
+        { type = "circle", cx = 245, cy = 290, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 245, y = 382, content = "hue",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 330, y = 220, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "luminosity",
+      elements = [
+        { type = "circle", cx = 400, cy = 290, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 400, y = 382, content = "luminosity",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 485, y = 220, width = 140, height = 140,
+      style = { fill = "url(#backdrop)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "layer", blend_mode = "plus_lighter",
+      elements = [
+        { type = "circle", cx = 555, cy = 290, r = 48,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 555, y = 382, content = "plus_lighter",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

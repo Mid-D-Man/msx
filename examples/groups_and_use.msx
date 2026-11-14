@@ -1,0 +1,29 @@
+// examples/groups_and_use.msx
+// A `group` moves a bundle of shapes together, and `use` draws another copy of any
+// element that has an `id`. The badge is built once as a group, then used six times.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 260, background = #0f1220 }
+  defs::
+    { type = "linear_gradient", id = "chip", x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 1.0,
+      stops = [ { offset = 0.0, color = #4a9eff, opacity = 1.0 }, { offset = 1.0, color = #2c3e9e, opacity = 1.0 } ] }
+  elements::
+    { type = "group", id = "badge", transform = "translate(40, 30)",
+      elements = [
+        { type = "rect", x = 0, y = 0, width = 80, height = 44,
+          style = { fill = "url(#chip)", stroke = #8fb8ff, stroke_width = 2, opacity = 1.0 } },
+        { type = "circle", cx = 20, cy = 22, r = 8,
+          style = { fill = #f7971e, stroke = "none", stroke_width = 0, opacity = 1.0 } },
+        { type = "rect", x = 36, y = 14, width = 34, height = 6,
+          style = { fill = #ffffff, stroke = "none", stroke_width = 0, opacity = 0.9 } },
+        { type = "rect", x = 36, y = 26, width = 22, height = 6,
+          style = { fill = #ffffff, stroke = "none", stroke_width = 0, opacity = 0.55 } }
+      ] }
+    { type = "use", href = "#badge", x = 180, y = 0 }
+    { type = "use", href = "#badge", x = 360, y = 0 }
+    { type = "use", href = "#badge", x = 0, y = 90 }
+    { type = "use", href = "#badge", x = 180, y = 90 }
+    { type = "use", href = "#badge", x = 360, y = 90 }
+    { type = "text", x = 40, y = 200, content = "one group, six uses",
+      style = { fill = #cbd5e1, font_size = 13, text_anchor = "start", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

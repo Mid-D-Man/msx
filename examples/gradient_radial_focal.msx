@@ -1,0 +1,44 @@
+// examples/gradient_radial_focal.msx
+// The four things a radial gradient can do besides a plain circle. A focal point
+// inside the circle moves the highlight. A focal point outside it makes a cone,
+// and nothing is painted outside the cone (the dark tile shows through). `fr`
+// starts the gradient on a ring. An `fr` larger than `r` runs it inward.
+// `fr` needs binary version 3.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 230, background = #0f1220 }
+  defs::
+    { type = "radial_gradient", id = "inside", cx = 0.5, cy = 0.5, r = 0.5, fx = 0.3, fy = 0.3,
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #e94560, opacity = 1.0 } ] }
+    { type = "radial_gradient", id = "cone", cx = 0.3, cy = 0.5, r = 0.2, fx = 0.9, fy = 0.5,
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #e94560, opacity = 1.0 } ] }
+    { type = "radial_gradient", id = "ring", cx = 0.5, cy = 0.5, r = 0.5, fx = 0.5, fy = 0.5, fr = 0.25,
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #e94560, opacity = 1.0 } ] }
+    { type = "radial_gradient", id = "inward", cx = 0.5, cy = 0.5, r = 0.3, fx = 0.5, fy = 0.5, fr = 0.5,
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #e94560, opacity = 1.0 } ] }
+  elements::
+    { type = "rect", x = 20, y = 30, width = 140, height = 140,
+      style = { fill = #1d2540, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 20, y = 30, width = 140, height = 140,
+      style = { fill = "url(#inside)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 90, y = 196, content = "focal point inside",
+      style = { fill = #cbd5e1, font_size = 11, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 175, y = 30, width = 140, height = 140,
+      style = { fill = #1d2540, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 175, y = 30, width = 140, height = 140,
+      style = { fill = "url(#cone)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 245, y = 196, content = "focal point outside: a cone",
+      style = { fill = #cbd5e1, font_size = 11, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 330, y = 30, width = 140, height = 140,
+      style = { fill = #1d2540, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 330, y = 30, width = 140, height = 140,
+      style = { fill = "url(#ring)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 400, y = 196, content = "fr = 0.25: a ring",
+      style = { fill = #cbd5e1, font_size = 11, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 485, y = 30, width = 140, height = 140,
+      style = { fill = #1d2540, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "rect", x = 485, y = 30, width = 140, height = 140,
+      style = { fill = "url(#inward)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 555, y = 196, content = "fr larger than r",
+      style = { fill = #cbd5e1, font_size = 11, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)

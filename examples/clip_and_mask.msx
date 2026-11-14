@@ -1,0 +1,33 @@
+// examples/clip_and_mask.msx
+// A layer `clip_path` cuts its children to a shape (left, striped by a repeating
+// user-space gradient). A layer `mask` with
+// mask_type "luminance" fades them by the brightness of the mask (right): white
+// keeps the child, black hides it.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 280, background = #0f1220 }
+  defs::
+    { type = "linear_gradient", id = "bars", x1 = 40.0, y1 = 30.0, x2 = 76.0, y2 = 30.0, units = "user_space", spread = "repeat",
+      transform = "rotate(30)",
+      stops = [ { offset = 0.0, color = #f7971e, opacity = 1.0 }, { offset = 0.5, color = #e94560, opacity = 1.0 }, { offset = 1.0, color = #4a9eff, opacity = 1.0 } ] }
+    { type = "linear_gradient", id = "fade", x1 = 0.0, y1 = 0.0, x2 = 1.0, y2 = 0.0,
+      stops = [ { offset = 0.0, color = #ffffff, opacity = 1.0 }, { offset = 1.0, color = #000000, opacity = 1.0 } ] }
+  elements::
+    { type = "layer",
+      clip_path = [ { type = "circle", cx = 160, cy = 130, r = 100 } ],
+      elements = [
+        { type = "rect", x = 40, y = 30, width = 240, height = 200,
+          style = { fill = "url(#bars)", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "layer", mask_type = "luminance",
+      mask = [ { type = "rect", x = 360, y = 30, width = 240, height = 200,
+                 style = { fill = "url(#fade)", stroke = "none", stroke_width = 0, opacity = 1.0 } } ],
+      elements = [
+        { type = "circle", cx = 480, cy = 130, r = 100,
+          style = { fill = #4a9eff, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+      ] }
+    { type = "text", x = 160, y = 262, content = "clip_path",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 480, y = 262, content = "luminance mask",
+      style = { fill = #cbd5e1, font_size = 12, text_anchor = "middle", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
