@@ -932,3 +932,54 @@ fn roundtrip_gradient_units_spread_and_transform() {
     assert!(svg.matches("gradientTransform=\"matrix(").count() == 2, "{svg}");
     assert!(svg.contains("fr=\"0.05\""), "{svg}");
 }
+
+// ── Wire version 3: style animation channels ─────────────────────────────────
+
+const V3_STYLE_TRACKS_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 100, height = 100, background = #ffffff }
+  duration = 2.0
+  loop_mode = "loop"
+  elements::
+    { type = "circle", id = "dot", cx = 50, cy = 50, r = 30,
+      style = { fill = #ff0000, stroke = #000000, stroke_width = 2, stroke_dasharray = [63], opacity = 1.0 } }
+  animations::
+    { target_id = "dot", property = "fill_b",
+      keyframes = [ { time = 0.0, value = 0.0 }, { time = 1.0, value = 255.0 }, { time = 2.0, value = 0.0 } ] }
+    { target_id = "dot", property = "fill_a",
+      keyframes = [ { time = 0.0, value = 255.0 }, { time = 2.0, value = 64.0, easing = "ease_in_out" } ] }
+    { target_id = "dot", property = "stroke_r",
+      keyframes = [ { time = 0.0, value = 0.0 }, { time = 2.0, value = 200.0 } ] }
+    { target_id = "dot", property = "stroke_width",
+      keyframes = [ { time = 0.0, value = 2.0 }, { time = 1.0, value = 6.0 }, { time = 2.0, value = 2.0 } ] }
+    { target_id = "dot", property = "dash_offset",
+      keyframes = [ { time = 0.0, value = 63.0 }, { time = 2.0, value = 0.0 } ] }
+)
+"#;
+
+#[test]
+fn roundtrip_style_animation_channels_and_their_wire_version() {
+    check_roundtrip("v3_style_tracks", V3_STYLE_TRACKS_SOURCE);
+    let scene_a = parse_scene(V3_STYLE_TRACKS_SOURCE).unwrap();
+    assert_eq!(scene_a.animations.len(), 5);
+    for compress in [false, true] {
+        let binary = compile(&scene_a, compress).unwrap();
+        assert_eq!(binary[4], 3, "compress={compress}: a style channel needs version 3");
+        let scene_b = decode(&binary).unwrap();
+        assert_eq!(scene_a.animations.len(), scene_b.animations.len());
+        for (ta, tb) in scene_a.animations.iter().zip(&scene_b.animations) {
+            assert_eq!((&ta.target_id, ta.property), (&tb.target_id, tb.property));
+            assert_eq!(ta.keyframes.len(), tb.keyframes.len());
+            for (ka, kb) in ta.keyframes.iter().zip(&tb.keyframes) {
+                assert!(approx_eq(ka.time, kb.time) && approx_eq(ka.value, kb.value));
+                assert_eq!(ka.easing, kb.easing);
+            }
+        }
+    }
+    // The same scene without the style tracks stays version 2.
+    let mut plain = scene_a.clone();
+    plain.animations.retain(|t| !t.property.is_style());
+    assert!(plain.animations.is_empty());
+    assert_eq!(compile(&plain, false).unwrap()[4], 2);
+}

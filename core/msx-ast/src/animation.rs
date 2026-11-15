@@ -6,7 +6,9 @@
 //!
 //! - Tracks live on `Scene.animations[]`, targeting elements by id string
 //!   — avoids touching all 13 element structs just to add animation.
-//! - Channels are TRS+opacity only — matches Lottie/AE/Rive convention.
+//! - Channels are TRS, opacity and z-index (wire version 2), plus ten style
+//!   channels for fill and stroke color, stroke width and dash offset (wire
+//!   version 3).
 //! - Easing describes arriving *into* a keyframe (destination keyframe's
 //!   easing applies). First keyframe's easing is never consulted.
 //! - Time outside [first, last] keyframe holds at that endpoint's value.
@@ -94,6 +96,23 @@ pub enum AnimatedProperty {
     /// variant rather than a real neutral value ever folded through the
     /// usual per-channel arithmetic.
     ZIndex,
+    /// Red, green, blue and alpha of the fill color, each 0 to 255. These ten
+    /// style channels (`FillR` to `DashOffset`) are wire version 3: a track that
+    /// uses one makes the file version 3. They replace the value on the shape
+    /// itself, so they are not additive. See `msx-anim`'s `AnimatedDelta`.
+    FillR,
+    FillG,
+    FillB,
+    FillA,
+    /// Red, green, blue and alpha of the stroke color, each 0 to 255.
+    StrokeR,
+    StrokeG,
+    StrokeB,
+    StrokeA,
+    /// Stroke width in user units, never below 0.
+    StrokeWidth,
+    /// Dash offset in user units.
+    DashOffset,
 }
 
 impl AnimatedProperty {
@@ -106,6 +125,16 @@ impl AnimatedProperty {
             AnimatedProperty::Rotate     => 4,
             AnimatedProperty::Opacity    => 5,
             AnimatedProperty::ZIndex     => 6,
+            AnimatedProperty::FillR       => 7,
+            AnimatedProperty::FillG       => 8,
+            AnimatedProperty::FillB       => 9,
+            AnimatedProperty::FillA       => 10,
+            AnimatedProperty::StrokeR     => 11,
+            AnimatedProperty::StrokeG     => 12,
+            AnimatedProperty::StrokeB     => 13,
+            AnimatedProperty::StrokeA     => 14,
+            AnimatedProperty::StrokeWidth => 15,
+            AnimatedProperty::DashOffset  => 16,
         }
     }
 
@@ -118,6 +147,16 @@ impl AnimatedProperty {
             4 => Some(AnimatedProperty::Rotate),
             5 => Some(AnimatedProperty::Opacity),
             6 => Some(AnimatedProperty::ZIndex),
+            7 => Some(AnimatedProperty::FillR),
+            8 => Some(AnimatedProperty::FillG),
+            9 => Some(AnimatedProperty::FillB),
+            10 => Some(AnimatedProperty::FillA),
+            11 => Some(AnimatedProperty::StrokeR),
+            12 => Some(AnimatedProperty::StrokeG),
+            13 => Some(AnimatedProperty::StrokeB),
+            14 => Some(AnimatedProperty::StrokeA),
+            15 => Some(AnimatedProperty::StrokeWidth),
+            16 => Some(AnimatedProperty::DashOffset),
             _ => None,
         }
     }
@@ -131,6 +170,16 @@ impl AnimatedProperty {
             "rotate"      => Some(AnimatedProperty::Rotate),
             "opacity"     => Some(AnimatedProperty::Opacity),
             "z_index"     => Some(AnimatedProperty::ZIndex),
+            "fill_r"       => Some(AnimatedProperty::FillR),
+            "fill_g"       => Some(AnimatedProperty::FillG),
+            "fill_b"       => Some(AnimatedProperty::FillB),
+            "fill_a"       => Some(AnimatedProperty::FillA),
+            "stroke_r"     => Some(AnimatedProperty::StrokeR),
+            "stroke_g"     => Some(AnimatedProperty::StrokeG),
+            "stroke_b"     => Some(AnimatedProperty::StrokeB),
+            "stroke_a"     => Some(AnimatedProperty::StrokeA),
+            "stroke_width" => Some(AnimatedProperty::StrokeWidth),
+            "dash_offset"  => Some(AnimatedProperty::DashOffset),
             _             => None,
         }
     }
@@ -144,7 +193,23 @@ impl AnimatedProperty {
             AnimatedProperty::Rotate     => "rotate",
             AnimatedProperty::Opacity    => "opacity",
             AnimatedProperty::ZIndex     => "z_index",
+            AnimatedProperty::FillR       => "fill_r",
+            AnimatedProperty::FillG       => "fill_g",
+            AnimatedProperty::FillB       => "fill_b",
+            AnimatedProperty::FillA       => "fill_a",
+            AnimatedProperty::StrokeR     => "stroke_r",
+            AnimatedProperty::StrokeG     => "stroke_g",
+            AnimatedProperty::StrokeB     => "stroke_b",
+            AnimatedProperty::StrokeA     => "stroke_a",
+            AnimatedProperty::StrokeWidth => "stroke_width",
+            AnimatedProperty::DashOffset  => "dash_offset",
         }
+    }
+
+    /// Whether this is one of the ten style channels (`FillR` to
+    /// `DashOffset`), which need wire version 3.
+    pub fn is_style(self) -> bool {
+        self.to_byte() >= 7
     }
 
     /// The value an unanimated channel implicitly has — 1.0 for scale/opacity
@@ -332,11 +397,29 @@ mod tests {
             AnimatedProperty::ScaleX,     AnimatedProperty::ScaleY,
             AnimatedProperty::Rotate,     AnimatedProperty::Opacity,
             AnimatedProperty::ZIndex,
+            AnimatedProperty::FillR,      AnimatedProperty::FillG,
+            AnimatedProperty::FillB,      AnimatedProperty::FillA,
+            AnimatedProperty::StrokeR,    AnimatedProperty::StrokeG,
+            AnimatedProperty::StrokeB,    AnimatedProperty::StrokeA,
+            AnimatedProperty::StrokeWidth, AnimatedProperty::DashOffset,
         ];
-        for p in all {
+        for (i, p) in all.into_iter().enumerate() {
+            assert_eq!(p.to_byte() as usize, i);
             assert_eq!(AnimatedProperty::from_byte(p.to_byte()), Some(p));
+            assert_eq!(AnimatedProperty::parse(p.to_dixscript_str()), Some(p));
         }
+        assert_eq!(AnimatedProperty::from_byte(17), None);
         assert_eq!(AnimatedProperty::from_byte(99), None);
+    }
+
+    #[test]
+    fn only_the_ten_style_channels_are_style() {
+        for b in 0..=6u8 {
+            assert!(!AnimatedProperty::from_byte(b).unwrap().is_style());
+        }
+        for b in 7..=16u8 {
+            assert!(AnimatedProperty::from_byte(b).unwrap().is_style());
+        }
     }
 
     #[test]

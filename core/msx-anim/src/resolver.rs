@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use msx_ast::{AnimationTrack, Element, Scene, Style};
+use msx_ast::{AnimationTrack, Color, Element, Paint, Scene, Style};
 
 use crate::delta::AnimatedDelta;
 
@@ -67,30 +67,37 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
         Element::Rect(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Circle(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Ellipse(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Line(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Polyline(e) | Element::Polygon(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Path(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Text(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
+            apply_style(&mut e.style, &delta);
         }
         Element::Group(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
@@ -137,4 +144,34 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
 
 fn apply_opacity(style: &mut Style, opacity_delta: f64) {
     style.opacity = Some(style.opacity.unwrap_or(1.0) * opacity_delta);
+}
+
+/// Writes the style channels onto a shape's own style. Each channel replaces
+/// the value (a channel no track touches keeps it). A color channel starts
+/// from the shape's color, or from black when the paint is not a color
+/// (none, a gradient or pattern reference, `currentColor`, or unset), so the
+/// first color track on such a paint turns it into a plain color. Group style
+/// is not read by the CPU and GPU renderers, so groups are left alone.
+fn apply_style(style: &mut Style, delta: &AnimatedDelta) {
+    if delta.fill.iter().any(Option::is_some) {
+        style.fill = Some(Paint::Color(animated_color(style.fill.as_ref(), &delta.fill)));
+    }
+    if delta.stroke.iter().any(Option::is_some) {
+        style.stroke = Some(Paint::Color(animated_color(style.stroke.as_ref(), &delta.stroke)));
+    }
+    if let Some(w) = delta.stroke_width {
+        style.stroke_width = Some(w.max(0.0));
+    }
+    if let Some(o) = delta.dash_offset {
+        style.stroke_dashoffset = Some(o);
+    }
+}
+
+fn animated_color(paint: Option<&Paint>, channels: &[Option<f64>; 4]) -> Color {
+    let base = match paint {
+        Some(Paint::Color(c)) => *c,
+        _ => Color::BLACK,
+    };
+    let pick = |value: Option<f64>, fallback: u8| value.map_or(fallback, |v| v.round().clamp(0.0, 255.0) as u8);
+    Color::rgba(pick(channels[0], base.r), pick(channels[1], base.g), pick(channels[2], base.b), pick(channels[3], base.a))
 }

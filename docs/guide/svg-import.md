@@ -44,7 +44,9 @@ SMIL animation is imported into MSX animation tracks. The written `.msx` source 
 | `animate` of `fill-opacity` on a shape that paints only its fill, or of `stroke-opacity` on a shape that paints only its stroke | An `opacity` track on a wrapper layer. Fading the layer is the same picture as fading the one paint, and a shape that paints both is refused. As in SVG the animation replaces the static value, so the shape is drawn at full alpha inside the layer, and the static value applies before the animation begins and after it ends |
 | `animate` of `r` on a circle without a stroke | `scale_x` and `scale_y` tracks about the centre. A stroke would scale with the radius, which SVG does not do, so a stroked circle is refused |
 | `animate` of `x` and `y` on `rect`, `image`, `use` and nested `svg`, and of `cx` and `cy` on `circle` and `ellipse` | A translate track that holds the difference from the attribute |
-| `set` of `opacity`, `fill-opacity`, `stroke-opacity`, `r`, `x`, `y`, `cx` or `cy` | The track `animate` of that attribute gets, with one constant value |
+| `animate` or `animateColor` of `fill` or `stroke` on a shape that paints that color | Four tracks (`fill_r` to `fill_a`, or `stroke_r` to `stroke_a`) on the shape itself. See [Style animation](#style-animation) |
+| `animate` of `stroke-width` or `stroke-dashoffset` | A `stroke_width` or `dash_offset` track on the shape itself |
+| `set` of `opacity`, `fill-opacity`, `stroke-opacity`, `fill`, `stroke`, `stroke-width`, `stroke-dashoffset`, `r`, `x`, `y`, `cx` or `cy` | The track `animate` of that attribute gets, with one constant value |
 | `set` or `animate` of `visibility` or `display` | An `opacity` track on a wrapper layer that is 1 while the element shows and 0 while it is hidden. The values of these properties cannot be blended, so `animate` switches between them as `calcMode="discrete"` does, and the opacity of the element itself stays inside the layer |
 | `animateMotion` with `path`, `mpath` or `values` (or `from`, `to` and `by`), and `rotate` | `translate_x` and `translate_y` tracks, and a `rotate` track for `rotate="auto"`, `"auto-reverse"` or an angle. See [Motion paths](#motion-paths) |
 
@@ -82,7 +84,21 @@ Wrapper ids are named `anim1`, `anim2` and so on, and skip any id that the SVG a
 - The motion goes inside the `animateTransform` of the element and outside its `x`, `y`, `cx` and `cy`, and the element's own `transform` goes outside it.
 - Before `begin`, and after the end without `fill="freeze"`, the element is at its own position and unturned.
 
-CSS animations are imported the same way. The `animation` property and its longhands name an `@keyframes` rule, and the `transform`, `opacity`, `fill-opacity` and `stroke-opacity` of its keyframes become tracks:
+### Style animation
+
+The style channels cannot go on a wrapper, because a group's style is not inherited by the CPU and GPU renderers. The track therefore targets the shape: the importer builds the element, finds the one shape inside the layers and groups that wrap it, and gives that shape an id.
+
+- The animation has to be on a `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon` or `path`. A color animation on a `g` is reported, because every child that inherits the color would need its own tracks. A line has no fill.
+- The base is the static color of the shape. A shape that paints `none`, a gradient, a pattern or a context paint has no color to animate from and is reported. `currentColor` works as a value and as a base.
+- The opacity of the paint (`fill-opacity`, `stroke-opacity`) is already part of the alpha of the color, so every animated color gets the same factor. An animation of the color together with an animation of the opacity of the same paint is not combined and is reported, and the opacity animation runs.
+- A channel that never leaves its static value gets no track, so a color change that only moves red is one track.
+- A shape that builds to more than one element (markers, or a paint order that separates fill and stroke) is reported, and the static frame is drawn.
+- A `stroke-width` below 0 or a length with a unit other than `px` is not read. `animateColor` is read as `animate`.
+- An animated file is binary version 3.
+
+### CSS animations
+
+CSS animations are imported the same way. The `animation` property and its longhands name an `@keyframes` rule, and the `transform`, `opacity`, `fill-opacity`, `stroke-opacity`, `fill`, `stroke`, `stroke-width` and `stroke-dashoffset` of its keyframes become tracks:
 
 - The transform functions are `translate`, `translateX`, `translateY`, `scale`, `scaleX`, `scaleY` and `rotate`, with lengths in `px` and angles in `deg`, `grad`, `rad` or `turn`. Each function of a keyframe list gets a wrapper of its own in list order, so `translate(10px) rotate(90deg)` and `rotate(90deg) translate(10px)` differ as they do in CSS. All keyframes of one animation must use the same functions in the same order, where `none` and a keyframe that is missing count as the identity. Anything else would need matrix interpolation.
 - `transform-origin` is the pivot of a scale or a rotation, with the default of `0 0`. It is measured in the viewport, or in the box of the element when `transform-box` is `fill-box`.
@@ -90,19 +106,22 @@ CSS animations are imported the same way. The `animation` property and its longh
 - A finite animation without `forwards` goes back to the static value after its end, so a scene that plays once lasts one millisecond longer than its last animation.
 - CSS replaces the `transform` of an element with the animated one. The importer keeps the static transform and adds the animation to it, and says so.
 
+### What the animation import reports
+
 What is reported, with the static frame drawn:
 
 | SVG feature | Reason |
 |---|---|
-| `animate` of a color, `d`, `points`, `width`, `height`, `rx`, `ry`, `stroke-width`, `stroke-dashoffset` or any other attribute, and `r` on an ellipse | MSX tracks have no channel for it |
+| `animate` of `d`, `points`, `width`, `height`, `rx`, `ry` or any other attribute, and `r` on an ellipse | MSX tracks have no channel for it |
+| `fill` or `stroke` animations on a group, on a paint that is not a color, with a value that is not a plain color, or together with the opacity of the same paint, and any style animation on a shape that builds to several elements | No single plain color to write to, see [Style animation](#style-animation) |
 | `fill-opacity` where the stroke also paints (and `stroke-opacity` where the fill does), `r` on a stroked circle | The fade or scale would not be the same picture |
 | `animateTransform` of type `skewX` or `skewY` | No channel |
-| `animateMotion` with `calcMode="discrete"` or `"spline"`, with a path that has no length, with an `mpath` that points at anything but a `path`, and `animateColor` | Not mapped. A `transform` on the path of an `mpath` and `accumulate="sum"` are ignored, with a note |
+| `animateMotion` with `calcMode="discrete"` or `"spline"`, with a path that has no length, with an `mpath` that points at anything but a `path` | Not mapped. A `transform` on the path of an `mpath` and `accumulate="sum"` are ignored, with a note |
 | `set` or `animate` of `visibility` or `display` with the value `inherit`, and of any attribute that has no channel | Not mapped |
 | `begin` that waits for an event (`click`), for another animation (`id.end`) or never (`indefinite`), and an animation without a finite `dur` | A scene has no input to wait for |
 | An animation inside a `mask` or a `marker` | The resolver does not reach those elements |
 | `additive="replace"` on an element that has a static `transform` | SMIL would drop the static transform. The importer adds the animation to it and says so |
-| CSS `animation` with `paused`, a zero duration, skews, matrices, percentages in `translate`, keyframes whose `transform` lists use different functions, and keyframe properties other than `transform`, `opacity`, `fill-opacity` and `stroke-opacity` | No channel, or it would need matrix interpolation |
+| CSS `animation` with `paused`, a zero duration, skews, matrices, percentages in `translate`, keyframes whose `transform` lists use different functions, and keyframe properties other than `transform`, `opacity`, `fill-opacity`, `stroke-opacity`, `fill`, `stroke`, `stroke-width` and `stroke-dashoffset` | No channel, or it would need matrix interpolation |
 
 An `end` that waits for an event is ignored, with a note. At most 4,000 wrappers are written, and an animation that would need more than 20,000 keyframes on the scene timeline is left static.
 

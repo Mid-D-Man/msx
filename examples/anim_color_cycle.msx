@@ -1,0 +1,95 @@
+// examples/anim_color_cycle.msx
+// Fill color animation after import. Three circles run the same red, blue, green loop,
+// each shifted by one second with a negative begin, and the last one also pulses its
+// stroke width. A color is a track per channel (fill_r, fill_g, fill_b), which makes the
+// file wire version 3. Made from examples/svg/color_cycle.svg with `msx import`.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 240, height = 120, background = "#00000000" }
+  duration = 3.0
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 240, height = 120, style = { fill = #0f1220 } }
+    { type = "circle", cx = 50, cy = 60, r = 24, id = "anim1", style = { fill = #ff5a5f, stroke = #ffffff, stroke_width = 2 } }
+    { type = "circle", cx = 120, cy = 60, r = 24, id = "anim2", style = { fill = #ff5a5f, stroke = #ffffff, stroke_width = 2 } }
+    { type = "circle", cx = 190, cy = 60, r = 24, id = "anim3", style = { fill = #ff5a5f, stroke = #ffffff, stroke_width = 2 } }
+  animations::
+    { target_id = "anim1", property = "fill_r",
+      keyframes = [
+        { time = 0.0, value = 255.0 },
+        { time = 1.0, value = 74.0 },
+        { time = 2.0, value = 46.0 },
+        { time = 3.0, value = 255.0 }
+      ] }
+    { target_id = "anim1", property = "fill_g",
+      keyframes = [
+        { time = 0.0, value = 90.0 },
+        { time = 1.0, value = 158.0 },
+        { time = 2.0, value = 204.0 },
+        { time = 3.0, value = 90.0 }
+      ] }
+    { target_id = "anim1", property = "fill_b",
+      keyframes = [
+        { time = 0.0, value = 95.0 },
+        { time = 1.0, value = 255.0 },
+        { time = 2.0, value = 113.0 },
+        { time = 3.0, value = 95.0 }
+      ] }
+    { target_id = "anim2", property = "fill_r",
+      keyframes = [
+        { time = 0.0, value = 74.0 },
+        { time = 1.0, value = 46.0 },
+        { time = 1.999, value = 254.79100000000003 },
+        { time = 2.0, value = 255.0 },
+        { time = 3.0, value = 74.0 }
+      ] }
+    { target_id = "anim2", property = "fill_g",
+      keyframes = [
+        { time = 0.0, value = 158.0 },
+        { time = 1.0, value = 204.0 },
+        { time = 1.999, value = 90.11399999999999 },
+        { time = 2.0, value = 90.0 },
+        { time = 3.0, value = 158.0 }
+      ] }
+    { target_id = "anim2", property = "fill_b",
+      keyframes = [
+        { time = 0.0, value = 255.0 },
+        { time = 1.0, value = 113.0 },
+        { time = 1.999, value = 95.018 },
+        { time = 2.0, value = 95.0 },
+        { time = 3.0, value = 255.0 }
+      ] }
+    { target_id = "anim3", property = "fill_r",
+      keyframes = [
+        { time = 0.0, value = 46.0 },
+        { time = 0.999, value = 254.79100000000003 },
+        { time = 1.0, value = 255.0 },
+        { time = 2.0, value = 74.0 },
+        { time = 3.0, value = 46.0 }
+      ] }
+    { target_id = "anim3", property = "fill_g",
+      keyframes = [
+        { time = 0.0, value = 204.0 },
+        { time = 0.999, value = 90.11399999999999 },
+        { time = 1.0, value = 90.0 },
+        { time = 2.0, value = 158.0 },
+        { time = 3.0, value = 204.0 }
+      ] }
+    { target_id = "anim3", property = "fill_b",
+      keyframes = [
+        { time = 0.0, value = 113.0 },
+        { time = 0.999, value = 95.018 },
+        { time = 1.0, value = 95.0 },
+        { time = 2.0, value = 255.0 },
+        { time = 3.0, value = 113.0 }
+      ] }
+    { target_id = "anim3", property = "stroke_width",
+      keyframes = [
+        { time = 0.0, value = 2.0 },
+        { time = 0.75, value = 8.0 },
+        { time = 1.499, value = 2.008000000000001 },
+        { time = 1.5, value = 2.0 },
+        { time = 2.25, value = 8.0 },
+        { time = 3.0, value = 2.0 }
+      ] }
+)

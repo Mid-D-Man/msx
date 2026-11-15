@@ -200,8 +200,9 @@ what is the whole story:
 
 1. **Keyframe timeline** (`msx-anim`, `resolve_at_time`) — `animations::`
    blocks with `duration`/`loop_mode`, driving translate/scale/rotate/
-   opacity. Works uniformly across every element type, `sdf` and `splat`
-   included. `msx animate` samples this to a GIF via `msx-render-cpu`.
+   opacity, plus fill and stroke color, stroke width and dash offset on
+   shapes. Transform and opacity work uniformly across every element type,
+   `sdf` and `splat` included. `msx animate` samples this to a GIF via `msx-render-cpu`.
 2. **Shader `time` uniform** — the free-running clock auto-appended to
    every shader def's uniform struct (see "Def types" above). Only moves
    on `msx-render-gpu`; `msx rasterize-gpu --time <seconds>` samples one

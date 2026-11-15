@@ -48,7 +48,7 @@ fn parse_animation_track(data: &DixData, prefix: &str) -> Result<AnimationTrack,
         .ok_or_else(|| format!("{}.property: required", prefix))?;
     let property = AnimatedProperty::parse(&property_str).ok_or_else(|| {
         format!(
-            "{}.property: unknown property '{}' (expected one of: translate_x, translate_y, scale_x, scale_y, rotate, opacity)",
+            "{}.property: unknown property '{}' (expected one of: translate_x, translate_y, scale_x, scale_y, rotate, opacity, z_index, fill_r, fill_g, fill_b, fill_a, stroke_r, stroke_g, stroke_b, stroke_a, stroke_width, dash_offset)",
             prefix, property_str
         )
     })?;

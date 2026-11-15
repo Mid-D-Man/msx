@@ -42,8 +42,31 @@ Outside the first and last keyframe times, a track holds the nearest keyframe's 
 | `rotate` | degrees | 0 | Rotates the element |
 | `opacity` | multiplier | 1 | Multiplies the element's own opacity |
 | `z_index` | sort key | | Replaces a layer's `z_index`. Layers only |
+| `fill_r`, `fill_g`, `fill_b`, `fill_a` | 0 to 255 | | Replaces one channel of the fill color of a shape |
+| `stroke_r`, `stroke_g`, `stroke_b`, `stroke_a` | 0 to 255 | | Replaces one channel of the stroke color of a shape |
+| `stroke_width` | pixels | | Replaces the stroke width, never below 0 |
+| `dash_offset` | pixels | | Replaces the dash offset |
 
 A property that has no track keeps its identity value. `z_index` is different from the others. It replaces the layer's own value and does not combine with it, because a sort key has to stay distinguishable from an untouched one.
+
+## Style channels
+
+The last ten properties are style channels. Like `z_index` they replace a value, so a channel without a track keeps what the shape already has. They write to the style of the shape that the track targets:
+
+- A color channel changes one component and keeps the other three. A color is therefore four tracks, one per channel, and a track on `fill_b` alone leaves red, green and alpha as they are. Values are rounded and held to 0 to 255.
+- When the fill or the stroke is not a plain color (`none`, a gradient or pattern reference, `currentColor` or unset), the first color track turns it into a color that starts from black. Set all four channels to avoid a surprise.
+- Colors interpolate per channel between the keyframes, without premultiplying the alpha. Easing applies to all channels of a track the same way, so the channels of one color stay in step when their tracks share key times and easing.
+- A group is not a target. The CPU and GPU renderers do not inherit a group's style, so a color track on a group would draw differently per renderer. Target the shapes inside it.
+- A track on a style channel makes the file [binary version 3](binary-format.md#versions).
+
+```
+{ target_id = "dot", property = "fill_r",
+  keyframes = [ { time = 0.0, value = 255.0 }, { time = 1.0, value = 40.0 } ] }
+{ target_id = "dot", property = "dash_offset",
+  keyframes = [ { time = 0.0, value = 251.3 }, { time = 2.0, value = 0.0 } ] }
+```
+
+The `anim_color_cycle` and `anim_dash_draw` examples use these channels.
 
 ## Easing
 
@@ -80,8 +103,9 @@ A `rotate` track on `spinner` now turns the square about the origin of the group
 
 | Element | Responds to |
 |---|---|
-| `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`, `text`, `image` | transform channels and `opacity` |
-| `group` | transform channels, and `opacity` multiplies the group's style opacity |
+| `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`, `text` | transform channels, `opacity` and the style channels |
+| `image` | transform channels and `opacity` |
+| `group` | transform channels, and `opacity` multiplies the group's style opacity. The style channels are ignored |
 | `layer` | transform channels, `opacity` and `z_index` |
 | `use` | transform channels |
 | `sdf` | transform channels |

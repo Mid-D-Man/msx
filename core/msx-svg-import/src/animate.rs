@@ -38,20 +38,25 @@
 //! outside the geometry attributes.
 //! CSS easing, `steps()` included, is turned into staircase keyframes by
 //! `anim.rs`.
-//! Anything that has no channel (colors, paths, dash offsets, skew) is reported
-//! and the static value is drawn.
+//! `animate` and `set` of `fill`, `stroke`, `stroke-width` and `stroke-dashoffset`
+//! (and `animateColor`, which is `animate` for colors) are style channels. They
+//! cannot go on a wrapper, so the track targets the shape itself: after the
+//! element is built, the one shape inside its layers and groups gets an id. A
+//! color is four tracks (red, green, blue, alpha) and the animation has to be
+//! on a shape that paints a plain color. Anything that has no channel (paths,
+//! rect sizes, skew) is reported and the static value is drawn.
 
 use std::collections::HashMap;
 
 use msx_ast::path::parse_d;
-use msx_ast::{AnimatedProperty, AnimationTrack, Element, Group, Keyframe, Layer, LoopMode, PathCommand, Point, Scene, Transform};
+use msx_ast::{AnimatedProperty, AnimationTrack, Color, Element, Group, Keyframe, Layer, LoopMode, PathCommand, Point, Scene, Transform};
 use roxmltree::{Document, Node, NodeId};
 
 use crate::anim::{self, Curve, Ease, Span, Timing};
 use crate::cssanim::{self, AnimDecl, Stops, Tf};
 use crate::motion;
 use crate::parse::parse_origin;
-use crate::style::element_opacity;
+use crate::style::{apply, element_opacity, parse_paint, with_alpha, Inh, PaintSpec};
 use crate::{is_foreign, translate, Importer};
 
 const TIER_OPACITY: u8 = 0;
@@ -59,6 +64,21 @@ const TIER_TRANSFORM: u8 = 1;
 const TIER_MOTION: u8 = 2;
 const TIER_POSITION: u8 = 3;
 const TIER_RADIUS: u8 = 4;
+const TIER_STYLE: u8 = 5;
+
+/// Whether a spec wraps the element or targets the built shape, and for the
+/// colors which paint it replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leaf {
+    /// A wrapper (group or layer) with an id of its own.
+    No,
+    /// The color of the fill of the shape.
+    Fill,
+    /// The color of the stroke of the shape.
+    Stroke,
+    /// The stroke width or the dash offset of the shape.
+    Other,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Replaces {
@@ -121,6 +141,8 @@ pub(crate) struct Spec {
     /// translations sit outside the radius scale, because moving a scaled
     /// circle is a translation of the scaled circle.
     tier: u8,
+    /// Not a wrapper: the tracks target the shape that was built.
+    leaf: Leaf,
 }
 
 /// A CSS `transform-origin` and the box it is measured in.
@@ -197,7 +219,76 @@ fn parse_alpha(s: &str) -> Option<f64> {
     v.is_finite().then(|| v.clamp(0.0, 1.0))
 }
 
+/// A color as red, green, blue and alpha, each 0 to 255.
+fn comps(c: Color) -> Vec<f64> {
+    vec![c.r as f64, c.g as f64, c.b as f64, c.a as f64]
+}
+
+/// The channels a color animation of `attr` (`fill` or `stroke`) writes.
+fn color_props(attr: &str) -> Vec<AnimatedProperty> {
+    if attr == "fill" {
+        vec![AnimatedProperty::FillR, AnimatedProperty::FillG, AnimatedProperty::FillB, AnimatedProperty::FillA]
+    } else {
+        vec![AnimatedProperty::StrokeR, AnimatedProperty::StrokeG, AnimatedProperty::StrokeB, AnimatedProperty::StrokeA]
+    }
+}
+
+/// A color value of an animation as red, green, blue and alpha. The importer
+/// bakes the opacity of a paint into the alpha of its color, so the animated
+/// colors get the same factor. Only a plain color or `currentColor` is read.
+fn color_comps(s: &str, inh: &Inh, opacity: f64) -> Option<Vec<f64>> {
+    match parse_paint(s)? {
+        PaintSpec::Color(c) => Some(comps(with_alpha(c, opacity))),
+        PaintSpec::Current => Some(comps(with_alpha(inh.color, opacity))),
+        _ => None,
+    }
+}
+
+/// The slot for the id of the one shape inside `content`, looking through the
+/// layers and groups that wrap it. `None` when there is more than one element
+/// or the content is not a plain shape.
+fn shape_id_slot(content: &mut [Element]) -> Option<&mut Option<String>> {
+    let [only] = content else { return None };
+    match only {
+        Element::Group(g) => shape_id_slot(&mut g.children),
+        Element::Layer(l) => shape_id_slot(&mut l.children),
+        Element::Rect(x) => Some(&mut x.id),
+        Element::Circle(x) => Some(&mut x.id),
+        Element::Ellipse(x) => Some(&mut x.id),
+        Element::Line(x) => Some(&mut x.id),
+        Element::Polyline(x) | Element::Polygon(x) => Some(&mut x.id),
+        Element::Path(x) => Some(&mut x.id),
+        _ => None,
+    }
+}
+
 impl<'a, 'i> Importer<'a, 'i> {
+    /// Whether `attr` (`fill`, `stroke`, `stroke-width` or `stroke-dashoffset`)
+    /// can be animated on an element of this tag. A group is out because its
+    /// children inherit the value and each would need a track.
+    fn style_shape_ok(tag: &str, attr: &str) -> Result<(), String> {
+        if !matches!(tag, "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path") {
+            return Err(format!("{attr} on <{tag}> has no animation channel; only a shape carries one"));
+        }
+        if tag == "line" && attr == "fill" {
+            return Err("a line has no fill".into());
+        }
+        Ok(())
+    }
+
+    /// The color the shape paints without the animation, with the opacity of
+    /// the paint in its alpha. A paint server, a context paint or `none` has no
+    /// color to animate from.
+    fn static_color(inh: &Inh, attr: &str) -> Result<Color, String> {
+        let (spec, opacity) = if attr == "fill" { (&inh.fill, inh.fill_opacity) } else { (&inh.stroke, inh.stroke_opacity) };
+        match spec {
+            PaintSpec::Color(c) => Ok(with_alpha(*c, opacity)),
+            PaintSpec::Current => Ok(with_alpha(inh.color, opacity)),
+            PaintSpec::None => Err(format!("the shape paints no {attr}, so there is no color to animate from")),
+            _ => Err(format!("the {attr} of the shape is a paint server or a context paint; only a plain color can be animated")),
+        }
+    }
+
     /// An inherited property as the element sees it: the nearest ancestor or
     /// the element itself that sets it, `inherit` passed over.
     fn computed_prop(&self, node: Node<'a, 'i>, name: &str) -> Option<String> {
@@ -247,7 +338,7 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     /// The CSS animations of `node` that can be imported. The others are reported.
-    fn css_specs(&mut self, node: Node<'a, 'i>) -> Vec<Spec> {
+    fn css_specs(&mut self, node: Node<'a, 'i>, inh: &Inh) -> Vec<Spec> {
         if self.sheet.keyframes.is_empty() {
             return Vec::new();
         }
@@ -259,7 +350,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 Err(why) => self.warn(format!("{label} has a CSS animation that is not supported ({why}); the static frame is drawn")),
                 Ok(d) => {
                     let mut notes = Vec::new();
-                    match self.css_one(node, &props, &d, &mut notes) {
+                    match self.css_one(node, &props, &d, inh, &mut notes) {
                         Ok(mut found) => specs.append(&mut found),
                         Err(why) => self.warn(format!("{label} has the CSS animation \"{}\" that is not supported ({why}); the static frame is drawn", d.name)),
                     }
@@ -274,7 +365,7 @@ impl<'a, 'i> Importer<'a, 'i> {
 
     /// One CSS animation, as specs: a wrapper per function of the keyframe
     /// transforms, and a layer for opacity.
-    fn css_one(&mut self, node: Node<'a, 'i>, props: &crate::style::Props, d: &AnimDecl, notes: &mut Vec<String>) -> Result<Vec<Spec>, String> {
+    fn css_one(&mut self, node: Node<'a, 'i>, props: &crate::style::Props, d: &AnimDecl, inh: &Inh, notes: &mut Vec<String>) -> Result<Vec<Spec>, String> {
         let Some(stops) = self.sheet.keyframes.get(&d.name).cloned() else {
             return Err(format!("@keyframes {} is not defined", d.name));
         };
@@ -294,6 +385,11 @@ impl<'a, 'i> Importer<'a, 'i> {
         let mut opacity: Vec<Entry<f64>> = Vec::new();
         let mut fill_opacity: Vec<Entry<f64>> = Vec::new();
         let mut stroke_opacity: Vec<Entry<f64>> = Vec::new();
+        let mut fill_color: Vec<Entry<Vec<f64>>> = Vec::new();
+        let mut stroke_color: Vec<Entry<Vec<f64>>> = Vec::new();
+        let mut stroke_width: Vec<Entry<Vec<f64>>> = Vec::new();
+        let mut dash_offset: Vec<Entry<Vec<f64>>> = Vec::new();
+        let mut unreadable: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
         for stop in &stops {
             let own = match stop.decls.iter().rev().find(|x| x.name == "animation-timing-function") {
@@ -307,6 +403,20 @@ impl<'a, 'i> Importer<'a, 'i> {
                     "opacity" => opacity.push((stop.offset, alpha()?, own)),
                     "fill-opacity" => fill_opacity.push((stop.offset, alpha()?, own)),
                     "stroke-opacity" => stroke_opacity.push((stop.offset, alpha()?, own)),
+                    "fill" | "stroke" => {
+                        let opacity = if x.name == "fill" { inh.fill_opacity } else { inh.stroke_opacity };
+                        match color_comps(&x.value, inh, opacity) {
+                            Some(c) => (if x.name == "fill" { &mut fill_color } else { &mut stroke_color }).push((stop.offset, c, own)),
+                            None => unreadable.push(format!("{} \"{}\" is not a plain color", x.name, x.value.trim())),
+                        }
+                    }
+                    "stroke-width" | "stroke-dashoffset" => {
+                        let value = user_length(&x.value).filter(|v| x.name != "stroke-width" || *v >= 0.0);
+                        match value {
+                            Some(v) => (if x.name == "stroke-width" { &mut stroke_width } else { &mut dash_offset }).push((stop.offset, vec![v], own)),
+                            None => unreadable.push(format!("{} \"{}\" is not a length in px", x.name, x.value.trim())),
+                        }
+                    }
                     "animation-timing-function" | "animation-composition" | "transform-origin" | "transform-box" => {}
                     other => {
                         if !skipped.iter().any(|s| s == other) {
@@ -318,6 +428,9 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         for p in skipped {
             notes.push(format!("keyframe property {p} is not supported (no animation channel); the static value is drawn"));
+        }
+        for why in unreadable {
+            notes.push(format!("{why}; the static value is drawn"));
         }
 
         let mut specs = Vec::new();
@@ -353,7 +466,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     Tf::Scale(..) => (vec![AnimatedProperty::ScaleX, AnimatedProperty::ScaleY], vec![1.0, 1.0], true),
                     Tf::Rotate(_) => (vec![AnimatedProperty::Rotate], vec![0.0], true),
                 };
-                specs.push(Spec { props: props_k, curve, timing: timing(factor), base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: if pivoted { origin.clone() } else { None }, moves: true, reveals: false, tier: TIER_TRANSFORM });
+                specs.push(Spec { props: props_k, curve, timing: timing(factor), base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: if pivoted { origin.clone() } else { None }, moves: true, reveals: false, tier: TIER_TRANSFORM, leaf: Leaf::No });
             }
         }
         if !opacity.is_empty() {
@@ -369,7 +482,50 @@ impl<'a, 'i> Importer<'a, 'i> {
                 Err(why) => notes.push(format!("{attr} was left static: {why}")),
             }
         }
+        let style_lists = [
+            ("fill", color_props("fill"), Leaf::Fill, fill_color, Self::static_color(inh, "fill").map(comps)),
+            ("stroke", color_props("stroke"), Leaf::Stroke, stroke_color, Self::static_color(inh, "stroke").map(comps)),
+            ("stroke-width", vec![AnimatedProperty::StrokeWidth], Leaf::Other, stroke_width, Ok(vec![inh.stroke_width])),
+            ("stroke-dashoffset", vec![AnimatedProperty::DashOffset], Leaf::Other, dash_offset, Ok(vec![inh.dashoffset])),
+        ];
+        for (attr, channels, leaf, list, fixed) in style_lists {
+            if list.is_empty() {
+                continue;
+            }
+            match Self::style_shape_ok(node.tag_name().name(), attr).and(fixed) {
+                Ok(fixed) => specs.push(self.css_style(dedupe(list), fixed, channels, leaf, d, &timing)?),
+                Err(why) => notes.push(format!("{attr} was left static: {why}")),
+            }
+        }
         Ok(specs)
+    }
+
+    /// The spec of a style property: tracks on the shape itself that hold the
+    /// value (one per channel), with the static value at the ends of the
+    /// timeline where the keyframes do not reach.
+    fn css_style(&self, ents: Vec<(f64, Vec<f64>, Option<Ease>)>, fixed: Vec<f64>, props: Vec<AnimatedProperty>, leaf: Leaf, d: &AnimDecl, timing: &dyn Fn(f64) -> Timing) -> Result<Spec, String> {
+        let mut offsets = Vec::new();
+        let mut values = Vec::new();
+        let mut eases = Vec::new();
+        if ents[0].0 > 1e-12 {
+            offsets.push(0.0);
+            values.push(fixed.clone());
+            eases.push(d.ease);
+        }
+        for e in &ents {
+            offsets.push(e.0);
+            values.push(e.1.clone());
+            eases.push(e.2.unwrap_or(d.ease));
+        }
+        if ents[ents.len() - 1].0 < 1.0 - 1e-12 {
+            offsets.push(1.0);
+            values.push(fixed.clone());
+            eases.push(d.ease);
+        }
+        eases.pop();
+        let (oriented, factor) = Stops { offsets, values, eases }.orient(d.direction);
+        let curve = oriented.curve()?;
+        Ok(Spec { props, curve, timing: timing(factor), base: fixed, layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_STYLE, leaf })
     }
 
     /// The spec of an opacity-like property: a layer whose track holds the value.
@@ -395,7 +551,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         eases.pop();
         let (oriented, factor) = Stops { offsets, values, eases }.orient(d.direction);
         let curve = oriented.curve()?;
-        Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing: timing(factor), base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
+        Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing: timing(factor), base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY, leaf: Leaf::No })
     }
 
     /// The pivot of a CSS `transform-origin`, measured in the viewport or, for
@@ -444,13 +600,16 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     /// Every animation of `node` that can be imported. The others are reported.
-    pub(crate) fn animation_specs(&mut self, node: Node<'a, 'i>) -> Vec<Spec> {
+    pub(crate) fn animation_specs(&mut self, node: Node<'a, 'i>, parent: &Inh) -> Vec<Spec> {
         let label = Self::label(&node);
+        // The style of the element without any animation, the base of the style channels.
+        let mut inh = parent.clone();
+        apply(&mut inh, &self.props_for(node), self.vp);
         let mut specs = Vec::new();
         for a in self.animation_nodes(node) {
             let tag = a.tag_name().name();
             let mut notes = Vec::new();
-            match self.build_spec(node, a, &mut notes) {
+            match self.build_spec(node, a, &inh, &mut notes) {
                 Ok(spec) => specs.push(spec),
                 Err(why) => self.warn(format!("{label} has a <{tag}> that is not supported ({why}); the static frame is drawn")),
             }
@@ -458,14 +617,14 @@ impl<'a, 'i> Importer<'a, 'i> {
                 self.warn(format!("{label} <{tag}>: {n}"));
             }
         }
-        specs.extend(self.css_specs(node));
+        specs.extend(self.css_specs(node, &inh));
         specs
     }
 
-    fn build_spec(&mut self, node: Node<'a, 'i>, a: Node<'a, 'i>, notes: &mut Vec<String>) -> Result<Spec, String> {
+    fn build_spec(&mut self, node: Node<'a, 'i>, a: Node<'a, 'i>, inh: &Inh, notes: &mut Vec<String>) -> Result<Spec, String> {
         let tag = a.tag_name().name();
         match tag {
-            "animateTransform" | "animate" | "set" | "animateMotion" => {}
+            "animateTransform" | "animate" | "animateColor" | "set" | "animateMotion" => {}
             other => return Err(format!("<{other}> has no matching animation channel")),
         }
         let timing = if tag == "set" { Timing::parse_set(|k| a.attribute(k), notes)? } else { Timing::parse(|k| a.attribute(k), notes)? };
@@ -517,7 +676,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
             let base = ident.iter().take(props.len()).copied().collect();
             let curve = Curve::new(values, kt, calc, ks)?;
-            return Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: pivot.filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_TRANSFORM });
+            return Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: pivot.filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_TRANSFORM, leaf: Leaf::No });
         }
 
         let attr = a.attribute("attributeName").map(str::trim).unwrap_or("");
@@ -528,7 +687,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let parse_one = |s: &str| -> Option<Vec<f64>> { s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| vec![v.clamp(0.0, 1.0)]) };
                 let values = derive_values(&a, &[base], &parse_one)?;
                 let curve = Curve::new(values, kt, calc, ks)?;
-                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Opacity, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Opacity, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY, leaf: Leaf::No })
             }
             "fill-opacity" | "stroke-opacity" => {
                 let fixed = self.single_paint(node, attr)?;
@@ -538,7 +697,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let values = derive_values(&a, &[fixed], &parse_one)?;
                 let curve = Curve::new(values, kt, calc, ks)?;
                 let replaces = if attr == "fill-opacity" { Replaces::FillOpacity } else { Replaces::StrokeOpacity };
-                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY })
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![fixed], layer: true, replaces, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_OPACITY, leaf: Leaf::No })
             }
             "r" => {
                 if node_tag != "circle" {
@@ -558,7 +717,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let cx = self.length(node, "cx", 16.0, self.vp.0).unwrap_or(0.0);
                 let cy = self.length(node, "cy", 16.0, self.vp.1).unwrap_or(0.0);
                 let props = vec![AnimatedProperty::ScaleX, AnimatedProperty::ScaleY];
-                Ok(Spec { props, curve, timing, base: vec![1.0, 1.0], layer: false, replaces: Replaces::Nothing, pivot: Some((cx, cy)).filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_RADIUS })
+                Ok(Spec { props, curve, timing, base: vec![1.0, 1.0], layer: false, replaces: Replaces::Nothing, pivot: Some((cx, cy)).filter(|p| *p != (0.0, 0.0)), origin: None, moves: true, reveals: false, tier: TIER_RADIUS, leaf: Leaf::No })
             }
             "x" | "y" | "cx" | "cy" => {
                 let ok = match attr {
@@ -576,7 +735,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let values: Vec<Vec<f64>> = values.into_iter().map(|v| vec![v[0] - at]).collect();
                 let curve = Curve::new(values, kt, calc, ks)?;
                 let prop = if horizontal { AnimatedProperty::TranslateX } else { AnimatedProperty::TranslateY };
-                Ok(Spec { props: vec![prop], curve, timing, base: vec![0.0], layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_POSITION })
+                Ok(Spec { props: vec![prop], curve, timing, base: vec![0.0], layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_POSITION, leaf: Leaf::No })
             }
             "visibility" | "display" => {
                 let hidden = if attr == "visibility" {
@@ -609,10 +768,28 @@ impl<'a, 'i> Importer<'a, 'i> {
                 // The values of these properties cannot be blended, so they switch.
                 let calc = if tag == "set" { calc } else { Some("discrete") };
                 let curve = Curve::new(values, kt, calc, ks)?;
-                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: hidden, tier: TIER_OPACITY })
+                Ok(Spec { props: vec![AnimatedProperty::Opacity], curve, timing, base: vec![base], layer: true, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: hidden, tier: TIER_OPACITY, leaf: Leaf::No })
+            }
+            "fill" | "stroke" => {
+                Self::style_shape_ok(node_tag, attr)?;
+                let base = comps(Self::static_color(inh, attr)?);
+                let opacity = if attr == "fill" { inh.fill_opacity } else { inh.stroke_opacity };
+                let parse_one = |s: &str| -> Option<Vec<f64>> { color_comps(s, inh, opacity) };
+                let values = derive_values(&a, &base, &parse_one)?;
+                let curve = Curve::new(values, kt, calc, ks)?;
+                let leaf = if attr == "fill" { Leaf::Fill } else { Leaf::Stroke };
+                Ok(Spec { props: color_props(attr), curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_STYLE, leaf })
+            }
+            "stroke-width" | "stroke-dashoffset" => {
+                Self::style_shape_ok(node_tag, attr)?;
+                let (prop, at) = if attr == "stroke-width" { (AnimatedProperty::StrokeWidth, inh.stroke_width) } else { (AnimatedProperty::DashOffset, inh.dashoffset) };
+                let parse_one = |s: &str| -> Option<Vec<f64>> { user_length(s).filter(|v| attr != "stroke-width" || *v >= 0.0).map(|v| vec![v]) };
+                let values = derive_values(&a, &[at], &parse_one)?;
+                let curve = Curve::new(values, kt, calc, ks)?;
+                Ok(Spec { props: vec![prop], curve, timing, base: vec![at], layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: false, reveals: false, tier: TIER_STYLE, leaf: Leaf::Other })
             }
             "" => Err("it has no attributeName".into()),
-            other => Err(format!("animating {other} is not supported; only opacity, fill-opacity, stroke-opacity, visibility, display, x, y, cx, cy, r and transform have a channel")),
+            other => Err(format!("animating {other} is not supported; only opacity, fill-opacity, stroke-opacity, fill, stroke, stroke-width, stroke-dashoffset, visibility, display, x, y, cx, cy, r and transform have a channel")),
         }
     }
 
@@ -709,7 +886,44 @@ impl<'a, 'i> Importer<'a, 'i> {
         } else {
             (vec![AnimatedProperty::TranslateX, AnimatedProperty::TranslateY], vec![0.0, 0.0])
         };
-        Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_MOTION })
+        Ok(Spec { props, curve, timing, base, layer: false, replaces: Replaces::Nothing, pivot: None, origin: None, moves: true, reveals: false, tier: TIER_MOTION, leaf: Leaf::No })
+    }
+
+    /// An id for a wrapper or a shape that no element of the document has.
+    fn fresh_anim_id(&mut self) -> String {
+        loop {
+            self.next_anim += 1;
+            let id = format!("anim{}", self.next_anim);
+            if !self.ids.contains_key(id.as_str()) && self.used_ids.insert(id.clone()) {
+                return id;
+            }
+        }
+    }
+
+    /// Files the tracks of the style animations of an element on the one shape
+    /// inside `content`. The shape gets an id for them to target. When the
+    /// element built to more than one shape (markers, a paint order that splits
+    /// the fill from the stroke) the animations are reported and left static.
+    fn attach_style_specs(&mut self, content: &mut [Element], specs: Vec<Spec>, label: &str) {
+        if self.pending.len() + specs.len() > MAX_ANIMATIONS {
+            self.warn(format!("the SVG has more than {MAX_ANIMATIONS} animations; the rest are drawn static"));
+            return;
+        }
+        let Some(slot) = shape_id_slot(content) else {
+            self.warn(format!("{label} has a fill, stroke, stroke-width or stroke-dashoffset animation, but it did not build to one shape (markers or a paint order split it); the static frame is drawn"));
+            return;
+        };
+        let id = match slot.clone() {
+            Some(id) => id,
+            None => {
+                let id = self.fresh_anim_id();
+                *slot = Some(id.clone());
+                id
+            }
+        };
+        for spec in specs {
+            self.pending.push(Pending { target: id.clone(), props: spec.props, curve: spec.curve, timing: spec.timing, base: spec.base });
+        }
     }
 
     /// Wraps `content` for one animation and files its tracks for later.
@@ -719,13 +933,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             // An element that only an animation shows stays hidden.
             return if spec.reveals { Vec::new() } else { content };
         }
-        let id = loop {
-            self.next_anim += 1;
-            let id = format!("anim{}", self.next_anim);
-            if !self.ids.contains_key(id.as_str()) && self.used_ids.insert(id.clone()) {
-                break id;
-            }
-        };
+        let id = self.fresh_anim_id();
         self.pending.push(Pending { target: id.clone(), props: spec.props.clone(), curve: spec.curve.clone(), timing: spec.timing, base: spec.base.clone() });
         if spec.layer {
             let mut layer = Layer::new(content);
@@ -756,9 +964,26 @@ impl<'a, 'i> Importer<'a, 'i> {
             self.warn(msg);
             return self.walk_plain(node, parent, out, expanded);
         }
-        let mut specs = self.animation_specs(node);
+        let mut specs = self.animation_specs(node, parent);
         specs.sort_by_key(|s| s.tier);
-        if specs.is_empty() {
+        // A fade of the fill or the stroke replaces its opacity, which the
+        // colors of the same paint carry in their alpha, so the two cannot be
+        // combined.
+        let fades = (specs.iter().any(|s| s.replaces == Replaces::FillOpacity), specs.iter().any(|s| s.replaces == Replaces::StrokeOpacity));
+        let label = Self::label(&node);
+        let mut clashes = Vec::new();
+        specs.retain(|s| {
+            let clash = (s.leaf == Leaf::Fill && fades.0) || (s.leaf == Leaf::Stroke && fades.1);
+            if clash {
+                clashes.push(if s.leaf == Leaf::Fill { "fill" } else { "stroke" });
+            }
+            !clash
+        });
+        for paint in clashes {
+            self.warn(format!("{label} animates the {paint} color and the {paint}-opacity together, which is not supported; the static {paint} color is drawn"));
+        }
+        let (style_specs, mut specs): (Vec<Spec>, Vec<Spec>) = specs.into_iter().partition(|s| s.leaf != Leaf::No);
+        if specs.is_empty() && style_specs.is_empty() {
             return self.walk_plain(node, parent, out, expanded);
         }
         let moves = specs.iter().any(|s| s.moves);
@@ -788,6 +1013,9 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.force_visible = saved_force;
         if content.is_empty() {
             return;
+        }
+        if !style_specs.is_empty() {
+            self.attach_style_specs(&mut content, style_specs, &label);
         }
         for spec in specs.iter_mut() {
             if let Some(o) = spec.origin.take() {

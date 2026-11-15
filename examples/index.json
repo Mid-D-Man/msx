@@ -167,6 +167,18 @@
       "description": "Elements that appear on a set, a blinking dot and a bar that fills in five jumps, made by importing SVG."
     },
     {
+      "file": "anim_color_cycle.msx",
+      "title": "Color cycle",
+      "category": "anim",
+      "description": "Fill colors that cycle, shifted by a negative begin, and a stroke width that pulses. Needs wire version 3."
+    },
+    {
+      "file": "anim_dash_draw.msx",
+      "title": "Dash draw",
+      "category": "anim",
+      "description": "A ring and a rectangle that draw their outline with a dash offset while the stroke color changes. Needs wire version 3."
+    },
+    {
       "file": "sdf_shapes.msx",
       "title": "SDF shapes",
       "category": "sdf",

@@ -1,8 +1,9 @@
 // core/msx-anim/src/delta.rs
-//! `AnimatedDelta` — the seven animatable channels (TranslateX/Y, ScaleX/Y,
-//! Rotate, Opacity, ZIndex) evaluated at a single point in time and
-//! reduced to one value per channel, ready to fold onto an element's
-//! existing static state.
+//! `AnimatedDelta`: the animatable channels (TranslateX/Y, ScaleX/Y,
+//! Rotate, Opacity, ZIndex, and the ten style channels for fill and stroke
+//! color, stroke width and dash offset) evaluated at a single point in
+//! time and reduced to one value per channel, ready to fold onto an
+//! element's existing static state.
 
 use msx_ast::{AnimatedProperty, AnimationTrack, Matrix2D, Transform};
 
@@ -26,6 +27,15 @@ pub struct AnimatedDelta {
     /// distinguishable — a plain `f64` defaulting to 0.0 can't tell those
     /// apart, `Option<f64>` can.
     pub z_index:     Option<f64>,
+    /// Red, green, blue and alpha of the fill, 0 to 255, `None` where no
+    /// track targets the channel. Style channels replace the value on the
+    /// shape (see `apply_style` in the resolver), so like `z_index` they
+    /// stay `Option` and an untouched channel keeps the shape's own value.
+    pub fill:         [Option<f64>; 4],
+    /// The same four channels for the stroke.
+    pub stroke:       [Option<f64>; 4],
+    pub stroke_width: Option<f64>,
+    pub dash_offset:  Option<f64>,
 }
 
 impl Default for AnimatedDelta {
@@ -43,6 +53,10 @@ impl Default for AnimatedDelta {
             rotate:      AnimatedProperty::Rotate.identity_value(),
             opacity:     AnimatedProperty::Opacity.identity_value(),
             z_index:     None,
+            fill:         [None; 4],
+            stroke:       [None; 4],
+            stroke_width: None,
+            dash_offset:  None,
         }
     }
 }
@@ -70,6 +84,16 @@ impl AnimatedDelta {
             AnimatedProperty::Rotate     => self.rotate = value,
             AnimatedProperty::Opacity    => self.opacity = value,
             AnimatedProperty::ZIndex     => self.z_index = Some(value),
+            AnimatedProperty::FillR       => self.fill[0] = Some(value),
+            AnimatedProperty::FillG       => self.fill[1] = Some(value),
+            AnimatedProperty::FillB       => self.fill[2] = Some(value),
+            AnimatedProperty::FillA       => self.fill[3] = Some(value),
+            AnimatedProperty::StrokeR     => self.stroke[0] = Some(value),
+            AnimatedProperty::StrokeG     => self.stroke[1] = Some(value),
+            AnimatedProperty::StrokeB     => self.stroke[2] = Some(value),
+            AnimatedProperty::StrokeA     => self.stroke[3] = Some(value),
+            AnimatedProperty::StrokeWidth => self.stroke_width = Some(value),
+            AnimatedProperty::DashOffset  => self.dash_offset = Some(value),
         }
     }
 
@@ -83,6 +107,14 @@ impl AnimatedDelta {
             && self.rotate.abs() < EPSILON
             && (self.opacity - 1.0).abs() < EPSILON
             && self.z_index.is_none()
+            && !self.has_style()
+    }
+
+    /// True when a track targets any of the ten style channels.
+    pub fn has_style(&self) -> bool {
+        self.fill.iter().chain(self.stroke.iter()).any(Option::is_some)
+            || self.stroke_width.is_some()
+            || self.dash_offset.is_some()
     }
 
     /// TRS matrix for this delta alone, standard scale→rotate→translate

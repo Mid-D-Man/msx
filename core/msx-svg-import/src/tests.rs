@@ -1113,11 +1113,11 @@ fn nested_svg_viewport_clips_through_a_use_size() {
 
 #[test]
 fn animations_without_a_channel_are_reported_instead_of_dropped_silently() {
-    let i = imp(&doc(r##"<style>@keyframes spin { to { fill: red } } .a { animation: spin 2s infinite }</style>
-        <rect width="5" height="5"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect>
+    let i = imp(&doc(r##"<style>@keyframes spin { to { width: 9px } } .a { animation: spin 2s infinite }</style>
+        <rect width="5" height="5"><animate attributeName="width" from="5" to="9" dur="1s"/></rect>
         <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="skewX" to="30" dur="1s"/><rect width="1" height="1"/></g>
-        <rect width="5" height="5"><set attributeName="fill" to="red"/></rect>"##));
-    for needle in ["keyframe property fill", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
+        <rect width="5" height="5"><set attributeName="height" to="9"/></rect>"##));
+    for needle in ["keyframe property width", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
         assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
     }
     assert!(i.scene.elements.len() >= 3, "the static frame is still drawn");
@@ -2121,7 +2121,7 @@ fn css_animations_that_cannot_run_are_reported_and_left_static() {
         (r##"@keyframes k { to { transform: translate(5px, 0) } } .e { animation: k 0s }"##, "0 or too short"),
         (r##"@keyframes k { from { transform: rotate(0deg) } to { transform: scale(2) } } .e { animation: k 1s }"##, "different functions"),
         (r##"@keyframes k { to { transform: translate(50%, 0) } } .e { animation: k 1s }"##, "is not a length in px"),
-        (r##"@keyframes k { to { fill: red } } .e { animation: k 1s }"##, "keyframe property fill"),
+        (r##"@keyframes k { to { width: 9px } } .e { animation: k 1s }"##, "keyframe property width"),
     ];
     for (css, needle) in cases {
         let i = imp(&doc(&format!(r##"<style>{css}</style><rect class="e" width="5" height="5"/>"##)));
@@ -2362,7 +2362,7 @@ fn an_svg_image_keeps_its_ids_styles_and_gradients_to_itself() {
 
 #[test]
 fn warnings_of_an_svg_image_are_reported_with_the_image() {
-    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect></svg>"##;
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"><animate attributeName="width" from="5" to="9" dur="1s"/></rect></svg>"##;
     let i = image_doc(inner, r#"id="pic" width="10" height="10""#);
     assert!(i.warnings.iter().any(|w| w.contains("<image id=\"pic\">") && w.contains("<animate>")), "{:?}", i.warnings);
 }
@@ -3294,3 +3294,173 @@ fn imported_gradients_survive_write_and_parse() {
     assert_eq!(format!("{:?}", back.defs), format!("{:?}", i.scene.defs));
 }
 
+
+// ── Style animation: fill, stroke, stroke-width, stroke-dashoffset ───────────
+
+/// The first element of the scene resolved at `t`, as a shape with its style.
+fn shape_style_at(i: &Imported, t: f64) -> Style {
+    match &msx_anim::resolve_at_time(&i.scene, t).elements[0] {
+        Element::Circle(c) => c.style.clone(),
+        Element::Rect(r) => r.style.clone(),
+        Element::Path(p) => p.style.clone(),
+        other => panic!("expected a shape, got {other:?}"),
+    }
+}
+
+fn circle_id(i: &Imported) -> Option<String> {
+    match &i.scene.elements[0] {
+        Element::Circle(c) => c.id.clone(),
+        other => panic!("expected a circle, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fill_color_animation_is_four_tracks_on_the_shape() {
+    use msx_ast::AnimatedProperty as P;
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00"><animate attributeName="fill" values="#f00;#00f;#f00" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let id = circle_id(&i).expect("the shape carries the id the tracks target");
+    // Green and alpha never leave their static values, so they get no track.
+    for prop in [P::FillR, P::FillB] {
+        let t = track(&i, prop);
+        assert_eq!(t.len(), 1, "{prop:?}");
+        assert_eq!(t[0].target_id, id);
+    }
+    assert!(track(&i, P::FillG).is_empty() && track(&i, P::FillA).is_empty());
+    assert_eq!(fill(&shape_style_at(&i, 0.0)), Color::rgba(255, 0, 0, 255));
+    assert_eq!(fill(&shape_style_at(&i, 1.0)), Color::rgba(0, 0, 255, 255));
+    assert_eq!(fill(&shape_style_at(&i, 0.25)), Color::rgba(191, 0, 64, 255));
+    assert_eq!(i.scene.loop_mode, msx_ast::LoopMode::Loop);
+}
+
+#[test]
+fn the_opacity_of_the_paint_stays_in_the_alpha_of_the_animated_color() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00" fill-opacity=".5"><animate attributeName="fill" from="#f00" to="#00f" dur="1s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(fill(&shape_style_at(&i, 0.0)).a, 128);
+    assert_eq!(fill(&shape_style_at(&i, 1.0)), Color::rgba(0, 0, 255, 128));
+}
+
+#[test]
+fn a_color_animation_can_start_from_the_static_color_and_fades_alpha() {
+    // No from: the static color is the start. An rgba end color moves the alpha too.
+    let i = imp(&doc(r##"<rect width="5" height="5" fill="#fff"><animate attributeName="fill" to="rgba(0,0,0,0)" dur="2s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(fill(&shape_style_at(&i, 0.0)), Color::rgba(255, 255, 255, 255));
+    assert_eq!(fill(&shape_style_at(&i, 2.0)), Color::rgba(0, 0, 0, 0));
+}
+
+#[test]
+fn current_color_is_a_valid_value_and_a_valid_base() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" color="#0f0" fill="currentColor"><animate attributeName="fill" from="currentColor" to="#f00" dur="1s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(fill(&shape_style_at(&i, 0.0)), Color::rgba(0, 255, 0, 255));
+    assert_eq!(fill(&shape_style_at(&i, 1.0)), Color::rgba(255, 0, 0, 255));
+}
+
+#[test]
+fn stroke_color_width_and_dash_offset_animate_on_one_shape() {
+    use msx_ast::AnimatedProperty as P;
+    let i = imp(&doc(r##"<circle cx="20" cy="20" r="10" fill="none" stroke="#000" stroke-width="2" stroke-dasharray="63" stroke-dashoffset="63">
+        <animate attributeName="stroke-dashoffset" from="63" to="0" dur="2s" fill="freeze"/>
+        <animate attributeName="stroke-width" values="2;6;2" dur="2s" fill="freeze"/>
+        <animate attributeName="stroke" from="#000" to="#c80000" dur="2s" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let id = circle_id(&i).unwrap();
+    for prop in [P::DashOffset, P::StrokeWidth, P::StrokeR] {
+        let t = track(&i, prop);
+        assert_eq!(t.len(), 1, "{prop:?}");
+        assert_eq!(t[0].target_id, id, "all three animations share the shape");
+    }
+    let mid = shape_style_at(&i, 1.0);
+    assert!(close(mid.stroke_dashoffset.unwrap(), 31.5), "{:?}", mid.stroke_dashoffset);
+    assert!(close(mid.stroke_width.unwrap(), 6.0));
+    assert_eq!(stroke(&mid), Color::rgba(100, 0, 0, 255));
+    assert_eq!(mid.stroke_dasharray, Some(vec![63.0, 63.0]), "what is not animated stays (an odd dash array is made even)");
+    assert!(close(shape_style_at(&i, 2.0).stroke_dashoffset.unwrap(), 0.0));
+}
+
+#[test]
+fn set_and_animate_color_are_read_too() {
+    let i = imp(&doc(r##"<rect width="5" height="5" fill="#f00"><set attributeName="fill" to="#00f" begin="1s" dur="1s"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(fill(&shape_style_at(&i, 0.5)), Color::rgba(255, 0, 0, 255));
+    assert_eq!(fill(&shape_style_at(&i, 1.5)), Color::rgba(0, 0, 255, 255));
+    let old = imp(&doc(r##"<rect width="5" height="5" fill="#f00"><animateColor attributeName="fill" from="#f00" to="#00f" dur="1s" fill="freeze"/></rect>"##));
+    assert!(old.warnings.is_empty(), "{:?}", old.warnings);
+    assert_eq!(fill(&shape_style_at(&old, 1.0)), Color::rgba(0, 0, 255, 255));
+}
+
+#[test]
+fn css_keyframes_of_fill_stroke_width_and_dash_offset_become_style_tracks() {
+    let i = imp(&doc(r##"<style>@keyframes k { from { fill: #f00; stroke-width: 1px } 50% { stroke-width: 5px } to { fill: #00f; stroke-width: 1px } } .e { animation: k 2s linear infinite }</style>
+        <circle class="e" cx="5" cy="5" r="4" stroke="#000"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(fill(&shape_style_at(&i, 0.0)), Color::rgba(255, 0, 0, 255));
+    assert_eq!(fill(&shape_style_at(&i, 0.5)), Color::rgba(191, 0, 64, 255), "a quarter of the way to blue");
+    assert!(close(shape_style_at(&i, 1.0).stroke_width.unwrap(), 5.0));
+    assert!(close(shape_style_at(&i, 0.5).stroke_width.unwrap(), 3.0));
+    let dash = imp(&doc(r##"<style>@keyframes d { to { stroke-dashoffset: 0px } } .e { animation: d 1s linear forwards }</style>
+        <circle class="e" cx="5" cy="5" r="4" fill="none" stroke="#000" stroke-dasharray="25" stroke-dashoffset="25"/>"##));
+    assert!(dash.warnings.is_empty(), "{:?}", dash.warnings);
+    assert!(close(shape_style_at(&dash, 0.5).stroke_dashoffset.unwrap(), 12.5));
+}
+
+#[test]
+fn a_css_keyframe_that_is_not_a_color_is_reported_and_the_rest_still_runs() {
+    let i = imp(&doc(r##"<style>@keyframes k { from { fill: none; stroke-width: 1px } to { fill: none; stroke-width: 3px } } .e { animation: k 1s linear forwards }</style>
+        <circle class="e" cx="5" cy="5" r="4" stroke="#000"/>"##));
+    assert!(has_warning(&i, "is not a plain color"), "{:?}", i.warnings);
+    assert!(close(shape_style_at(&i, 1.0).stroke_width.unwrap(), 3.0));
+    assert_eq!(fill(&shape_style_at(&i, 1.0)), Color::BLACK, "the static fill is drawn");
+}
+
+#[test]
+fn style_animations_that_cannot_target_a_single_plain_shape_are_reported() {
+    let cases = [
+        (r##"<g><animate attributeName="fill" from="red" to="blue" dur="1s"/><rect width="5" height="5"/></g>"##, "has no animation channel"),
+        (r##"<linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient><rect width="5" height="5" fill="url(#g)"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect>"##, "paint server"),
+        (r##"<rect width="5" height="5" fill="none" stroke="#000"><animate attributeName="fill" from="red" to="blue" dur="1s"/></rect>"##, "no fill"),
+        (r##"<rect width="5" height="5"><animate attributeName="stroke" from="red" to="blue" dur="1s"/></rect>"##, "no stroke"),
+        (r##"<rect width="5" height="5"><animate attributeName="fill" values="red;none" dur="1s"/></rect>"##, "cannot be read"),
+        (r##"<line x1="0" y1="0" x2="5" y2="5" stroke="#000"><animate attributeName="fill" from="red" to="blue" dur="1s"/></line>"##, "a line has no fill"),
+        (r##"<rect width="5" height="5" stroke="#000"><animate attributeName="stroke-width" from="-2" to="4" dur="1s"/></rect>"##, "cannot be read"),
+    ];
+    for (body, needle) in cases {
+        let i = imp(&doc(body));
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+        assert!(i.scene.animations.is_empty(), "{needle}: {:?}", i.scene.animations);
+    }
+}
+
+#[test]
+fn a_color_and_an_opacity_animation_of_the_same_paint_are_not_combined() {
+    let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00"><animate attributeName="fill" from="#f00" to="#00f" dur="1s" fill="freeze"/>
+        <animate attributeName="fill-opacity" values="1;.2;1" dur="1s" repeatCount="indefinite"/></circle>"##));
+    assert!(has_warning(&i, "fill color and the fill-opacity together"), "{:?}", i.warnings);
+    assert!(track(&i, msx_ast::AnimatedProperty::FillR).is_empty());
+    assert!(!track(&i, msx_ast::AnimatedProperty::Opacity).is_empty(), "the fade still runs");
+}
+
+#[test]
+fn a_shape_that_builds_to_several_elements_is_reported_not_guessed() {
+    let i = imp(&doc(r##"<marker id="m" markerWidth="4" markerHeight="4"><circle cx="2" cy="2" r="2"/></marker>
+        <path d="M 10 10 L 40 40" stroke="#000" marker-end="url(#m)"><animate attributeName="stroke" from="#000" to="#f00" dur="1s" fill="freeze"/></path>"##));
+    assert!(has_warning(&i, "did not build to one shape"), "{:?}", i.warnings);
+    assert!(i.scene.animations.is_empty());
+}
+
+#[test]
+fn style_animation_survives_write_and_parse() {
+    let i = imp(&doc(r##"<circle cx="20" cy="20" r="10" fill="#f00" stroke="#000" stroke-width="2" stroke-dasharray="63" stroke-dashoffset="63">
+        <animate attributeName="fill" values="#f00;#00f;#f00" dur="2s" repeatCount="indefinite"/>
+        <animate attributeName="stroke-dashoffset" from="63" to="0" dur="2s" repeatCount="indefinite"/>
+        <animate attributeName="stroke-width" values="2;5;2" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("style tracks are writable");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    for t in [0.0, 0.4, 1.0, 1.7] {
+        let want = format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements);
+        assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), want, "source at {t}");
+    }
+}

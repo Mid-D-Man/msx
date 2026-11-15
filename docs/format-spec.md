@@ -530,7 +530,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16 |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -711,6 +711,22 @@ Only present when header `flags.bit3` (has_animations) is set — gated on wheth
         [f32 value]
         [u8  easing]             // Easing discriminant
 ```
+
+The `property` byte is the `AnimatedProperty` discriminant:
+
+| Byte | Source name | Unit | Wire version |
+|---|---|---|---|
+| 0, 1 | `translate_x`, `translate_y` | pixels | 2 |
+| 2, 3 | `scale_x`, `scale_y` | multiplier | 2 |
+| 4 | `rotate` | degrees | 2 |
+| 5 | `opacity` | multiplier | 2 |
+| 6 | `z_index` | sort key | 2 |
+| 7 to 10 | `fill_r`, `fill_g`, `fill_b`, `fill_a` | 0 to 255 | 3 |
+| 11 to 14 | `stroke_r`, `stroke_g`, `stroke_b`, `stroke_a` | 0 to 255 | 3 |
+| 15 | `stroke_width` | user units, 0 or more | 3 |
+| 16 | `dash_offset` | user units | 3 |
+
+The track layout does not change for the style channels. A scene with a track on one of bytes 7 to 16 is written as version 3, and a version 2 reader refuses it at the header. A scene whose tracks all use bytes 0 to 6 stays version 2. The style channels replace the value on the shape and do not combine with it, the Style channels section of the Keyframe animation guide explains the rules.
 
 `target_id` goes through the shared string pool rather than being inlined — several properties on the same element each get their own track, so the same id repeats often enough that pool dedup is worth it, same reasoning as `MediaSource::FileRef` paths.
 

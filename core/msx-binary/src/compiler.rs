@@ -240,6 +240,9 @@ fn encode_animations(scene: &Scene, out: &mut Vec<u8>, pool: &mut Vec<String>) {
         let target_idx = intern_string(pool, &track.target_id);
         write_u16(out, target_idx);
         write_u8(out, track.property.to_byte());
+        if track.property.is_style() {
+            crate::version::require(3);
+        }
         write_u16(out, track.keyframes.len() as u16);
         for kf in &track.keyframes {
             write_f32(out, kf.time);
@@ -1114,6 +1117,35 @@ mod tests {
             assert_eq!(translate.target_id, "circle", "shared target_id across both tracks");
 
             assert!(decoded.is_animated(), "compress={compress}");
+        }
+    }
+
+    #[test]
+    fn a_track_on_a_style_channel_needs_version_3_and_the_others_do_not() {
+        use msx_ast::{AnimatedProperty, AnimationTrack, Keyframe};
+
+        let track = |property| AnimationTrack::new("circle", property, vec![Keyframe::linear(0.0, 0.0), Keyframe::linear(1.0, 255.0)]);
+        for compress in [false, true] {
+            let mut old = basic_scene();
+            old.animations.push(track(AnimatedProperty::Opacity));
+            old.animations.push(track(AnimatedProperty::ZIndex));
+            assert_eq!(version_of(&compile(&old, compress).unwrap()), crate::MIN_VERSION, "compress={compress}");
+
+            for property in [
+                AnimatedProperty::FillR, AnimatedProperty::FillG, AnimatedProperty::FillB, AnimatedProperty::FillA,
+                AnimatedProperty::StrokeR, AnimatedProperty::StrokeG, AnimatedProperty::StrokeB, AnimatedProperty::StrokeA,
+                AnimatedProperty::StrokeWidth, AnimatedProperty::DashOffset,
+            ] {
+                let mut scene = basic_scene();
+                scene.animations.push(track(AnimatedProperty::Opacity));
+                scene.animations.push(track(property));
+                let data = compile(&scene, compress).unwrap();
+                assert_eq!(version_of(&data), 3, "{property:?} compress={compress}");
+                let back = crate::decode(&data).unwrap();
+                assert_eq!(back.animations.len(), 2);
+                assert_eq!(back.animations[1].property, property);
+                assert!((back.animations[1].keyframes[1].value - 255.0).abs() < 1e-4);
+            }
         }
     }
 

@@ -497,3 +497,112 @@ fn group_containing_sdf_and_splat_children_animate_independently_of_the_group() 
 fn identity_matrix_check_sanity() {
     assert!(Matrix2D::identity().is_identity());
 }
+
+// ── Style channels ───────────────────────────────────────────────────────────
+
+fn styled_rect(id: &str, fill: Paint, stroke: Paint) -> Rect {
+    let style = Style { fill: Some(fill), stroke: Some(stroke), ..Style::default() };
+    let mut r = Rect::new(0.0, 0.0, 10.0, 10.0, style);
+    r.id = Some(id.to_string());
+    r
+}
+
+fn resolved_rect_style(scene: &Scene, t: f64) -> Style {
+    match &resolve_at_time(scene, t).elements[0] {
+        Element::Rect(r) => r.style.clone(),
+        _ => panic!("expected Rect"),
+    }
+}
+
+#[test]
+fn a_color_channel_replaces_only_its_own_component() {
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Rect(styled_rect("box", Paint::Color(Color::rgba(10, 20, 30, 200)), Paint::None)));
+    scene.duration = 1.0;
+    scene.animations.push(track("box", AnimatedProperty::FillR, vec![Keyframe::linear(0.0, 0.0), Keyframe::linear(1.0, 200.0)]));
+
+    let style = resolved_rect_style(&scene, 0.5);
+    assert_eq!(style.fill, Some(Paint::Color(Color::rgba(100, 20, 30, 200))));
+    assert_eq!(style.stroke, Some(Paint::None), "the stroke has no track and stays as it was");
+}
+
+#[test]
+fn four_fill_channels_make_a_color_cycle() {
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Rect(styled_rect("box", Paint::Color(Color::rgb(255, 0, 0)), Paint::None)));
+    scene.duration = 2.0;
+    for (property, from, to) in [
+        (AnimatedProperty::FillR, 255.0, 0.0),
+        (AnimatedProperty::FillG, 0.0, 0.0),
+        (AnimatedProperty::FillB, 0.0, 255.0),
+        (AnimatedProperty::FillA, 255.0, 100.0),
+    ] {
+        scene.animations.push(track("box", property, vec![Keyframe::linear(0.0, from), Keyframe::linear(2.0, to)]));
+    }
+    assert_eq!(resolved_rect_style(&scene, 0.0).fill, Some(Paint::Color(Color::rgba(255, 0, 0, 255))));
+    assert_eq!(resolved_rect_style(&scene, 1.0).fill, Some(Paint::Color(Color::rgba(128, 0, 128, 178))));
+    assert_eq!(resolved_rect_style(&scene, 2.0).fill, Some(Paint::Color(Color::rgba(0, 0, 255, 100))));
+}
+
+#[test]
+fn a_color_channel_on_a_paint_that_is_not_a_color_starts_from_black() {
+    for paint in [Paint::None, Paint::Ref("url(#g)".into()), Paint::CurrentColor] {
+        let mut scene = blank_scene();
+        scene.elements.push(Element::Rect(styled_rect("box", Paint::Color(Color::WHITE), paint)));
+        scene.duration = 1.0;
+        scene.animations.push(track("box", AnimatedProperty::StrokeG, vec![Keyframe::linear(0.0, 90.0), Keyframe::linear(1.0, 90.0)]));
+        assert_eq!(resolved_rect_style(&scene, 0.0).stroke, Some(Paint::Color(Color::rgba(0, 90, 0, 255))));
+    }
+}
+
+#[test]
+fn color_channels_are_rounded_and_clamped() {
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Rect(styled_rect("box", Paint::Color(Color::BLACK), Paint::None)));
+    scene.duration = 1.0;
+    scene.animations.push(track("box", AnimatedProperty::FillR, vec![Keyframe::linear(0.0, 300.0), Keyframe::linear(1.0, 300.0)]));
+    scene.animations.push(track("box", AnimatedProperty::FillG, vec![Keyframe::linear(0.0, -20.0), Keyframe::linear(1.0, -20.0)]));
+    scene.animations.push(track("box", AnimatedProperty::FillB, vec![Keyframe::linear(0.0, 10.5), Keyframe::linear(1.0, 10.5)]));
+    assert_eq!(resolved_rect_style(&scene, 0.0).fill, Some(Paint::Color(Color::rgba(255, 0, 11, 255))));
+}
+
+#[test]
+fn stroke_width_and_dash_offset_replace_the_value_and_width_never_goes_negative() {
+    let style = Style { stroke_width: Some(2.0), stroke_dashoffset: Some(5.0), ..Style::default() };
+    let mut r = Rect::new(0.0, 0.0, 10.0, 10.0, style);
+    r.id = Some("box".into());
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Rect(r));
+    scene.duration = 1.0;
+    scene.animations.push(track("box", AnimatedProperty::StrokeWidth, vec![Keyframe::linear(0.0, 2.0), Keyframe::linear(1.0, -6.0)]));
+    scene.animations.push(track("box", AnimatedProperty::DashOffset, vec![Keyframe::linear(0.0, 100.0), Keyframe::linear(1.0, 0.0)]));
+
+    let mid = resolved_rect_style(&scene, 0.5);
+    assert!((mid.stroke_width.unwrap() - 0.0).abs() < 1e-9, "-2 clamps to 0");
+    assert!((mid.stroke_dashoffset.unwrap() - 50.0).abs() < 1e-9);
+    let start = resolved_rect_style(&scene, 0.0);
+    assert!((start.stroke_width.unwrap() - 2.0).abs() < 1e-9);
+    assert!((start.stroke_dashoffset.unwrap() - 100.0).abs() < 1e-9);
+}
+
+#[test]
+fn style_channels_leave_a_group_alone() {
+    let group = Group { children: vec![Element::Rect(rect("inner"))], id: Some("g".into()), transform: None, style: None };
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Group(group));
+    scene.duration = 1.0;
+    scene.animations.push(track("g", AnimatedProperty::FillR, vec![Keyframe::linear(0.0, 5.0), Keyframe::linear(1.0, 5.0)]));
+    let resolved = resolve_at_time(&scene, 0.5);
+    let Element::Group(g) = &resolved.elements[0] else { panic!("expected Group") };
+    assert!(g.style.as_ref().is_none_or(|s| s.fill.is_none()));
+}
+
+#[test]
+fn a_delta_with_only_a_style_channel_is_not_the_identity() {
+    use crate::delta::AnimatedDelta;
+    let t = track("x", AnimatedProperty::DashOffset, vec![Keyframe::linear(0.0, 0.0)]);
+    let delta = AnimatedDelta::from_tracks(&[&t], 0.0);
+    assert!(delta.has_style());
+    assert!(!delta.is_identity(), "a dash offset of 0 is still an override");
+    assert!(AnimatedDelta::default().is_identity());
+}

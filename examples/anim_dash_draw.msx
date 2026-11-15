@@ -1,0 +1,52 @@
+// examples/anim_dash_draw.msx
+// Stroke drawing with a dash offset. A ring and a rectangle draw their outline, hold,
+// and erase again, and the ring's stroke color turns from blue to green on the way.
+// The dash offset and the stroke color are style channels (dash_offset, stroke_r/g/b),
+// which makes the file wire version 3. Made from examples/svg/dash_draw.svg with
+// `msx import`; the dash length is the circumference, 2 pi r for the ring and 240 for the rectangle.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 240, height = 120, background = "#00000000" }
+  duration = 4.0
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 240, height = 120, style = { fill = #0f1220 } }
+    { type = "circle", cx = 60, cy = 60, r = 40, id = "anim1", style = { fill = "none", stroke = #4a9eff, stroke_width = 6, stroke_linecap = "round", stroke_dasharray = [251.33, 251.33], stroke_dashoffset = 251.33 } }
+    { type = "rect", x = 130, y = 40, width = 80, height = 40, id = "anim2", style = { fill = "none", stroke = #ffb84a, stroke_width = 4, stroke_dasharray = [240.0, 240.0], stroke_dashoffset = 240 } }
+  animations::
+    { target_id = "anim1", property = "dash_offset",
+      keyframes = [
+        { time = 0.0, value = 251.33 },
+        { time = 2.0, value = 0.0 },
+        { time = 3.2, value = 0.0 },
+        { time = 4.0, value = 251.33 }
+      ] }
+    { target_id = "anim1", property = "stroke_r",
+      keyframes = [
+        { time = 0.0, value = 74.0 },
+        { time = 2.0, value = 46.0 },
+        { time = 3.2, value = 46.0 },
+        { time = 4.0, value = 74.0 }
+      ] }
+    { target_id = "anim1", property = "stroke_g",
+      keyframes = [
+        { time = 0.0, value = 158.0 },
+        { time = 2.0, value = 204.0 },
+        { time = 3.2, value = 204.0 },
+        { time = 4.0, value = 158.0 }
+      ] }
+    { target_id = "anim1", property = "stroke_b",
+      keyframes = [
+        { time = 0.0, value = 255.0 },
+        { time = 2.0, value = 113.0 },
+        { time = 3.2, value = 113.0 },
+        { time = 4.0, value = 255.0 }
+      ] }
+    { target_id = "anim2", property = "dash_offset",
+      keyframes = [
+        { time = 0.0, value = 240.0 },
+        { time = 2.0, value = 0.0 },
+        { time = 3.2, value = 0.0 },
+        { time = 4.0, value = 240.0 }
+      ] }
+)
