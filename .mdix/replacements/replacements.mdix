@@ -1,22 +1,26 @@
 // .mdix/replacements/replacements.mdix
 //
-// v8: clip paths on layers, importer clip-path and viewport clipping,
-// animation warnings. Requires v7 (already applied).
+// v23: binary wire version 3, stage 4. Animation channels for fill and
+// stroke color, stroke width and dash offset. Requires v22 (already applied).
 //
-// - msx-ast: Layer gains clip_path (None, or the shapes whose union stays
-//   visible). msx-parser reads and writes it. msx-binary stores it behind a
-//   spare bit of the existing clip byte, so older files decode unchanged and
-//   the version byte stays at 2.
-// - msx-render-svg writes a clipPath element, msx-render-cpu builds an
-//   antialiased coverage mask, msx-render-gpu draws a mask texture and
-//   multiplies the layer with it.
-// - msx-svg-import turns clip-path url(#id) into layers (both units, clip-rule,
-//   transform, nested clips), clips symbol and nested svg to their viewport
-//   unless overflow is visible, honors a use width or height on a nested svg
-//   per axis, and warns for SMIL and CSS animations.
-// - docs: layers page, svg-import, svg-parity, backends table.
+// - msx-ast: AnimatedProperty gains ten style channels, bytes 7 to 16
+//   (fill_r/g/b/a, stroke_r/g/b/a, stroke_width, dash_offset) and is_style().
+// - msx-binary: a track on one of them calls version::require(3). A scene
+//   with only the older channels is still written as version 2.
+// - msx-parser: the unknown property error lists the new names. The source
+//   names come from the ast tables, so the parser and writer need no more.
+// - msx-anim: AnimatedDelta carries the channels and the resolver writes
+//   them onto the style of the targeted shape. Groups are left alone.
+// - msx-svg-import: animate, animateColor and set of fill, stroke,
+//   stroke-width and stroke-dashoffset, and the same CSS keyframe properties,
+//   become tracks on the shape itself. Cases with no single plain color
+//   target are reported and left static.
+// - examples: anim_color_cycle and anim_dash_draw, with their SVG sources.
+// - docs: format-spec, animation, binary-format, svg-import, svg-parity and
+//   the root README.
 //
-// No root Cargo.toml in this drop, so the override below is unused.
+// The root README.md travels as ROOT_README.md and the override below
+// places it. No crate code outside the five crates above changed.
 
 @CONFIG(
   version    -> "1.0.0"
@@ -34,4 +38,5 @@
 
   overrides::
     target("ROOT_Cargo.toml", "./Cargo.toml")
+    target("ROOT_README.md", "./README.md")
 )
