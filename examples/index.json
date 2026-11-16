@@ -119,6 +119,12 @@
       "note": "The GPU renderer draws only the blur. This preview is the SVG renderer, which draws all five."
     },
     {
+      "file": "filters_color.msx",
+      "title": "Color filters",
+      "category": "layers",
+      "description": "feColorMatrix and the CSS color functions as layer effects, plus a blur with a different amount per axis. Needs wire version 3."
+    },
+    {
       "file": "clip_and_mask.msx",
       "title": "Clip path and mask",
       "category": "layers",

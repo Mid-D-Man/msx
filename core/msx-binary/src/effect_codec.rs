@@ -47,6 +47,20 @@ pub fn write_effect(out: &mut Vec<u8>, effect: &Effect) {
             write_f32(out, *blur_radius);
             write_f32(out, *opacity);
         }
+        Effect::BlurXY { rx, ry } => {
+            crate::version::require(3);
+            write_u8(out, EFFECT_TAG_BLUR_XY);
+            write_f32(out, *rx);
+            write_f32(out, *ry);
+        }
+        Effect::ColorMatrix { values, linear } => {
+            crate::version::require(3);
+            write_u8(out, EFFECT_TAG_COLOR_MATRIX);
+            write_u8(out, u8::from(*linear));
+            for v in values {
+                write_f32(out, *v);
+            }
+        }
     }
 }
 
@@ -85,6 +99,22 @@ pub fn read_effect(data: &[u8], cursor: &mut usize) -> io::Result<Effect> {
             let blur_radius = read_f32(data, cursor)?;
             let opacity     = read_f32(data, cursor)?;
             Ok(Effect::InnerGlow { color, blur_radius, opacity })
+        }
+        EFFECT_TAG_BLUR_XY => {
+            let rx = read_f32(data, cursor)?;
+            let ry = read_f32(data, cursor)?;
+            Ok(Effect::BlurXY { rx, ry })
+        }
+        EFFECT_TAG_COLOR_MATRIX => {
+            let flags = read_u8(data, cursor)?;
+            if flags > 1 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown color matrix flags 0x{flags:02x}")));
+            }
+            let mut values = [0.0; 20];
+            for v in values.iter_mut() {
+                *v = read_f32(data, cursor)?;
+            }
+            Ok(Effect::ColorMatrix { values, linear: flags == 1 })
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -131,6 +161,32 @@ mod tests {
         } else {
             panic!("expected DropShadow");
         }
+    }
+
+    #[test]
+    fn blur_xy_and_color_matrix_roundtrip_and_need_version_3() {
+        let mut values = [0.0; 20];
+        for (i, v) in values.iter_mut().enumerate() {
+            *v = i as f64 * 0.25 - 2.0;
+        }
+        for e in [Effect::BlurXY { rx: 3.5, ry: 0.0 }, Effect::ColorMatrix { values, linear: true }, Effect::ColorMatrix { values, linear: false }] {
+            crate::version::begin();
+            let mut buf = Vec::new();
+            write_effect(&mut buf, &e);
+            assert_eq!(crate::version::needed(), 3, "{e:?}");
+            let mut cursor = 0;
+            let back = read_effect(&buf, &mut cursor).unwrap();
+            assert_eq!(cursor, buf.len());
+            assert_eq!(back, e, "values are exact in f32 here");
+        }
+        // The older effects do not raise the version.
+        crate::version::begin();
+        write_effect(&mut Vec::new(), &Effect::Blur { radius: 1.0 });
+        assert_eq!(crate::version::needed(), crate::MIN_VERSION);
+        // Flags other than the linear bit are refused.
+        let mut bad = vec![EFFECT_TAG_COLOR_MATRIX, 2];
+        bad.extend([0u8; 80]);
+        assert!(read_effect(&bad, &mut 0).is_err());
     }
 
     #[test]

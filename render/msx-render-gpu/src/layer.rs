@@ -5,7 +5,7 @@
 //!
 //! ## Known gaps, flagged rather than hidden
 //!
-//! **`effects`: only `Effect::Blur` is applied on this path.**
+//! **`effects`: only `Effect::Blur`, `Effect::BlurXY` and `Effect::ColorMatrix` are applied on this path.**
 //! `msx-render-cpu` already has all five (`Blur`/`DropShadow`/
 //! `InnerShadow`/`OuterGlow`/`InnerGlow`); `DropShadow`/`InnerShadow`/
 //! `OuterGlow`/`InnerGlow` aren't wired up here yet — see `effects.rs`'s

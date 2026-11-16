@@ -90,6 +90,18 @@ Each entry of `effects` is an object whose `type` selects the effect. Effects ap
 | `inner_shadow` | `offset_x` (0), `offset_y` (0), `blur_radius` (4), `color` (black), `opacity` (0.5) |
 | `outer_glow` | `color` (white), `blur_radius` (8), `spread` (0), `opacity` (0.75) |
 | `inner_glow` | `color` (white), `blur_radius` (8), `opacity` (0.75) |
+| `blur_xy` | `rx` (4), `ry` (4). A standard deviation for each axis, and a zero on one axis blurs only the other. Wire version 3 |
+| `color_matrix` | `values` (20 numbers, required), `linear` (false). Wire version 3 |
+
+A `color_matrix` is the 4x5 matrix of `feColorMatrix`, row major. The four rows give the new red, green, blue and alpha, and the five columns weigh the old red, green, blue, alpha and a constant, so the new red is `v[0] r + v[1] g + v[2] b + v[3] a + v[4]`. It works on straight channels in 0 to 1, and the results are held to 0 to 1. With `linear = true` the color goes through linear light for the matrix and back, which is what `feColorMatrix` does by default. The CSS color functions use sRGB, so `linear` stays false for them. Grayscale, saturation, hue rotation, sepia, invert, brightness, contrast and opacity changes are all matrices. The `blur_xy` radii follow the layer transform axis by axis when the transform keeps the axes (scale, flip, quarter turn). For any other rotation both amounts use the mean scale of the transform.
+
+```
+{ type = "color_matrix", linear = false, values = [
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0,      0,      0,      1, 0 ] }
+```
 
 The radius of a blur is its standard deviation, the same number as `stdDeviation` in SVG. Radii, spreads and offsets are in the coordinate system of the layer, so they follow its transform: a layer scaled by 2 blurs twice as far, and a layer rotated by 90 degrees turns the offset of its shadow. The CPU renderer blurs with the SVG definition (three box blurs from a standard deviation of 2, a true Gaussian kernel below that) and treats pixels outside the canvas as transparent.
 

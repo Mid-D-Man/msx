@@ -25,7 +25,7 @@ The CPU renderer rasterizes with `tiny-skia`, and evaluates signed distance fiel
 | Signed distance fields | omitted | yes | yes |
 | Gaussian splats | approximated | yes | yes |
 | Layer opacity and blend modes | yes, see below | yes | yes |
-| Layer effects | all five | all five | `blur` only |
+| Layer effects | all seven | all seven | `blur`, `blur_xy` and `color_matrix` |
 | Layer `clip` | not enforced | not documented | not documented |
 | Layer `clip_path` | `clipPath` element | antialiased mask | mask texture, hard edges |
 | Layer `mask` | `mask` element | buffer scaled by luminance or alpha | texture multiplied by luminance or alpha |
@@ -57,13 +57,13 @@ Where a gradient is not interpolated, the paint is the average of its stops. Tha
 - Text is drawn from the same embedded DejaVu Sans outlines as on the CPU renderer. Shape and text edges are not antialiased.
 - A shader fill runs for real on shapes, SDF nodes, splats and shapes inside layers. Shader strokes fall back to the flat color, and a shape's `opacity` is not multiplied into the shader output.
 - When the shader file cannot be read, the GPU renderer paints `fallback_color` and prints a line on the standard error stream.
-- Layers composite in an isolated buffer with all twelve blend modes, and `blur` is the one effect implemented.
+- Layers composite in an isolated buffer with all twelve blend modes, and `blur`, `blur_xy` and `color_matrix` are the effects implemented.
 - A machine with no adapter gets a clear error from the CLI and not a crash.
 
 ## Choosing a renderer
 
 - Use **SVG** for output that has to stay vector, and for text that should use the viewer's own fonts.
-- Use the **CPU** rasterizer for PNG and GIF output that needs no special hardware. It covers text, gradients including conic, SDF shapes, splats, layers and all five effects.
+- Use the **CPU** rasterizer for PNG and GIF output that needs no special hardware. It covers text, gradients including conic, SDF shapes, splats, layers and all seven effects.
 - Use the **GPU** renderer when a scene has shader fills, or when blur on large layers needs speed.
 
 The samples page shows the same set of files through these renderers, and the build report lists the result of each CI run.

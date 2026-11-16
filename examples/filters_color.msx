@@ -1,0 +1,122 @@
+// examples/filters_color.msx
+// Color matrix and per-axis blur effects after import. The tiles use feColorMatrix
+// (saturate in sRGB, hueRotate in linear light), a blur with two deviations, and the
+// CSS functions sepia, invert, contrast, saturate, grayscale, opacity, hue-rotate and
+// brightness. Each one is a layer effect (color_matrix, blur_xy), which makes the file
+// wire version 3. Made from examples/svg/filters_color.svg with `msx import`.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 240, height = 160, background = "#00000000" }
+  defs::
+    { type = "linear_gradient", id = "ramp", x1 = 0, y1 = 0, x2 = 1, y2 = 1, stops = [{ offset = 0, color = #ff5a5f }, { offset = 0.5, color = #ffd23f }, { offset = 1, color = #3ea6ff }] }
+  elements::
+    { type = "rect", x = 0, y = 0, width = 240, height = 160, style = { fill = #0f1220 } }
+    { type = "rect", x = 10, y = 10, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 65, y = 5, width = 60, height = 60 }
+          ],
+          effects = [
+            { type = "color_matrix", linear = false, values = [0.213, 0.715, 0.072, 0.0, 0.0, 0.213, 0.715, 0.072, 0.0, 0.0, 0.213, 0.715, 0.072, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "rect", x = 70, y = 10, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 125, y = 5, width = 60, height = 60 }
+          ],
+          effects = [
+            { type = "color_matrix", linear = true, values = [0.0, 0.0, 1.0, 0.0, 0.0, 0.356, 0.855, -0.211, 0.0, 0.0, -0.574, 1.43, 0.144, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "rect", x = 130, y = 10, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 182, y = 0, width = 56, height = 70 }
+          ],
+          effects = [
+            { type = "blur_xy", rx = 8.0, ry = 0.0 }
+          ],
+          elements = [
+            { type = "rect", x = 190, y = 10, width = 40, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          effects = [
+            { type = "color_matrix", linear = false, values = [0.4537, 0.6921, 0.1701, 0.0, 0.0, 0.3141, 0.7174, 0.1512, 0.0, 0.0, 0.2448, 0.4806, 0.2179, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "rect", x = 10, y = 70, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          effects = [
+            { type = "color_matrix", linear = false, values = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "rect", x = 70, y = 70, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          effects = [
+            { type = "color_matrix", linear = false, values = [1.3935, -0.3575, -0.036, 0.0, 0.0, -0.1065, 1.1425, -0.036, 0.0, 0.0, -0.1065, -0.3575, 1.464, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "layer", blend_mode = "normal", opacity = 1,
+              effects = [
+                { type = "color_matrix", linear = false, values = [1.6, 0.0, 0.0, 0.0, -0.3, 0.0, 1.6, 0.0, 0.0, -0.3, 0.0, 0.0, 1.6, 0.0, -0.3, 0.0, 0.0, 0.0, 1.0, 0.0] }
+              ],
+              elements = [
+                { type = "rect", x = 130, y = 70, width = 50, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+              ] }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          effects = [
+            { type = "color_matrix", linear = false, values = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0] }
+          ],
+          elements = [
+            { type = "layer", blend_mode = "normal", opacity = 1,
+              effects = [
+                { type = "color_matrix", linear = false, values = [0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+              ],
+              elements = [
+                { type = "rect", x = 190, y = 70, width = 40, height = 50, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+              ] }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          effects = [
+            { type = "color_matrix", linear = false, values = [1.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+          ],
+          elements = [
+            { type = "layer", blend_mode = "normal", opacity = 1,
+              effects = [
+                { type = "color_matrix", linear = false, values = [-0.574, 1.43, 0.144, 0.0, 0.0, 0.426, 0.43, 0.144, 0.0, 0.0, 0.426, 1.43, -0.856, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }
+              ],
+              elements = [
+                { type = "rect", x = 10, y = 130, width = 220, height = 20, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+              ] }
+          ] }
+      ] }
+)

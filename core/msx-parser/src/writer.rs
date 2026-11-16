@@ -560,6 +560,11 @@ fn write_effects(out: &mut String, effects: &[msx_ast::Effect], indent: usize) {
                 "type = \"inner_glow\", color = {}, blur_radius = {}, opacity = {}",
                 color_value(*color), float(*blur_radius), float(*opacity)
             ),
+            Effect::BlurXY { rx, ry } => format!("type = \"blur_xy\", rx = {}, ry = {}", float(*rx), float(*ry)),
+            Effect::ColorMatrix { values, linear } => format!(
+                "type = \"color_matrix\", linear = {linear}, values = [{}]",
+                values.iter().map(|v| float(*v)).collect::<Vec<_>>().join(", ")
+            ),
         };
         let comma = if i + 1 < effects.len() { "," } else { "" };
         let _ = writeln!(out, "{}{{ {body} }}{comma}", pad(indent + 2));
@@ -860,6 +865,8 @@ mod tests {
             Effect::InnerShadow { offset_x: 0.0, offset_y: 1.0, blur_radius: 2.0, color: Color::BLACK, opacity: 0.5 },
             Effect::OuterGlow { color: Color::WHITE, blur_radius: 8.0, spread: 1.0, opacity: 0.75 },
             Effect::InnerGlow { color: Color::rgb(255, 0, 0), blur_radius: 3.0, opacity: 1.0 },
+            Effect::BlurXY { rx: 4.0, ry: 0.0 },
+            Effect::ColorMatrix { values: [0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -0.125], linear: true },
         ];
         assert_roundtrip(&scene_with(vec![], vec![Element::Layer(layer)]));
     }

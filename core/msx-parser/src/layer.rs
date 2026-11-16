@@ -111,6 +111,16 @@ fn parse_effect(data: &DixData, prefix: &str) -> Result<Effect, String> {
             blur_radius: opt::<f64>(data, prefix, "blur_radius")?.unwrap_or(8.0),
             opacity: opt::<f64>(data, prefix, "opacity")?.unwrap_or(0.75),
         }),
+        "blur_xy" => Ok(Effect::BlurXY {
+            rx: opt::<f64>(data, prefix, "rx")?.unwrap_or(4.0),
+            ry: opt::<f64>(data, prefix, "ry")?.unwrap_or(4.0),
+        }),
+        "color_matrix" => {
+            let list = opt::<Vec<f64>>(data, prefix, "values")?.ok_or_else(|| format!("{prefix}: a color_matrix needs `values`, 20 numbers"))?;
+            let count = list.len();
+            let values: [f64; 20] = list.try_into().map_err(|_| format!("{prefix}: a color_matrix needs 20 values, found {count}"))?;
+            Ok(Effect::ColorMatrix { values, linear: opt::<bool>(data, prefix, "linear")?.unwrap_or(false) })
+        }
         other => Err(format!("{}: unknown effect type '{}'", prefix, other)),
     }
                  }

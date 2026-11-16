@@ -2,9 +2,12 @@
 //! Filters by mapping onto layer effects.
 //!
 //! NOTICE: see docs/guide/svg-import.md, section "Filters". MSX has no filter
-//! graph. A layer can carry blur and shadow effects, so the importer reads the
-//! filters that are a chain of `feGaussianBlur`, `feDropShadow` and `feOffset`
-//! primitives (and the CSS functions `blur()` and `drop-shadow()`) and turns
+//! graph. A layer can carry blur, shadow and color matrix effects, so the
+//! importer reads the filters that are a chain of `feGaussianBlur`,
+//! `feColorMatrix`, `feDropShadow` and `feOffset` primitives (and the CSS
+//! functions `blur()`, `drop-shadow()`, `grayscale()`, `sepia()`,
+//! `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()` and
+//! `opacity()`) and turns
 //! each filter of the `filter` list into one layer: the effects, a clip to the
 //! filter region, and the content inside. Everything else is reported and the
 //! element is drawn without that filter.
@@ -16,6 +19,7 @@
 use msx_ast::{Color, Effect, Element, Group, Layer, Transform};
 use roxmltree::Node;
 
+use crate::color_matrix as cm;
 use crate::geom::BBox;
 use crate::parse::{number_list, parse_color, parse_length, Unit};
 use crate::style::Props;
@@ -47,6 +51,18 @@ impl Step {
     }
 }
 
+/// Why a `url()` of a `filter` list gave no filter.
+#[derive(Debug)]
+enum Bad {
+    /// The element is not drawn, and the warning is already given.
+    Hidden,
+    /// The link points at nothing or at something that is not a filter. The
+    /// text finishes "<element> ...". Such a link is skipped when other
+    /// filters of the list work, as resvg does, and hides the element when it
+    /// is all there is.
+    Link(String),
+}
+
 /// What the `filter` property of one element comes to.
 #[derive(Debug, Default)]
 pub(crate) struct Resolved {
@@ -73,8 +89,8 @@ enum Deviation {
     /// input passes through.
     Skip,
     Even(f64),
-    /// Different amounts per axis, which a layer effect cannot express.
-    Uneven,
+    /// Different amounts per axis (x, y), one of them possibly 0.
+    Uneven(f64, f64),
 }
 
 fn deviation(raw: Option<&str>, default: Option<f64>, scale: (f64, f64)) -> Deviation {
@@ -97,7 +113,7 @@ fn deviation(raw: Option<&str>, default: Option<f64>, scale: (f64, f64)) -> Devi
     if (sx - sy).abs() < 1e-9 {
         Deviation::Even(sx)
     } else {
-        Deviation::Uneven
+        Deviation::Uneven(sx, sy)
     }
 }
 
@@ -157,17 +173,27 @@ impl<'a, 'i> Importer<'a, 'i> {
         };
         let label = Self::label(node);
         let mut steps = Vec::new();
+        // Filters that resolved, drawable here or not, and links that did not.
+        let mut valid = 0usize;
+        let mut bad_links = Vec::new();
         for item in split_top_level(&value) {
             if let Some(id) = parse_url_id(&item) {
                 match self.filter_by_url(&label, &id, bbox) {
-                    Ok(Some(step)) => steps.push(step),
-                    Ok(None) => {}
-                    Err(()) => return Resolved { steps: Vec::new(), hidden: true },
+                    Ok(Some(step)) => {
+                        valid += 1;
+                        steps.push(step);
+                    }
+                    Ok(None) => valid += 1,
+                    Err(Bad::Hidden) => return Resolved { steps: Vec::new(), hidden: true },
+                    Err(Bad::Link(why)) => bad_links.push(why),
                 }
             } else if let Some((name, args)) = function(&item) {
                 match self.filter_function(node, &name, args) {
-                    Ok(Some(step)) => steps.push(step),
-                    Ok(None) => {}
+                    Ok(Some(step)) => {
+                        valid += 1;
+                        steps.push(step);
+                    }
+                    Ok(None) => valid += 1,
                     Err(why) => {
                         self.warn(format!("{label} uses filter: {item}, which is not supported ({why}); the filter property is ignored"));
                         return Resolved::default();
@@ -177,6 +203,15 @@ impl<'a, 'i> Importer<'a, 'i> {
                 self.warn(format!("{label} uses filter: {item}, which is not supported; the filter property is ignored"));
                 return Resolved::default();
             }
+        }
+        if !bad_links.is_empty() && valid == 0 {
+            for why in bad_links {
+                self.warn(format!("{label} {why}; the element is not drawn"));
+            }
+            return Resolved { steps: Vec::new(), hidden: true };
+        }
+        for why in bad_links {
+            self.warn(format!("{label} {why}; that entry of the list is skipped"));
         }
         Resolved { steps, hidden: false }
     }
@@ -235,22 +270,55 @@ impl<'a, 'i> Importer<'a, 'i> {
                 let effect = Effect::DropShadow { offset_x: lengths[0], offset_y: lengths[1], blur_radius: blur, color, opacity };
                 Ok(Some(Step { effects: vec![effect], offset: (0.0, 0.0), region: None }))
             }
+            "grayscale" | "sepia" | "saturate" | "brightness" | "contrast" | "invert" | "opacity" => {
+                let amount = color_amount(args)?;
+                let values = match name {
+                    "grayscale" => cm::grayscale(amount),
+                    "sepia" => cm::sepia(amount),
+                    "saturate" => cm::saturate(amount),
+                    "brightness" => cm::brightness(amount),
+                    "contrast" => cm::contrast(amount),
+                    "invert" => cm::invert(amount),
+                    _ => cm::opacity(amount),
+                };
+                Ok(color_step(values))
+            }
+            "hue-rotate" => Ok(color_step(cm::hue_rotate(hue_angle(args)?))),
             other => Err(format!("{other}() has no layer effect")),
         }
+    }
+
+    /// Whether the primitives of a filter work in linear light, which is the
+    /// default. `color-interpolation-filters` is inherited, so it can sit on
+    /// the primitive, the filter or an ancestor.
+    fn filters_in_linear_light(&self, prim: Node<'a, 'i>) -> bool {
+        let mut cur = Some(prim);
+        while let Some(n) = cur {
+            // The attribute is not in the table of presentation attributes the
+            // style code reads, so it is taken from the node, and a style
+            // rule or a `style` attribute still wins over it.
+            let from_style = self.props_for(n).get("color-interpolation-filters").cloned();
+            let value = from_style.or_else(|| n.attribute("color-interpolation-filters").map(str::to_string));
+            match value.as_deref().map(str::trim) {
+                Some("sRGB") => return false,
+                Some("linearRGB") => return true,
+                _ => {}
+            }
+            cur = n.parent().filter(|p| p.is_element());
+        }
+        true
     }
 
     // ── Filter elements ──────────────────────────────────────────────────────
 
     /// `Ok(None)` when the filter cannot be used and the element is drawn
     /// without it, `Err` when the element is not drawn.
-    fn filter_by_url(&mut self, label: &str, id: &str, bbox: Option<BBox>) -> Result<Option<Step>, ()> {
+    fn filter_by_url(&mut self, label: &str, id: &str, bbox: Option<BBox>) -> Result<Option<Step>, Bad> {
         let Some(start) = self.ids.get(id).copied() else {
-            self.warn(format!("{label} uses the filter #{id}, which does not exist; the element is not drawn"));
-            return Err(());
+            return Err(Bad::Link(format!("uses the filter #{id}, which does not exist")));
         };
         if start.tag_name().name() != "filter" {
-            self.warn(format!("{label} uses #{id} as a filter, but it is a <{}>; the element is not drawn", start.tag_name().name()));
-            return Err(());
+            return Err(Bad::Link(format!("uses #{id} as a filter, but it is a <{}>", start.tag_name().name())));
         }
         let chain = self.filter_chain(start);
         let attr = |name: &str| chain.iter().find_map(|n| n.attribute(name)).map(str::trim);
@@ -263,14 +331,14 @@ impl<'a, 'i> Importer<'a, 'i> {
         } else {
             let Some(b) = bbox.filter(|b| b.w > 0.0 && b.h > 0.0) else {
                 self.warn(format!("{label} uses the filter #{id} on something without area; the element is not drawn"));
-                return Err(());
+                return Err(Bad::Hidden);
             };
             let f = |name: &str, default: f64| attr(name).and_then(obb_fraction).unwrap_or(default);
             (b.x + f("x", -0.1) * b.w, b.y + f("y", -0.1) * b.h, f("width", 1.2) * b.w, f("height", 1.2) * b.h)
         };
         if region.2 <= 0.0 || region.3 <= 0.0 {
             self.warn(format!("{label} uses the filter #{id}, whose region has no area; the element is not drawn"));
-            return Err(());
+            return Err(Bad::Hidden);
         }
 
         let prims: Vec<Node<'a, 'i>> = chain
@@ -280,13 +348,13 @@ impl<'a, 'i> Importer<'a, 'i> {
             .unwrap_or_default();
         if prims.is_empty() {
             self.warn(format!("{label} uses the filter #{id}, which has no primitives; the element is not drawn"));
-            return Err(());
+            return Err(Bad::Hidden);
         }
 
         let primitive_scale = if attr("primitiveUnits") == Some("objectBoundingBox") {
             match bbox.filter(|b| b.w > 0.0 && b.h > 0.0) {
                 Some(b) => (b.w, b.h),
-                None => return Err(()),
+                None => return Err(Bad::Hidden),
             }
         } else {
             (1.0, 1.0)
@@ -347,8 +415,15 @@ impl<'a, 'i> Importer<'a, 'i> {
                 "feGaussianBlur" => match deviation(prim.attribute("stdDeviation"), None, scale) {
                     Deviation::Skip => {}
                     Deviation::Even(radius) => effects.push(Effect::Blur { radius }),
-                    Deviation::Uneven => return Err("a blur with a different amount for each axis".into()),
+                    Deviation::Uneven(rx, ry) => effects.push(Effect::BlurXY { rx, ry }),
                 },
+                "feColorMatrix" => {
+                    let values = prim.attribute("values").map(number_list);
+                    let values = cm::from_primitive(prim.attribute("type"), values.as_deref());
+                    if !cm::is_identity(&values) {
+                        effects.push(Effect::ColorMatrix { values: cm::tidy(values), linear: self.filters_in_linear_light(*prim) });
+                    }
+                }
                 "feOffset" => {
                     offset.0 += number_attr(prim, "dx").unwrap_or(0.0) * scale.0;
                     offset.1 += number_attr(prim, "dy").unwrap_or(0.0) * scale.1;
@@ -357,7 +432,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     let blur = match deviation(prim.attribute("stdDeviation"), Some(2.0), scale) {
                         Deviation::Skip => 0.0,
                         Deviation::Even(radius) => radius,
-                        Deviation::Uneven => return Err("a shadow with a different blur for each axis".into()),
+                        Deviation::Uneven(..) => return Err("a shadow with a different blur for each axis".into()),
                     };
                     let props = self.props_for(*prim);
                     let color = match props.get("flood-color").map(|s| s.trim()) {
@@ -380,6 +455,61 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         Ok((effects, offset))
     }
+}
+
+/// The one amount of a color function, a number or a percentage, 1 when there
+/// is none. A negative amount is an error, as in the Filter Effects
+/// specification.
+fn color_amount(args: &str) -> Result<f64, String> {
+    let tokens = split_top_level(args);
+    let value = match tokens.as_slice() {
+        [] => return Ok(1.0),
+        [one] => match one.strip_suffix('%') {
+            Some(p) => p.trim().parse::<f64>().map(|v| v / 100.0),
+            None => one.parse::<f64>(),
+        },
+        _ => return Err("a color function takes one amount".into()),
+    };
+    match value {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        Ok(_) => Err("the amount must not be negative".into()),
+        Err(_) => Err("the amount must be a number or a percentage".into()),
+    }
+}
+
+/// The angle of `hue-rotate()` in degrees, 0 when there is none. A number
+/// without a unit is degrees.
+fn hue_angle(args: &str) -> Result<f64, String> {
+    let tokens = split_top_level(args);
+    let one = match tokens.as_slice() {
+        [] => return Ok(0.0),
+        [one] => one.as_str(),
+        _ => return Err("hue-rotate takes one angle".into()),
+    };
+    let (number, scale) = if let Some(n) = one.strip_suffix("deg") {
+        (n, 1.0)
+    } else if let Some(n) = one.strip_suffix("grad") {
+        (n, 0.9)
+    } else if let Some(n) = one.strip_suffix("rad") {
+        (n, 180.0 / std::f64::consts::PI)
+    } else if let Some(n) = one.strip_suffix("turn") {
+        (n, 360.0)
+    } else {
+        (one, 1.0)
+    };
+    match number.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v * scale),
+        _ => Err("the angle must be a number with deg, grad, rad or turn".into()),
+    }
+}
+
+/// A color function as a step, or nothing when the matrix changes no color.
+/// The CSS functions work on sRGB values.
+fn color_step(values: cm::Matrix) -> Option<Step> {
+    if cm::is_identity(&values) {
+        return None;
+    }
+    Some(Step { effects: vec![Effect::ColorMatrix { values: cm::tidy(values), linear: false }], offset: (0.0, 0.0), region: None })
 }
 
 fn has_top_level_comma(s: &str) -> bool {

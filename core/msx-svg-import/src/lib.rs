@@ -22,6 +22,7 @@
 
 mod anim;
 mod animate;
+mod color_matrix;
 mod cssanim;
 mod encoding;
 mod filter;

@@ -716,6 +716,101 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         assert!(far < 255, "sanity: the renders are comparable");
     }
 
+    /// One opaque rect of `color` in a layer with `effects`, over a black 20 by
+    /// 20 canvas.
+    fn render_effect_layer(renderer: &GpuRenderer, x: f64, y: f64, w: f64, h: f64, color: Color, effects: Vec<msx_ast::Effect>) -> RenderTarget {
+        let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
+        let rect = Element::Rect(Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style });
+        let mut layer = Layer::new(vec![rect]);
+        layer.effects = effects;
+        let mut scene = Scene::new(Canvas::new(20.0, 20.0, Color::BLACK));
+        scene.elements.push(Element::Layer(layer));
+        let mut target = RenderTarget::new(20, 20);
+        renderer.render(&scene, &mut target);
+        target
+    }
+
+    fn matrix_rows(rows: [[f64; 5]; 4]) -> [f64; 20] {
+        let mut out = [0.0; 20];
+        for (i, row) in rows.iter().enumerate() {
+            out[i * 5..i * 5 + 5].copy_from_slice(row);
+        }
+        out
+    }
+
+    /// `Effect::ColorMatrix` end-to-end: a matrix that swaps red and blue turns
+    /// an opaque red layer blue, and the neighbouring black backdrop stays.
+    #[test]
+    fn layer_color_matrix_swaps_channels_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let swap = matrix_rows([[0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 0.0]]);
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 10.0, 20.0, Color::rgb(255, 0, 0), vec![msx_ast::Effect::ColorMatrix { values: swap, linear: false }]);
+        let inside = t.get_pixel(4, 10);
+        assert!(inside[0] <= 2 && inside[1] <= 2 && inside[2] >= 253, "red became blue, got {inside:?}");
+        let outside = t.get_pixel(15, 10);
+        assert_eq!([outside[0], outside[1], outside[2]], [0, 0, 0], "the backdrop is not touched");
+    }
+
+    /// The matrix can run on linear light: half of the red moved to green is
+    /// 128 in sRGB values and about 188 in linear light.
+    #[test]
+    fn layer_color_matrix_linear_flag_changes_the_result_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let half = matrix_rows([[1.0, 0.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 0.0]]);
+        let green_of = |linear: bool| {
+            let t = render_effect_layer(&renderer, 0.0, 0.0, 20.0, 20.0, Color::rgb(255, 0, 0), vec![msx_ast::Effect::ColorMatrix { values: half, linear }]);
+            t.get_pixel(10, 10)[1] as i32
+        };
+        let (srgb, lin) = (green_of(false), green_of(true));
+        assert!((srgb - 128).abs() <= 3, "sRGB: {srgb}");
+        assert!((lin - 188).abs() <= 4, "linear light: {lin}");
+    }
+
+    /// The constant column can create color and alpha where the layer is empty
+    /// and the alpha row works on the straight alpha.
+    #[test]
+    fn layer_color_matrix_halves_alpha_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let half_alpha = matrix_rows([[1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5, 0.0]]);
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 20.0, 20.0, Color::rgb(255, 0, 0), vec![msx_ast::Effect::ColorMatrix { values: half_alpha, linear: false }]);
+        let px = t.get_pixel(10, 10);
+        assert!((px[0] as i32 - 128).abs() <= 3 && px[1] == 0 && px[2] == 0, "red at half alpha over black, got {px:?}");
+    }
+
+    /// `Effect::BlurXY` with a zero axis blurs only the other one.
+    #[test]
+    fn layer_blur_xy_blurs_only_the_axis_with_an_amount_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let red = Color::rgb(255, 0, 0);
+        // Left half only: the edge at x = 10 bleeds along x, a horizontal blur.
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 10.0, 20.0, red, vec![msx_ast::Effect::BlurXY { rx: 4.0, ry: 0.0 }]);
+        let past = t.get_pixel(12, 10)[0];
+        assert!(past > 0 && past < 255, "bled along x: {past}");
+        // The same layer blurred only along y keeps its vertical edge sharp.
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 10.0, 20.0, red, vec![msx_ast::Effect::BlurXY { rx: 0.0, ry: 4.0 }]);
+        assert!(t.get_pixel(12, 10)[0] <= 1, "no bleed along x: {}", t.get_pixel(12, 10)[0]);
+        assert!(t.get_pixel(8, 10)[0] >= 254, "inside stays red: {}", t.get_pixel(8, 10)[0]);
+        // Top half only: the horizontal edge bleeds along y.
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 20.0, 10.0, red, vec![msx_ast::Effect::BlurXY { rx: 0.0, ry: 4.0 }]);
+        let below = t.get_pixel(10, 12)[0];
+        assert!(below > 0 && below < 255, "bled along y: {below}");
+        // Both zero: nothing runs and the layer is unchanged.
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 10.0, 20.0, red, vec![msx_ast::Effect::BlurXY { rx: 0.0, ry: 0.0 }]);
+        assert!(t.get_pixel(12, 10)[0] <= 1 && t.get_pixel(8, 10)[0] >= 254);
+    }
+
     fn clip_rect(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {
         let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
         Element::Rect(Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style })

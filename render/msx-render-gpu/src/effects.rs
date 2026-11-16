@@ -1,6 +1,6 @@
 // render/msx-render-gpu/src/effects.rs
-//! GPU post-processing effects for `Layer`. Currently: `Effect::Blur`
-//! only.
+//! GPU post-processing effects for `Layer`. Currently: `Effect::Blur`,
+//! `Effect::BlurXY` and `Effect::ColorMatrix`.
 //!
 //! ## Still open
 //! `DropShadow`/`InnerShadow`/`OuterGlow`/`InnerGlow` all reuse this
@@ -8,7 +8,7 @@
 //! -> blur -> composite/clip) and would be the natural continuation —
 //! not attempted here. A `Layer` carrying one of those four renders
 //! today exactly as if that effect weren't present: `apply`'s
-//! `filter_map` below simply has no arm for them (silently skipped, not
+//! `match` below simply has no arm for them (silently skipped, not
 //! silently wrong — msx-render-cpu already implements all five, so this
 //! is a GPU-parity gap, not a format gap).
 //!
@@ -107,10 +107,39 @@ struct BlurParams {
     _pad: u32,
 }
 
+/// Mirrors `Params` in `shaders/color_matrix.wgsl`: a column major
+/// `mat4x4<f32>`, the constant column as a `vec4<f32>`, the linear light flag
+/// and three words of padding, 96 bytes.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColorMatrixParams {
+    m: [[f32; 4]; 4],
+    offset: [f32; 4],
+    linear: u32,
+    _pad: [u32; 3],
+}
+
+impl ColorMatrixParams {
+    /// From the row major 4x5 matrix of `Effect::ColorMatrix`.
+    fn new(values: &[f64; 20], linear: bool) -> Self {
+        let mut m = [[0.0f32; 4]; 4];
+        let mut offset = [0.0f32; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                m[col][row] = values[row * 5 + col] as f32;
+            }
+            offset[row] = values[row * 5 + 4] as f32;
+        }
+        ColorMatrixParams { m, offset, linear: u32::from(linear), _pad: [0; 3] }
+    }
+}
+
 pub struct GpuEffects {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    color_pipeline: wgpu::RenderPipeline,
+    color_layout: wgpu::BindGroupLayout,
 }
 
 impl GpuEffects {
@@ -206,41 +235,149 @@ impl GpuEffects {
             ..Default::default()
         });
 
-        GpuEffects { pipeline, bind_group_layout, sampler }
+        // The color matrix pass: the same texture and sampler, one uniform.
+        let color_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("msx layer effects color matrix shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/color_matrix.wgsl").into()),
+        });
+        let color_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("msx layer effects color matrix bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let color_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("msx layer effects color matrix pipeline layout"),
+            bind_group_layouts: &[&color_layout],
+            push_constant_ranges: &[],
+        });
+        let color_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("msx layer effects color matrix pipeline"),
+            layout: Some(&color_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &color_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &color_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        GpuEffects { pipeline, bind_group_layout, sampler, color_pipeline, color_layout }
     }
 
-    /// Runs every `Effect::Blur` found in `effects`, in order, as a
-    /// chained pair of passes each (horizontal then vertical) — later
-    /// blurs in the list compose onto the result of earlier ones, the
-    /// same left-to-right effect stacking `render_layer` already applies
-    /// this result to (compositing after). Any other `Effect` variant is
-    /// silently skipped (see this module's doc for why that's the
-    /// correct current behavior, not a bug).
+    /// Runs the blur and color matrix effects of `effects` in order. A blur
+    /// is a pair of passes (horizontal then vertical), a `BlurXY` skips the
+    /// axis whose amount is zero, and each effect reads the result of the one
+    /// before. Every other `Effect` variant is skipped (see this module's doc).
     ///
-    /// Returns `None`, touching neither `device` nor `queue` again after
-    /// the initial no-op check, when `effects` contains no `Blur` at
-    /// all — the common case (most layers have no effects), kept cheap
-    /// on purpose.
+    /// Returns `None`, touching neither `device` nor `queue`, when `effects`
+    /// holds nothing this path runs, which is the common case (most layers
+    /// have no effects), kept cheap on purpose.
     pub fn apply(&self, device: &wgpu::Device, queue: &wgpu::Queue, src: &OffscreenTarget, effects: &[Effect]) -> Option<OffscreenTarget> {
-        let radii: Vec<f32> = effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::Blur { radius } => Some(*radius as f32),
-                _ => None,
-            })
-            .collect();
-        if radii.is_empty() {
-            return None;
-        }
-
         let mut current: Option<OffscreenTarget> = None;
-        for radius in radii {
+        for effect in effects {
             let input_view: &wgpu::TextureView = current.as_ref().map(|t| &t.view).unwrap_or(&src.view);
-            let horizontal = self.pass(device, queue, input_view, src.width(), src.height(), [1.0, 0.0], radius);
-            let vertical   = self.pass(device, queue, &horizontal.view, src.width(), src.height(), [0.0, 1.0], radius);
-            current = Some(vertical);
+            let next = match effect {
+                Effect::Blur { radius } => self.blur(device, queue, input_view, src.width(), src.height(), *radius as f32, *radius as f32),
+                Effect::BlurXY { rx, ry } => self.blur(device, queue, input_view, src.width(), src.height(), *rx as f32, *ry as f32),
+                Effect::ColorMatrix { values, linear } => Some(self.color_pass(device, queue, input_view, src.width(), src.height(), values, *linear)),
+                _ => None,
+            };
+            if next.is_some() {
+                current = next;
+            }
         }
         current
+    }
+
+    /// A separable blur with a standard deviation per axis. An axis whose
+    /// amount is not above zero gets no pass, and `None` comes back when both
+    /// are skipped, since the input would be unchanged.
+    fn blur(&self, device: &wgpu::Device, queue: &wgpu::Queue, input_view: &wgpu::TextureView, width: u32, height: u32, rx: f32, ry: f32) -> Option<OffscreenTarget> {
+        let horizontal = (rx > 0.0).then(|| self.pass(device, queue, input_view, width, height, [1.0, 0.0], rx));
+        let vertical_input = horizontal.as_ref().map(|t| &t.view).unwrap_or(input_view);
+        let vertical = (ry > 0.0).then(|| self.pass(device, queue, vertical_input, width, height, [0.0, 1.0], ry));
+        vertical.or(horizontal)
+    }
+
+    /// One color matrix pass into a freshly allocated target.
+    fn color_pass(&self, device: &wgpu::Device, queue: &wgpu::Queue, input_view: &wgpu::TextureView, width: u32, height: u32, values: &[f64; 20], linear: bool) -> OffscreenTarget {
+        let output = OffscreenTarget::new(device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let params = ColorMatrixParams::new(values, linear);
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("msx layer effects color matrix params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("msx layer effects color matrix bind group"),
+            layout: &self.color_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(input_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("msx layer effects color matrix encoder") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("msx layer effects color matrix pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.color_pipeline);
+            rp.set_bind_group(0, &bind_group, &[]);
+            rp.draw(0..6, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+        output
     }
 
     /// One axis of one blur: renders a full-screen pass sampling
@@ -317,6 +454,21 @@ impl GpuEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_matrix_params_match_the_wgsl_layout_and_transpose_the_rows() {
+        assert_eq!(std::mem::size_of::<ColorMatrixParams>(), 96);
+        let mut v = [0.0f64; 20];
+        for (i, x) in v.iter_mut().enumerate() {
+            *x = i as f64;
+        }
+        let p = ColorMatrixParams::new(&v, true);
+        // Row 1 (green), column 2 is values[1 * 5 + 2] and sits at m[2][1].
+        assert_eq!(p.m[2][1], 7.0);
+        assert_eq!(p.m[0][3], 15.0);
+        assert_eq!(p.offset, [4.0, 9.0, 14.0, 19.0]);
+        assert_eq!(p.linear, 1);
+    }
 
     #[test]
     fn kernel_normalizes_to_unit_mass() {

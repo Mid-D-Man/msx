@@ -226,8 +226,8 @@ way `group` does. Shader fills inside a `layer`'s children DO get real
 GPU execution — `layer.rs`'s own render path is given the real scene
 defs and the same shader pipeline/composite the top-level path uses, not
 a stripped-down one. Non-Normal blend modes (`multiply`, `screen`, etc.)
-and the `blur` effect are implemented on all three renderers;
-`drop_shadow`/`inner_shadow`/`outer_glow`/`inner_glow` are CPU/SVG only
+and the `blur`, `blur_xy` and `color_matrix` effects are implemented on all
+three renderers; `drop_shadow`/`inner_shadow`/`outer_glow`/`inner_glow` are CPU/SVG only
 so far — see `msx-render-gpu/src/effects.rs`'s own module doc for the
 shared foundation those four would build on.
 

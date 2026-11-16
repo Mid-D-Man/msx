@@ -2778,12 +2778,16 @@ fn deviations_that_blur_nothing_leave_the_picture_alone() {
 }
 
 #[test]
-fn a_different_blur_per_axis_is_reported_and_the_element_drawn_plain() {
-    for std in ["5 0", "0 5", "20 2"] {
+fn a_different_blur_per_axis_becomes_a_blur_xy() {
+    for (std, rx, ry) in [("5 0", 5.0, 0.0), ("0 5", 0.0, 5.0), ("20 2", 20.0, 2.0)] {
         let i = filtered(&format!(r#"<filter id="f"><feGaussianBlur stdDeviation="{std}"/></filter>"#), SQUARE);
-        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "stdDeviation=\"{std}\"");
-        assert!(has_warning(&i, "different amount for each axis"), "stdDeviation=\"{std}\"");
+        assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::BlurXY { rx, ry }], "stdDeviation=\"{std}\"");
+        assert!(i.warnings.is_empty(), "stdDeviation=\"{std}\": {:?}", i.warnings);
     }
+    // A shadow has one blur radius, so an uneven one is still reported.
+    let i = filtered(r#"<filter id="f"><feDropShadow stdDeviation="5 1"/></filter>"#, SQUARE);
+    assert!(matches!(i.scene.elements[0], Element::Rect(_)));
+    assert!(has_warning(&i, "different blur for each axis"), "{:?}", i.warnings);
 }
 
 #[test]
@@ -2868,7 +2872,7 @@ fn primitive_units_scale_the_deviation_by_the_box() {
         r#"<filter id="f" primitiveUnits="objectBoundingBox"><feGaussianBlur stdDeviation="0.1"/></filter>"#,
         r##"<rect x="20" y="20" width="60" height="30" fill="#010203" filter="url(#f)"/>"##,
     );
-    assert!(has_warning(&i, "different amount for each axis"));
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::BlurXY { rx: 6.0, ry: 3.0 }], "the deviation follows each side of the box");
 }
 
 #[test]
@@ -2882,7 +2886,7 @@ fn css_blur_function() {
         assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{ok_but_nothing}");
         assert!(i.warnings.is_empty(), "{ok_but_nothing}");
     }
-    for bad in ["blur(-1px)", "blur(5px 5px)", "blur(10%)", "sepia(1)", "grayscale(50%)"] {
+    for bad in ["blur(-1px)", "blur(5px 5px)", "blur(10%)", "sepia(-1)", "grayscale(abc)", "invert(1 2)", "hue-rotate(10foo)"] {
         let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {bad}"/>"##)));
         assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{bad}");
         assert!(has_warning(&i, "which is not supported"), "{bad}: {:?}", i.warnings);
@@ -2926,9 +2930,10 @@ fn a_list_applies_its_filters_in_order_with_the_first_innermost() {
 }
 
 #[test]
-fn one_missing_url_in_a_list_hides_the_element() {
+fn one_missing_url_in_a_list_is_skipped_when_another_filter_works() {
     let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="2"/></filter>"#, r#"<rect width="10" height="10" style="filter: url(#f) url(#nope)"/>"#);
-    assert!(i.scene.elements.is_empty());
+    assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::Blur { radius: 2.0 }]);
+    assert!(has_warning(&i, "that entry of the list is skipped"), "{:?}", i.warnings);
 }
 
 #[test]
@@ -3462,5 +3467,143 @@ fn style_animation_survives_write_and_parse() {
     for t in [0.0, 0.4, 1.0, 1.7] {
         let want = format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements);
         assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), want, "source at {t}");
+    }
+}
+
+// ── Color matrix and per-axis blur ───────────────────────────────────────────
+
+fn color_effect(i: &Imported) -> ([f64; 20], bool) {
+    match filter_layer(i).effects.as_slice() {
+        [msx_ast::Effect::ColorMatrix { values, linear }] => (*values, *linear),
+        other => panic!("expected one color matrix, got {other:?}"),
+    }
+}
+
+#[test]
+fn fe_color_matrix_maps_its_four_types_and_works_in_linear_light_by_default() {
+    use crate::color_matrix as cm;
+    let cases = [
+        (r#"<feColorMatrix type="saturate" values="0.25"/>"#, cm::saturate(0.25)),
+        (r#"<feColorMatrix type="hueRotate" values="90"/>"#, cm::hue_rotate(90.0)),
+        (r#"<feColorMatrix type="luminanceToAlpha"/>"#, cm::luminance_to_alpha()),
+        (r#"<feColorMatrix values="0 1 0 0 0  1 0 0 0 0  0 0 1 0 0  0 0 0 1 0.5"/>"#, [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5]),
+    ];
+    for (primitive, want) in cases {
+        let i = filtered(&format!(r#"<filter id="f">{primitive}</filter>"#), SQUARE);
+        assert!(i.warnings.is_empty(), "{primitive}: {:?}", i.warnings);
+        let (values, linear) = color_effect(&i);
+        assert!(linear, "{primitive}");
+        for (a, b) in values.iter().zip(want.iter()) {
+            assert!((a - b).abs() < 1e-6, "{primitive}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn color_interpolation_filters_picks_the_space_from_the_primitive_the_filter_or_an_ancestor() {
+    let on_primitive = filtered(r#"<filter id="f"><feColorMatrix type="saturate" values="0" color-interpolation-filters="sRGB"/></filter>"#, SQUARE);
+    assert!(!color_effect(&on_primitive).1);
+    let on_filter = filtered(r#"<filter id="f" color-interpolation-filters="sRGB"><feColorMatrix type="saturate" values="0"/></filter>"#, SQUARE);
+    assert!(!color_effect(&on_filter).1);
+    let overridden = filtered(r#"<filter id="f" color-interpolation-filters="sRGB"><feColorMatrix type="saturate" values="0" color-interpolation-filters="linearRGB"/></filter>"#, SQUARE);
+    assert!(color_effect(&overridden).1);
+}
+
+#[test]
+fn a_color_matrix_that_changes_nothing_adds_no_effect() {
+    for primitive in [
+        r#"<feColorMatrix/>"#,
+        r#"<feColorMatrix type="qwe" values="1 2 3"/>"#,
+        r#"<feColorMatrix type="matrix" values="1 0 0"/>"#,
+        r#"<feColorMatrix type="saturate"/>"#,
+        r#"<feColorMatrix type="hueRotate"/>"#,
+        r#"<feColorMatrix type="saturate" values="1"/>"#,
+    ] {
+        let i = filtered(&format!(r#"<filter id="f">{primitive}</filter>"#), SQUARE);
+        assert!(i.warnings.is_empty(), "{primitive}: {:?}", i.warnings);
+        assert!(filter_layer(&i).effects.is_empty(), "{primitive}");
+    }
+}
+
+#[test]
+fn a_blur_and_a_color_matrix_chain_in_order() {
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="2"/><feColorMatrix type="saturate" values="0"/></filter>"#, SQUARE);
+    let effects = filter_layer(&i).effects.clone();
+    assert!(matches!(effects.as_slice(), [msx_ast::Effect::Blur { .. }, msx_ast::Effect::ColorMatrix { linear: true, .. }]), "{effects:?}");
+}
+
+#[test]
+fn css_color_functions_become_color_matrix_effects_in_srgb() {
+    use crate::color_matrix as cm;
+    let cases = [
+        ("grayscale(100%)", cm::grayscale(1.0)),
+        ("grayscale(0.5)", cm::grayscale(0.5)),
+        ("sepia(1)", cm::sepia(1.0)),
+        ("saturate(200%)", cm::saturate(2.0)),
+        ("brightness(1.5)", cm::brightness(1.5)),
+        ("contrast(50%)", cm::contrast(0.5)),
+        ("invert(1)", cm::invert(1.0)),
+        ("opacity(25%)", cm::opacity(0.25)),
+        ("hue-rotate(90deg)", cm::hue_rotate(90.0)),
+        ("hue-rotate(0.25turn)", cm::hue_rotate(90.0)),
+        ("hue-rotate(100grad)", cm::hue_rotate(90.0)),
+        ("hue-rotate(45)", cm::hue_rotate(45.0)),
+    ];
+    for (function, want) in cases {
+        let i = imp(&doc(&format!(r##"<rect x="20" y="20" width="60" height="60" fill="#010203" style="filter: {function}"/>"##)));
+        assert!(i.warnings.is_empty(), "{function}: {:?}", i.warnings);
+        let l = filter_layer(&i);
+        assert!(l.clip_path.is_none(), "a filter function has no region clip");
+        let [msx_ast::Effect::ColorMatrix { values, linear }] = l.effects.as_slice() else { panic!("{function}: {:?}", l.effects) };
+        assert!(!linear, "{function} works on sRGB values");
+        for (a, b) in values.iter().zip(want.iter()) {
+            assert!((a - b).abs() < 1e-6, "{function}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn a_color_function_with_its_neutral_amount_draws_the_element_plain() {
+    for function in ["grayscale(0)", "sepia(0%)", "saturate()", "saturate(1)", "brightness()", "contrast(100%)", "invert(0)", "opacity()", "hue-rotate(0deg)", "hue-rotate()"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" style="filter: {function}"/>"##)));
+        assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{function}");
+        assert!(i.warnings.is_empty(), "{function}: {:?}", i.warnings);
+    }
+}
+
+#[test]
+fn a_list_of_color_functions_is_one_layer_each() {
+    let i = imp(&doc(r##"<rect x="20" y="20" width="60" height="60" fill="#010203" style="filter: grayscale(1) blur(2px)"/>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let outer = filter_layer(&i);
+    assert!(matches!(outer.effects.as_slice(), [msx_ast::Effect::Blur { .. }]), "the last function is outermost");
+    let inner = layer_of(&outer.children[0]);
+    assert!(matches!(inner.effects.as_slice(), [msx_ast::Effect::ColorMatrix { .. }]));
+}
+
+#[test]
+fn a_missing_filter_in_a_list_is_skipped_and_hides_the_element_only_when_nothing_else_is_left() {
+    // resvg: the invalid link is skipped, grayscale and opacity still apply.
+    let i = imp(&doc(r##"<rect x="20" y="20" width="60" height="60" fill="#010203" filter="grayscale(0.5) url(#missing) opacity(0.5)"/>"##));
+    assert!(has_warning(&i, "which does not exist; that entry of the list is skipped"), "{:?}", i.warnings);
+    assert!(!i.scene.elements.is_empty(), "the element is drawn");
+    let outer = filter_layer(&i);
+    let inner = layer_of(&outer.children[0]);
+    assert!(matches!(outer.effects.as_slice(), [msx_ast::Effect::ColorMatrix { .. }]));
+    assert!(matches!(inner.effects.as_slice(), [msx_ast::Effect::ColorMatrix { .. }]));
+    // Alone, or with nothing that works next to it, the link hides the element.
+    for value in ["url(#missing)", "url(#missing) url(#also-missing)"] {
+        let i = imp(&doc(&format!(r##"<rect width="10" height="10" fill="#010203" filter="{value}"/>"##)));
+        assert!(i.scene.elements.is_empty(), "{value}");
+        assert!(has_warning(&i, "which does not exist; the element is not drawn"), "{value}: {:?}", i.warnings);
+    }
+}
+
+#[test]
+fn imported_matrices_carry_no_float_noise() {
+    let i = filtered(r#"<filter id="f"><feColorMatrix type="hueRotate" values="90"/></filter>"#, SQUARE);
+    let (values, _) = color_effect(&i);
+    for v in values {
+        assert_eq!((v * 1e6).round() / 1e6, v, "{v} has more than six decimals");
     }
 }

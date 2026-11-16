@@ -115,6 +115,26 @@ fn effect_primitive(effect: &Effect, input: &str, result: &str, idx: usize) -> S
             result = result,
         ),
 
+        // Two numbers give a deviation per axis. A zero on one axis blurs only
+        // the other.
+        Effect::BlurXY { rx, ry } => format!(
+            r#"<feGaussianBlur in="{input}" stdDeviation="{rx} {ry}" result="{result}"/>"#,
+            input = input,
+            rx = fmt_f64(rx.max(0.0)),
+            ry = fmt_f64(ry.max(0.0)),
+            result = result,
+        ),
+
+        // The color space is written on the primitive, because the filter
+        // default (linearRGB) would otherwise apply to every matrix.
+        Effect::ColorMatrix { values, linear } => format!(
+            r#"<feColorMatrix in="{input}" type="matrix" values="{values}" color-interpolation-filters="{space}" result="{result}"/>"#,
+            input = input,
+            values = values.iter().map(|v| fmt_matrix_value(*v)).collect::<Vec<_>>().join(" "),
+            space = if *linear { "linearRGB" } else { "sRGB" },
+            result = result,
+        ),
+
         Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => format!(
             r#"<feDropShadow in="{input}" dx="{dx}" dy="{dy}" stdDeviation="{blur}" flood-color="{color}" flood-opacity="{op}" result="{result}"/>"#,
             input = input,
@@ -166,3 +186,12 @@ fn effect_primitive(effect: &Effect, input: &str, result: &str, idx: usize) -> S
         ),
     }
         }
+
+/// A color matrix entry with six decimals, because `fmt_f64` keeps four and a
+/// luminance weight such as 0.2126 needs more than that to match the
+/// other renderers.
+fn fmt_matrix_value(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-0" { "0".to_string() } else { s.to_string() }
+}

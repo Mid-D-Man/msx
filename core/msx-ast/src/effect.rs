@@ -19,6 +19,10 @@ pub enum EffectType {
     InnerShadow = 2,
     OuterGlow   = 3,
     InnerGlow   = 4,
+    /// Wire version 3.
+    BlurXY      = 5,
+    /// Wire version 3.
+    ColorMatrix = 6,
 }
 
 impl EffectType {
@@ -29,6 +33,8 @@ impl EffectType {
             2 => Some(EffectType::InnerShadow),
             3 => Some(EffectType::OuterGlow),
             4 => Some(EffectType::InnerGlow),
+            5 => Some(EffectType::BlurXY),
+            6 => Some(EffectType::ColorMatrix),
             _ => None,
         }
     }
@@ -72,6 +78,22 @@ pub enum Effect {
         blur_radius: f64,
         opacity:     f64,
     },
+
+    /// Gaussian blur with a standard deviation for each axis (`feGaussianBlur`
+    /// with two values). `Blur` is the case where both are equal. A zero on
+    /// one axis blurs only the other. Wire version 3.
+    BlurXY { rx: f64, ry: f64 },
+
+    /// A 4x5 color matrix on the layer output (`feColorMatrix`, and the CSS
+    /// functions `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`,
+    /// `brightness()`, `contrast()`, `invert()` and `opacity()`). `values` is
+    /// row major: the rows give the new red, green, blue and alpha, and the
+    /// columns weigh the old red, green, blue, alpha and a constant, so
+    /// `r' = v[0] r + v[1] g + v[2] b + v[3] a + v[4]`. It works on straight
+    /// (not premultiplied) channels in 0 to 1, and the results are held to 0
+    /// to 1. `linear` runs it on linear light instead of sRGB values, which is
+    /// the default of `feColorMatrix`. Wire version 3.
+    ColorMatrix { values: [f64; 20], linear: bool },
 }
 
 impl Effect {
@@ -82,6 +104,8 @@ impl Effect {
             Effect::InnerShadow { .. } => EffectType::InnerShadow,
             Effect::OuterGlow { .. }   => EffectType::OuterGlow,
             Effect::InnerGlow { .. }   => EffectType::InnerGlow,
+            Effect::BlurXY { .. }      => EffectType::BlurXY,
+            Effect::ColorMatrix { .. } => EffectType::ColorMatrix,
         }
     }
 
@@ -109,6 +133,22 @@ impl Effect {
             Effect::InnerGlow { color, blur_radius, opacity } => {
                 Effect::InnerGlow { color: *color, blur_radius: blur_radius * s, opacity: *opacity }
             }
+            Effect::BlurXY { rx, ry } => {
+                // The blur runs on the device axes. A matrix that keeps the
+                // axes (scale, flip, quarter turn) scales each amount by the
+                // length of the axis it lands on. Any other matrix has no
+                // axis aligned answer, so both amounts use the mean scale.
+                let (sx, sy) = (m.a.hypot(m.b), m.c.hypot(m.d));
+                let keeps_axes = (m.b.abs() < 1e-9 && m.c.abs() < 1e-9) || (m.a.abs() < 1e-9 && m.d.abs() < 1e-9);
+                if !keeps_axes {
+                    Effect::BlurXY { rx: rx * s, ry: ry * s }
+                } else if m.b.abs() < 1e-9 {
+                    Effect::BlurXY { rx: rx * sx, ry: ry * sy }
+                } else {
+                    Effect::BlurXY { rx: ry * sy, ry: rx * sx }
+                }
+            }
+            Effect::ColorMatrix { .. } => self.clone(),
         }
     }
 
@@ -119,6 +159,8 @@ impl Effect {
             Effect::DropShadow { offset_x, offset_y, blur_radius, .. }           => offset_x.abs().max(offset_y.abs()) + blur_radius * 3.0,
             Effect::OuterGlow { blur_radius, spread, .. }                         => blur_radius * 3.0 + spread,
             Effect::InnerShadow { .. } | Effect::InnerGlow { .. }                 => 0.0,
+            Effect::BlurXY { rx, ry }                                              => rx.max(*ry) * 3.0,
+            Effect::ColorMatrix { .. }                                             => 0.0,
         }
     }
       }
@@ -158,5 +200,36 @@ mod tests {
         let fx = Effect::DropShadow { offset_x: 10.0, offset_y: 0.0, blur_radius: 2.0, color: Color::BLACK, opacity: 1.0 };
         let Effect::DropShadow { offset_x, offset_y, blur_radius, .. } = fx.scaled(&m) else { unreachable!() };
         assert!(close(offset_x, 0.0) && close(offset_y, 10.0) && close(blur_radius, 2.0));
+    }
+
+    #[test]
+    fn blur_xy_scales_each_axis_by_the_axis_it_lands_on() {
+        let fx = Effect::BlurXY { rx: 2.0, ry: 5.0 };
+        let Effect::BlurXY { rx, ry } = fx.scaled(&Matrix2D::scale(3.0, 2.0)) else { unreachable!() };
+        assert!(close(rx, 6.0) && close(ry, 10.0));
+        // A quarter turn puts the user y axis on the device x axis.
+        let Effect::BlurXY { rx, ry } = fx.scaled(&Matrix2D::rotate_deg(90.0)) else { unreachable!() };
+        assert!(close(rx, 5.0) && close(ry, 2.0), "{rx} {ry}");
+        // No axis aligned answer for a turn of 30 degrees: the mean scale.
+        let Effect::BlurXY { rx, ry } = fx.scaled(&Matrix2D::rotate_deg(30.0)) else { unreachable!() };
+        assert!(close(rx, 2.0) && close(ry, 5.0));
+    }
+
+    #[test]
+    fn color_matrix_is_not_moved_by_the_layer_matrix() {
+        let fx = Effect::ColorMatrix { values: [0.5; 20], linear: true };
+        assert_eq!(fx.scaled(&Matrix2D::scale(4.0, 4.0)), fx);
+        assert_eq!(fx.max_extent(), 0.0);
+        assert_eq!(Effect::BlurXY { rx: 1.0, ry: 4.0 }.max_extent(), 12.0);
+    }
+
+    #[test]
+    fn effect_types_round_trip_through_bytes() {
+        for b in 0..=6u8 {
+            assert_eq!(EffectType::from_byte(b).unwrap() as u8, b);
+        }
+        assert_eq!(EffectType::from_byte(7), None);
+        assert_eq!(Effect::BlurXY { rx: 1.0, ry: 2.0 }.effect_type(), EffectType::BlurXY);
+        assert_eq!(Effect::ColorMatrix { values: [0.0; 20], linear: false }.effect_type(), EffectType::ColorMatrix);
     }
 }

@@ -28,6 +28,8 @@ pub fn apply_effects(pixmap: &mut Pixmap, effects: &[Effect]) {
     for effect in effects {
         match effect {
             Effect::Blur { radius } => gaussian_blur(pixmap, *radius as f32),
+            Effect::BlurXY { rx, ry } => gaussian_blur_xy(pixmap, *rx as f32, *ry as f32),
+            Effect::ColorMatrix { values, linear } => color_matrix(pixmap, values, *linear),
             Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => {
                 drop_shadow(pixmap, *offset_x as f32, *offset_y as f32, *blur_radius as f32, *color, *opacity as f32);
             }
@@ -51,20 +53,68 @@ pub fn apply_effects(pixmap: &mut Pixmap, effects: &[Effect]) {
 /// Gaussian kernel below that. Pixels outside the buffer count as transparent,
 /// and the values stay in `f32` until the end so faint sources survive.
 pub fn gaussian_blur(pixmap: &mut Pixmap, sigma: f32) {
-    if sigma.is_nan() || sigma <= 0.0 {
+    gaussian_blur_xy(pixmap, sigma, sigma);
+}
+
+/// The same blur with a standard deviation for each axis. An axis whose value
+/// is zero, negative or not a number is left alone, so `(4, 0)` blurs along
+/// the rows only.
+pub fn gaussian_blur_xy(pixmap: &mut Pixmap, sigma_x: f32, sigma_y: f32) {
+    let blurs = |sigma: f32| !sigma.is_nan() && sigma > 0.0;
+    if !blurs(sigma_x) && !blurs(sigma_y) {
         return;
     }
     let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
     let mut buf: Vec<f32> = pixmap.data().iter().map(|&b| b as f32).collect();
 
-    blur_rows(&mut buf, width, sigma);
+    if blurs(sigma_x) {
+        blur_rows(&mut buf, width, sigma_x);
+    }
     let mut turned = transpose(&buf, width, height);
-    blur_rows(&mut turned, height, sigma);
+    if blurs(sigma_y) {
+        blur_rows(&mut turned, height, sigma_y);
+    }
     let buf = transpose(&turned, height, width);
 
     for (dst, &src) in pixmap.data_mut().iter_mut().zip(buf.iter()) {
         *dst = src.round().clamp(0.0, 255.0) as u8;
     }
+}
+
+// ── Color matrix ─────────────────────────────────────────────────────────────
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// Applies a 4x5 color matrix (see `Effect::ColorMatrix`) to every pixel. The
+/// buffer is premultiplied, so each pixel goes to straight channels first and
+/// back afterwards. With `linear` the red, green and blue are converted to
+/// linear light for the matrix and back, which leaves alpha alone.
+pub fn color_matrix(pixmap: &mut Pixmap, values: &[f64; 20], linear: bool) {
+    let m: [f32; 20] = values.map(|v| v as f32);
+    pixmap.data_mut().par_chunks_exact_mut(4).for_each(|px| {
+        let a = px[3] as f32 / 255.0;
+        let straight = |v: u8| if a > 0.0 { (v as f32 / 255.0 / a).min(1.0) } else { 0.0 };
+        let (mut r, mut g, mut b) = (straight(px[0]), straight(px[1]), straight(px[2]));
+        if linear {
+            (r, g, b) = (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+        }
+        let row = |k: usize| (m[k] * r + m[k + 1] * g + m[k + 2] * b + m[k + 3] * a + m[k + 4]).clamp(0.0, 1.0);
+        let (mut nr, mut ng, mut nb, na) = (row(0), row(5), row(10), row(15));
+        if linear {
+            (nr, ng, nb) = (linear_to_srgb(nr), linear_to_srgb(ng), linear_to_srgb(nb));
+        }
+        let premul = |v: f32| (v * na * 255.0).round().clamp(0.0, 255.0) as u8;
+        px[0] = premul(nr);
+        px[1] = premul(ng);
+        px[2] = premul(nb);
+        px[3] = (na * 255.0).round().clamp(0.0, 255.0) as u8;
+    });
 }
 
 /// Blurs every row of an RGBA `f32` buffer that is `width` pixels wide.
@@ -514,5 +564,106 @@ mod tests {
         let before = p.data().to_vec();
         gaussian_blur(&mut p, 0.01);
         assert_eq!(p.data(), before.as_slice());
+    }
+
+    fn pixel(p: &Pixmap, x: usize, y: usize) -> [u8; 4] {
+        let w = p.width() as usize;
+        let idx = (y * w + x) * 4;
+        p.data()[idx..idx + 4].try_into().unwrap()
+    }
+
+    fn matrix(rows: [[f64; 5]; 4]) -> [f64; 20] {
+        let mut out = [0.0; 20];
+        for (i, row) in rows.iter().enumerate() {
+            out[i * 5..i * 5 + 5].copy_from_slice(row);
+        }
+        out
+    }
+
+    const IDENTITY: [[f64; 5]; 4] = [[1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 0.0]];
+
+    #[test]
+    fn blur_xy_with_a_zero_axis_only_blurs_the_other_one() {
+        let mut p = Pixmap::new(21, 21).unwrap();
+        solid_pixel(&mut p, 10, 10, [255, 255, 255, 255]);
+        gaussian_blur_xy(&mut p, 2.0, 0.0);
+        assert!(pixel(&p, 8, 10)[3] > 0 && pixel(&p, 12, 10)[3] > 0, "spread along x");
+        assert_eq!(pixel(&p, 10, 9), [0, 0, 0, 0], "nothing along y");
+        assert_eq!(pixel(&p, 10, 11), [0, 0, 0, 0]);
+        let mut q = Pixmap::new(21, 21).unwrap();
+        solid_pixel(&mut q, 10, 10, [255, 255, 255, 255]);
+        gaussian_blur_xy(&mut q, 0.0, 2.0);
+        assert!(pixel(&q, 10, 8)[3] > 0 && pixel(&q, 8, 10)[3] == 0, "spread along y only");
+    }
+
+    #[test]
+    fn blur_xy_with_equal_axes_is_the_plain_blur() {
+        let mut a = Pixmap::new(15, 15).unwrap();
+        solid_pixel(&mut a, 7, 7, [200, 100, 50, 255]);
+        let mut b = a.clone();
+        gaussian_blur(&mut a, 1.5);
+        gaussian_blur_xy(&mut b, 1.5, 1.5);
+        assert_eq!(a.data(), b.data());
+    }
+
+    #[test]
+    fn the_identity_color_matrix_changes_nothing_in_either_space() {
+        for linear in [false, true] {
+            let mut p = Pixmap::new(2, 1).unwrap();
+            solid_pixel(&mut p, 0, 0, [100, 50, 20, 200]);
+            solid_pixel(&mut p, 1, 0, [0, 0, 0, 0]);
+            let before = p.data().to_vec();
+            color_matrix(&mut p, &matrix(IDENTITY), linear);
+            for (a, b) in p.data().iter().zip(&before) {
+                assert!((*a as i32 - *b as i32).abs() <= 1, "linear={linear}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_color_matrix_works_on_straight_channels_and_keeps_alpha_in_premultiplied_form() {
+        // Straight (200, 100, 50) at alpha 0.5 is stored as (100, 50, 25, 128).
+        let mut p = Pixmap::new(1, 1).unwrap();
+        solid_pixel(&mut p, 0, 0, [100, 50, 25, 128]);
+        // Swap red and blue.
+        color_matrix(&mut p, &matrix([[0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 0.0]]), false);
+        let [r, g, b, a] = pixel(&p, 0, 0);
+        assert_eq!(a, 128);
+        assert!((r as i32 - 25).abs() <= 1 && (g as i32 - 50).abs() <= 1 && (b as i32 - 100).abs() <= 1, "{r} {g} {b}");
+    }
+
+    #[test]
+    fn a_color_matrix_can_set_alpha_and_color_from_the_constant_column() {
+        // Everything becomes opaque red, even where the layer was empty.
+        let mut p = Pixmap::new(1, 1).unwrap();
+        color_matrix(&mut p, &matrix([[0.0, 0.0, 0.0, 0.0, 1.0], [0.0; 5], [0.0; 5], [0.0, 0.0, 0.0, 0.0, 1.0]]), false);
+        assert_eq!(pixel(&p, 0, 0), [255, 0, 0, 255]);
+        // Results are held to 0 to 1.
+        let mut q = Pixmap::new(1, 1).unwrap();
+        solid_pixel(&mut q, 0, 0, [255, 255, 255, 255]);
+        color_matrix(&mut q, &matrix([[2.0, 0.0, 0.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0, 0.0], IDENTITY[2], IDENTITY[3]]), false);
+        assert_eq!(pixel(&q, 0, 0), [255, 0, 255, 255]);
+    }
+
+    #[test]
+    fn the_color_space_changes_the_result_of_a_matrix_that_mixes_channels() {
+        // Half of the red goes to green: sRGB and linear light disagree.
+        let rows = [IDENTITY[0], [0.5, 0.5, 0.0, 0.0, 0.0], IDENTITY[2], IDENTITY[3]];
+        let mut srgb = Pixmap::new(1, 1).unwrap();
+        solid_pixel(&mut srgb, 0, 0, [255, 0, 0, 255]);
+        let mut lin = srgb.clone();
+        color_matrix(&mut srgb, &matrix(rows), false);
+        color_matrix(&mut lin, &matrix(rows), true);
+        assert_eq!(pixel(&srgb, 0, 0)[1], 128);
+        assert_eq!(pixel(&lin, 0, 0)[1], 188, "0.5 in linear light is 188 in sRGB");
+    }
+
+    #[test]
+    fn apply_effects_runs_the_new_effects_in_order() {
+        let mut p = Pixmap::new(11, 11).unwrap();
+        solid_pixel(&mut p, 5, 5, [255, 255, 255, 255]);
+        apply_effects(&mut p, &[Effect::BlurXY { rx: 1.5, ry: 1.5 }, Effect::ColorMatrix { values: matrix([[0.0, 0.0, 0.0, 0.0, 0.0], IDENTITY[1], [0.0; 5], IDENTITY[3]]), linear: false }]);
+        let [r, g, b, a] = pixel(&p, 5, 5);
+        assert!(a > 0 && r == 0 && b == 0 && g > 0, "green only: {r} {g} {b} {a}");
     }
 }

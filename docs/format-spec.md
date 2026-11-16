@@ -282,13 +282,15 @@ An isolated compositing group: children render into their own offscreen buffer (
     { type = "inner_shadow", offset_x = <float>, offset_y = <float>, blur_radius = <float>, color = <color>, opacity = <float> }
     { type = "outer_glow",   color = <color>, blur_radius = <float>, spread = <float>, opacity = <float> }
     { type = "inner_glow",   color = <color>, blur_radius = <float>, opacity = <float> }
+    { type = "blur_xy",      rx = <float>, ry = <float> }                                  // wire version 3
+    { type = "color_matrix", values = [<20 floats>], linear = <bool>? }                    // wire version 3
     ...
   ]
   id = <string>?  transform = <transform>?
 }
 ```
 
-**Rendering support today:** all three renderers (SVG/CPU/GPU) agree on Layer nesting semantics (a nested Layer's own z_index/opacity resolve at its own level first, then the parent participates as one unit in its sibling list) and on shader fills reaching shapes inside a Layer. `blend_mode` and `Effect::Blur` are implemented on GPU; `DropShadow`/`InnerShadow`/`OuterGlow`/`InnerGlow` are not yet — a Layer using one of those four renders today exactly as if that effect weren't present, on GPU specifically (CPU already implements all five).
+**Rendering support today:** all three renderers (SVG/CPU/GPU) agree on Layer nesting semantics (a nested Layer's own z_index/opacity resolve at its own level first, then the parent participates as one unit in its sibling list) and on shader fills reaching shapes inside a Layer. `blend_mode`, `Effect::Blur`, `Effect::BlurXY` and `Effect::ColorMatrix` are implemented on GPU; `DropShadow`/`InnerShadow`/`OuterGlow`/`InnerGlow` are not yet. A Layer using one of those four renders today exactly as if that effect weren't present, on GPU specifically (CPU implements all seven).
 
 `z_index` is purely relative: only compared against other top-level Layers, never against ordinary (non-Layer) elements, which always draw before every Layer regardless of z_index. Ties break by document order (a stable sort, same convention as CSS `z-index`).
 
@@ -530,7 +532,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16 |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16. The layer effects `BlurXY` and `ColorMatrix`, effect tags `0x05` and `0x06` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -673,7 +675,11 @@ A recursive node graph — combinators recurse into their own child node(s) inli
   0x02  InnerShadow   [f32 offset_x offset_y blur_radius] [u8 r g b a color] [f32 opacity]
   0x03  OuterGlow     [u8 r g b a color] [f32 blur_radius spread opacity]
   0x04  InnerGlow     [u8 r g b a color] [f32 blur_radius opacity]
+  0x05  BlurXY        [f32 rx ry]                                  version 3
+  0x06  ColorMatrix   [u8 flags: bit0 linear] [f32 x 20 values]    version 3
 ```
+
+`ColorMatrix` holds a 4x5 matrix row major: the rows give the new red, green, blue and alpha, and the columns weigh the old red, green, blue, alpha and a constant. It works on straight (not premultiplied) channels in 0 to 1 and the results are held to 0 to 1. With the `linear` flag the red, green and blue go through linear light for the matrix and back. A file with either new effect is written as version 3.
 
 #### BlendMode byte values
 
@@ -993,7 +999,7 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 | Audio (file-ref or embedded) as a def | ✅ round-trips losslessly; nothing anywhere plays it — `extract-media` is the only way to pull it back out and verify with a real tool |
 | Layer (isolated compositing group) | ✅ all three renderers agree on nesting/paint-order semantics. `clip` is not enforced in SVG |
 | Layer blend modes (Multiply/Screen/etc.) | ✅ CPU, SVG, GPU |
-| Layer effects — Blur | ✅ CPU, SVG, GPU |
+| Layer effects: Blur, BlurXY, ColorMatrix | ✅ CPU, SVG, GPU |
 | Layer effects — DropShadow/InnerShadow/OuterGlow/InnerGlow | ✅ CPU, SVG · ❌ GPU (flagged, not silent — see `msx-render-gpu`'s `effects.rs`) |
 | Shader defs (real WGSL fills) | ✅ GPU only (`--features gpu`) — CPU/SVG paint `fallback_color` instead, by design |
 | Keyframe animation (`animations::`, `duration`, `loop_mode`) | ✅ parses, compiles to binary, round-trips, bakes to GIF (`msx animate`/`msx animate-gpu`), plays live in `msx-viewer` |

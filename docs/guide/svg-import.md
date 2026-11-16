@@ -127,12 +127,15 @@ An `end` that waits for an event is ignored, with a note. At most 4,000 wrappers
 
 ## Filters
 
-MSX has no filter graph. A layer can carry effects (blur and shadows), so the importer reads the filters that are a chain of `feGaussianBlur`, `feDropShadow` and `feOffset` primitives, and the CSS functions `blur()` and `drop-shadow()`. Each entry of the `filter` list becomes one layer: the effects, a clip to the filter region, and the content inside. The first entry of a list is the innermost.
+MSX has no filter graph. A layer can carry effects (blur, shadows and color matrices), so the importer reads the filters that are a chain of `feGaussianBlur`, `feColorMatrix`, `feDropShadow` and `feOffset` primitives, and the CSS functions `blur()`, `drop-shadow()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()` and `opacity()`. Each entry of the `filter` list becomes one layer: the effects, a clip to the filter region, and the content inside. The first entry of a list is the innermost.
 
 | SVG | Result |
 |---|---|
 | `feGaussianBlur` with one `stdDeviation`, or two equal ones | A `blur` effect with that radius |
+| `feGaussianBlur` with two different values | A `blur_xy` effect. A zero on one axis blurs only the other |
 | `feGaussianBlur` with an empty, negative, zero or three or more values | The input passes through, as in resvg |
+| `feColorMatrix` of type `matrix` (the default), `saturate`, `hueRotate` or `luminanceToAlpha` | A `color_matrix` effect. `saturate` is held to 0 to 1. A `matrix` needs exactly 20 values, and a missing `values`, a wrong count or an unknown `type` leaves the input unchanged, as in resvg |
+| `color-interpolation-filters` | `linear = true` for `linearRGB`, which is the default, and `linear = false` for `sRGB`. The primitive, the filter and the ancestors are read in that order |
 | `feDropShadow` | A `drop_shadow` effect. `dx` and `dy` default to 2, `stdDeviation` to 2, the color to `flood-color` and the opacity to `flood-opacity` times the alpha of the color |
 | `feOffset` | The content moves by `dx`, `dy` before the effects, which gives the same picture as moving the result |
 | A chain of these | The effects apply in order. A primitive reads the previous result, or `SourceGraphic` when it is the first |
@@ -140,12 +143,14 @@ MSX has no filter graph. A layer can carry effects (blur and shadows), so the im
 | `primitiveUnits="objectBoundingBox"` | `stdDeviation`, `dx` and `dy` scale with the bounding box |
 | `xlink:href` on a filter | Attributes and primitives are inherited. A reference to something else is ignored |
 | `blur(5px)`, `drop-shadow(2px 3px 4px red)` | One layer each, without a region. `em` follows the font size of the element |
+| `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()`, `opacity()` | One `color_matrix` layer each, in sRGB. The amount is a number or a percentage and is 1 without one. A negative amount is reported. `grayscale`, `sepia`, `invert` and `opacity` stop at 1, the others can go above. `hue-rotate` takes `deg`, `grad`, `rad` or `turn`, and a bare number is degrees. An amount that changes nothing adds no layer |
+| A `url()` that does not resolve, in a list with other filters | That entry is skipped, and the element is drawn with the others, as in resvg |
 
 The element transform sits on the layer outside the filter layer, so distances are in the element's own units. A blur of 4 on an element scaled by 2 blurs by 8 pixels, on every renderer.
 
-An element is not drawn when its filter does not exist, is not a `filter`, has no primitives, has a region without area, or uses `objectBoundingBox` units on something without area (a vertical line). This follows resvg.
+An element is not drawn when its only filter does not exist, is not a `filter`, has no primitives, has a region without area, or uses `objectBoundingBox` units on something without area (a vertical line). This follows resvg.
 
-What a layer effect cannot express is reported and the element is drawn without that filter: other primitives (`feFlood`, `feMerge`, `feComposite`, `feColorMatrix`, lighting and the rest), an input other than the previous result, a primitive region of its own, a blur with a different amount per axis, and the color functions (`grayscale()`, `hue-rotate()` and the others).
+What a layer effect cannot express is reported and the element is drawn without that filter: other primitives (`feFlood`, `feMerge`, `feComposite`, `feComponentTransfer`, lighting and the rest), an input other than the previous result, a primitive region of its own, and a shadow with a different blur per axis.
 
 ## Encodings
 
@@ -155,8 +160,8 @@ What a layer effect cannot express is reported and the element is drawn without 
 
 | SVG feature | Result |
 |---|---|
-| `filter` with primitives other than blur, shadow and offset, a primitive region, a blur that differs per axis, or a color function | Drawn without that filter |
-| `filter` that points at a missing element, at something that is not a `filter`, or at a filter with no primitives or a region without area | The element is not drawn |
+| `filter` with primitives other than blur, color matrix, shadow and offset, a primitive region, or a shadow that blurs differently per axis | Drawn without that filter |
+| `filter` that points at a missing element, at something that is not a `filter`, or at a filter with no primitives or a region without area | The element is not drawn. A missing element or a non-`filter` inside a list that has other working filters is skipped instead |
 | `mask` that is not `url(#id)`, a mask in a reference cycle, or `color-interpolation: linearRGB` on a mask | Drawn without it, or read as sRGB |
 | `clip-path` that is not `url(#id)`, such as `circle()` | Drawn without it |
 | `clip-path` on a child inside a `clipPath` | Ignored |
