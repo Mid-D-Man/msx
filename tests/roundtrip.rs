@@ -983,3 +983,67 @@ fn roundtrip_style_animation_channels_and_their_wire_version() {
     assert!(plain.animations.is_empty());
     assert_eq!(compile(&plain, false).unwrap()[4], 2);
 }
+
+// ── Wire version 3: the filter graph ─────────────────────────────────────────
+
+const V3_FILTER_GRAPH_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 120, height = 80, background = #ffffff }
+  elements::
+    { type = "layer", effects = [
+        { type = "graph", nodes = [
+          { op = "flood", color = #00c8ff80, region = [10.0, 10.0, 60.0, 40.0], linear = true },
+          { op = "composite", input = "0", input2 = "alpha", operator = "in" },
+          { op = "blur", input = "1", rx = 2.0, ry = 0.0, linear = true },
+          { op = "composite", input = "source", input2 = "2", operator = "arithmetic", k = [0.0, 1.0, 0.5, 0.0] },
+          { op = "merge", inputs = ["3", "source"] },
+          { op = "blend", input = "4", input2 = "source", mode = "multiply" },
+          { op = "offset", input = "5", dx = 2.0, dy = -1.0 },
+          { op = "color_matrix", input = "6", values = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0] },
+          { op = "component_transfer", input = "7",
+            r = { kind = "table", values = [1.0, 0.0] },
+            g = { kind = "linear", slope = 0.5, intercept = 0.25 },
+            b = { kind = "gamma", amplitude = 1.0, exponent = 2.0, offset = 0.0 },
+            a = { kind = "discrete", values = [0.0, 1.0] } }
+        ] }
+      ],
+      elements = [
+        { type = "rect", x = 20, y = 20, width = 40, height = 30,
+          style = { fill = #ff3366, stroke = #000000, stroke_width = 1 } }
+      ] }
+)
+"#;
+
+#[test]
+fn roundtrip_filter_graph_and_its_wire_version() {
+    check_roundtrip("v3_filter_graph", V3_FILTER_GRAPH_SOURCE);
+    let scene_a = parse_scene(V3_FILTER_GRAPH_SOURCE).unwrap();
+    for compress in [false, true] {
+        let binary = compile(&scene_a, compress).unwrap();
+        assert_eq!(binary[4], 3, "compress={compress}: a filter graph needs version 3");
+        let scene_b = decode(&binary).unwrap();
+        let (Element::Layer(a), Element::Layer(b)) = (&scene_a.elements[0], &scene_b.elements[0]) else { panic!("a layer") };
+        assert_eq!(a.effects.len(), 1);
+        let (msx_ast::Effect::Graph(ga), msx_ast::Effect::Graph(gb)) = (&a.effects[0], &b.effects[0]) else { panic!("a graph") };
+        assert_eq!(ga.nodes.len(), 9);
+        assert_eq!(ga, gb, "every value in this graph is exact in f32");
+    }
+    // The same layer without the graph stays version 2.
+    let mut plain = scene_a.clone();
+    if let Element::Layer(l) = &mut plain.elements[0] {
+        l.effects.clear();
+    }
+    assert_eq!(compile(&plain, false).unwrap()[4], 2);
+}
+
+#[test]
+fn a_binary_with_a_filter_graph_that_reads_a_later_node_is_refused() {
+    let mut scene = parse_scene(V3_FILTER_GRAPH_SOURCE).unwrap();
+    let Element::Layer(l) = &mut scene.elements[0] else { panic!("a layer") };
+    let msx_ast::Effect::Graph(g) = &mut l.effects[0] else { panic!("a graph") };
+    // The encoder writes what it is given, and the reader is the one that checks.
+    g.nodes[1].op = msx_ast::FilterOp::Offset { input: msx_ast::FilterInput::Node(5), dx: 0.0, dy: 0.0 };
+    let binary = compile(&scene, false).unwrap();
+    assert!(decode(&binary).is_err());
+}

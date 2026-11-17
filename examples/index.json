@@ -125,6 +125,13 @@
       "description": "feColorMatrix and the CSS color functions as layer effects, plus a blur with a different amount per axis. Needs wire version 3."
     },
     {
+      "file": "filters_graph.msx",
+      "title": "Filter graph",
+      "category": "layers",
+      "description": "feFlood, feComposite, feMerge, feBlend and feComponentTransfer as one graph effect: duotone, posterize, tint, a cast shadow and a negative. Needs wire version 3.",
+      "note": "The GPU renderer does not draw a graph yet. This preview is the SVG renderer."
+    },
+    {
       "file": "clip_and_mask.msx",
       "title": "Clip path and mask",
       "category": "layers",

@@ -284,13 +284,14 @@ An isolated compositing group: children render into their own offscreen buffer (
     { type = "inner_glow",   color = <color>, blur_radius = <float>, opacity = <float> }
     { type = "blur_xy",      rx = <float>, ry = <float> }                                  // wire version 3
     { type = "color_matrix", values = [<20 floats>], linear = <bool>? }                    // wire version 3
+    { type = "graph", nodes = [ <filter node>, ... ] }                                     // wire version 3, see the layer guide
     ...
   ]
   id = <string>?  transform = <transform>?
 }
 ```
 
-**Rendering support today:** all three renderers (SVG/CPU/GPU) agree on Layer nesting semantics (a nested Layer's own z_index/opacity resolve at its own level first, then the parent participates as one unit in its sibling list) and on shader fills reaching shapes inside a Layer. `blend_mode`, `Effect::Blur`, `Effect::BlurXY` and `Effect::ColorMatrix` are implemented on GPU; `DropShadow`/`InnerShadow`/`OuterGlow`/`InnerGlow` are not yet. A Layer using one of those four renders today exactly as if that effect weren't present, on GPU specifically (CPU implements all seven).
+**Rendering support today:** all three renderers (SVG/CPU/GPU) agree on Layer nesting semantics (a nested Layer's own z_index/opacity resolve at its own level first, then the parent participates as one unit in its sibling list) and on shader fills reaching shapes inside a Layer. `blend_mode`, `Effect::Blur`, `Effect::BlurXY` and `Effect::ColorMatrix` are implemented on GPU; `DropShadow`/`InnerShadow`/`OuterGlow`/`InnerGlow` and `Graph` are not yet. A Layer using one of those renders today exactly as if that effect weren't present, on GPU specifically (CPU implements all eight).
 
 `z_index` is purely relative: only compared against other top-level Layers, never against ordinary (non-Layer) elements, which always draw before every Layer regardless of z_index. Ties break by document order (a stable sort, same convention as CSS `z-index`).
 
@@ -532,7 +533,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16. The layer effects `BlurXY` and `ColorMatrix`, effect tags `0x05` and `0x06` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -677,8 +678,22 @@ A recursive node graph — combinators recurse into their own child node(s) inli
   0x04  InnerGlow     [u8 r g b a color] [f32 blur_radius opacity]
   0x05  BlurXY        [f32 rx ry]                                  version 3
   0x06  ColorMatrix   [u8 flags: bit0 linear] [f32 x 20 values]    version 3
+  0x07  Graph         [u16 node count] [node]...                   version 3
+
+  node:    [u8 op] [u8 flags: bit0 linear, bit1 has region] [f32 x 4 region x y w h, when bit1] [payload]
+  input:   [u8 kind: 0 source graphic, 1 source alpha, 2 node] [u16 index, when kind 2]
+  payload: 0 Flood      [u8 r g b a]
+           1 Composite  [input] [input] [u8 operator: 0 over 1 in 2 out 3 atop 4 xor 5 arithmetic] [f32 k1 k2 k3 k4, when 5]
+           2 Merge      [u8 count] [input]...
+           3 Blend      [input] [input] [u8 BlendMode]
+           4 Offset     [input] [f32 dx dy]
+           5 Blur       [input] [f32 rx ry]
+           6 ColorMatrix [input] [f32 x 20]
+           7 ComponentTransfer [input] 4 x [u8 tag: 0 identity 1 table 2 discrete 3 linear 4 gamma] and
+                        table, discrete [u16 n] [f32 x n]; linear [f32 slope intercept]; gamma [f32 amplitude exponent offset]
 ```
 
+A `Graph` is a list of primitives where each reads the layer pixels or the result of an earlier one, and the result of the last one replaces the layer. A node can read only nodes before it. The reader refuses a graph with more than 256 nodes, a node that reads a later one, a merge of more than 64 inputs, a transfer table of more than 1024 values, a region without area and a number that is not finite. `Flood` fills its region with the color and its alpha is the flood opacity. `Composite` takes the first input as `in` and the second as `in2`, and `Blend` draws the first input over the second. A node works on linear light when its `linear` flag is set. It converts what it reads to that space first, except for `Flood` and `Offset`, which keep the space of what they hold. A region clears everything outside it. The graph is in the units of the layer and follows its transform.
 `ColorMatrix` holds a 4x5 matrix row major: the rows give the new red, green, blue and alpha, and the columns weigh the old red, green, blue, alpha and a constant. It works on straight (not premultiplied) channels in 0 to 1 and the results are held to 0 to 1. With the `linear` flag the red, green and blue go through linear light for the matrix and back. A file with either new effect is written as version 3.
 
 #### BlendMode byte values
@@ -1000,6 +1015,7 @@ msx extract-media <file.msx> --id <id>    Pull a Def::Audio's raw bytes back out
 | Layer (isolated compositing group) | ✅ all three renderers agree on nesting/paint-order semantics. `clip` is not enforced in SVG |
 | Layer blend modes (Multiply/Screen/etc.) | ✅ CPU, SVG, GPU |
 | Layer effects: Blur, BlurXY, ColorMatrix | ✅ CPU, SVG, GPU |
+| Layer effects: Graph | ✅ CPU, SVG. Not drawn on GPU |
 | Layer effects — DropShadow/InnerShadow/OuterGlow/InnerGlow | ✅ CPU, SVG · ❌ GPU (flagged, not silent — see `msx-render-gpu`'s `effects.rs`) |
 | Shader defs (real WGSL fills) | ✅ GPU only (`--features gpu`) — CPU/SVG paint `fallback_color` instead, by design |
 | Keyframe animation (`animations::`, `duration`, `loop_mode`) | ✅ parses, compiles to binary, round-trips, bakes to GIF (`msx animate`/`msx animate-gpu`), plays live in `msx-viewer` |

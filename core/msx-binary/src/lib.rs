@@ -5,6 +5,7 @@ pub mod compiler;
 pub mod decoder;
 pub mod effect_codec;
 pub mod encoder;
+pub mod filter_codec;
 pub mod header;
 pub mod path_codec;
 pub mod scene_decode;

@@ -243,7 +243,7 @@ fn foreign_namespaces_and_metadata_are_ignored() {
 fn unsupported_features_are_reported() {
     let i = imp(&doc(
         r##"<rect width="1" height="1" clip-path="url(#c)"/>
-            <filter id="f"><feFlood/></filter><rect width="1" height="1" filter="url(#f)"/>
+            <filter id="f"><feTurbulence/></filter><rect width="1" height="1" filter="url(#f)"/>
             <rect width="1" height="1" mask="url(#m)"/>
             <foreignObject width="5" height="5"/>
             <pattern id="p"/><rect width="1" height="1" fill="url(#p)"/>"##,
@@ -2784,10 +2784,11 @@ fn a_different_blur_per_axis_becomes_a_blur_xy() {
         assert_eq!(filter_layer(&i).effects, vec![msx_ast::Effect::BlurXY { rx, ry }], "stdDeviation=\"{std}\"");
         assert!(i.warnings.is_empty(), "stdDeviation=\"{std}\": {:?}", i.warnings);
     }
-    // A shadow has one blur radius, so an uneven one is still reported.
+    // A shadow has one blur radius in the effect chain, so an uneven one is a graph.
     let i = filtered(r#"<filter id="f"><feDropShadow stdDeviation="5 1"/></filter>"#, SQUARE);
-    assert!(matches!(i.scene.elements[0], Element::Rect(_)));
-    assert!(has_warning(&i, "different blur for each axis"), "{:?}", i.warnings);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let g = graph_of(&i);
+    assert!(g.nodes.iter().any(|n| matches!(n.op, msx_ast::FilterOp::Blur { rx, ry, .. } if rx == 5.0 && ry == 1.0)), "{g:?}");
 }
 
 #[test]
@@ -2853,10 +2854,12 @@ fn filters_inherit_attributes_and_primitives_through_href() {
 #[test]
 fn primitives_without_a_layer_effect_are_reported_and_the_element_drawn_plain() {
     for body in [
-        r#"<feFlood flood-color="red"/>"#,
-        r#"<feGaussianBlur stdDeviation="3" in="SourceAlpha"/>"#,
-        r#"<feGaussianBlur stdDeviation="3" x="10"/>"#,
-        r#"<feGaussianBlur stdDeviation="3"/><feMerge/>"#,
+        r#"<feTile/>"#,
+        r#"<feImage/>"#,
+        r#"<feTurbulence baseFrequency="0.1"/>"#,
+        r#"<feMorphology radius="2"/>"#,
+        r#"<feConvolveMatrix order="3" kernelMatrix="0 0 0 0 1 0 0 0 0"/>"#,
+        r#"<feGaussianBlur stdDeviation="3"/><feDiffuseLighting><feDistantLight/></feDiffuseLighting>"#,
     ] {
         let i = filtered(&format!(r#"<filter id="f">{body}</filter>"#), SQUARE);
         assert!(matches!(i.scene.elements[0], Element::Rect(_)), "{body}");
@@ -3606,4 +3609,209 @@ fn imported_matrices_carry_no_float_noise() {
     for v in values {
         assert_eq!((v * 1e6).round() / 1e6, v, "{v} has more than six decimals");
     }
+}
+
+// ── Filter graph ─────────────────────────────────────────────────────────────
+
+fn graph_of(i: &Imported) -> msx_ast::FilterGraph {
+    match filter_layer(i).effects.as_slice() {
+        [msx_ast::Effect::Graph(g)] => g.clone(),
+        other => panic!("expected one filter graph, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_filter_that_a_chain_can_say_stays_a_chain() {
+    let i = filtered(r#"<filter id="f"><feGaussianBlur stdDeviation="2"/><feColorMatrix type="saturate" values="0"/></filter>"#, SQUARE);
+    assert!(matches!(filter_layer(&i).effects.as_slice(), [msx_ast::Effect::Blur { .. }, msx_ast::Effect::ColorMatrix { .. }]));
+}
+
+#[test]
+fn flood_composite_and_merge_with_named_results_become_a_graph() {
+    use msx_ast::{CompositeOp, FilterInput as In, FilterOp};
+    let i = filtered(
+        r#"<filter id="f"><feFlood flood-color="lime" flood-opacity="0.5" result="tint"/>
+            <feComposite in="tint" in2="SourceAlpha" operator="in" result="shape"/>
+            <feMerge><feMergeNode in="shape"/><feMergeNode in="SourceGraphic"/></feMerge></filter>"#,
+        SQUARE,
+    );
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let g = graph_of(&i);
+    assert_eq!(g.nodes.len(), 3);
+    assert!(matches!(g.nodes[0].op, FilterOp::Flood { color } if color == msx_ast::Color::rgba(0, 255, 0, 128)), "{:?}", g.nodes[0].op);
+    assert_eq!(g.nodes[1].op, FilterOp::Composite { a: In::Node(0), b: In::SourceAlpha, op: CompositeOp::In });
+    assert_eq!(g.nodes[2].op, FilterOp::Merge { inputs: vec![In::Node(1), In::SourceGraphic] });
+    assert!(g.nodes.iter().all(|n| n.region.is_none() && n.linear), "linearRGB is the default");
+}
+
+#[test]
+fn inputs_that_name_nothing_fall_back_the_way_resvg_does() {
+    use msx_ast::{FilterInput as In, FilterOp};
+    let i = filtered(
+        r#"<filter id="f"><feFlood flood-color="red"/><feOffset in="nope" dx="1"/><feOffset in="BackgroundImage" dx="2"/><feOffset in="FillPaint" dx="3"/><feOffset dx="4"/></filter>"#,
+        SQUARE,
+    );
+    let g = graph_of(&i);
+    let reads = |n: usize| match &g.nodes[n].op {
+        FilterOp::Offset { input, .. } => *input,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(reads(1), In::Node(0), "an unknown result is the previous one");
+    assert_eq!(reads(2), In::SourceGraphic, "BackgroundImage reads the source graphic");
+    assert_eq!(reads(3), In::SourceGraphic);
+    assert_eq!(reads(4), In::Node(3), "no `in` is the previous result");
+}
+
+#[test]
+fn a_later_primitive_can_reuse_a_result_name_and_reads_the_latest() {
+    use msx_ast::{FilterInput as In, FilterOp};
+    let i = filtered(
+        r#"<filter id="f"><feFlood flood-color="red" result="a"/><feFlood flood-color="blue" result="a"/><feOffset in="a" dx="1"/></filter>"#,
+        SQUARE,
+    );
+    assert!(matches!(graph_of(&i).nodes[2].op, FilterOp::Offset { input: In::Node(1), .. }));
+}
+
+#[test]
+fn primitive_regions_default_to_the_filter_region_and_follow_the_units() {
+    // User space: a value that is not given is the filter region's (the box plus 10 percent each side).
+    let i = filtered(r#"<filter id="f"><feFlood flood-color="red" x="30" width="20"/></filter>"#, r##"<rect x="20" y="20" width="60" height="60" fill="#010203" filter="url(#f)"/>"##);
+    let r = graph_of(&i).nodes[0].region.unwrap();
+    assert!(close(r.x, 30.0) && close(r.width, 20.0), "{r:?}");
+    assert!(close(r.y, 14.0) && close(r.height, 72.0), "the filter region is 14 to 86: {r:?}");
+    // Object units: x and y are fractions of the box from its corner, width and height fractions of its size.
+    let i = filtered(
+        r#"<filter id="f" primitiveUnits="objectBoundingBox"><feFlood flood-color="red" x="0.25" width="0.5"/></filter>"#,
+        r##"<rect x="20" y="20" width="60" height="60" fill="#010203" filter="url(#f)"/>"##,
+    );
+    let r = graph_of(&i).nodes[0].region.unwrap();
+    assert!(close(r.x, 35.0) && close(r.width, 30.0), "{r:?}");
+    assert!(close(r.y, 14.0) && close(r.height, 72.0), "{r:?}");
+    // No attribute, no region.
+    let i = filtered(r#"<filter id="f"><feFlood flood-color="red"/></filter>"#, SQUARE);
+    assert!(graph_of(&i).nodes[0].region.is_none());
+    // An area of nothing is not a filter MSX can draw.
+    let i = filtered(r#"<filter id="f"><feFlood flood-color="red" width="0"/></filter>"#, SQUARE);
+    assert!(has_warning(&i, "region without area"), "{:?}", i.warnings);
+    assert!(matches!(i.scene.elements[0], Element::Rect(_)));
+}
+
+#[test]
+fn a_filter_on_an_empty_group_draws_when_its_region_does_not_need_a_box() {
+    let i = imp(&doc(r#"<filter id="f" filterUnits="userSpaceOnUse" x="20" y="20" width="60" height="60"><feFlood flood-color="red"/></filter><g filter="url(#f)"/>"#));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let l = filter_layer(&i);
+    assert!(l.children.is_empty() && matches!(l.effects.as_slice(), [msx_ast::Effect::Graph(_)]));
+    // With a region in box units there is no box, and the element is not drawn.
+    let none = imp(&doc(r#"<filter id="f"><feFlood flood-color="red"/></filter><g filter="url(#f)"/>"#));
+    assert!(none.scene.elements.is_empty());
+    assert!(has_warning(&none, "without area"), "{:?}", none.warnings);
+}
+
+#[test]
+fn fe_blend_reads_the_blend_modes_and_treats_unknown_ones_as_normal() {
+    use msx_ast::{BlendMode, FilterOp};
+    for (mode, want) in [("multiply", BlendMode::Multiply), ("screen", BlendMode::Screen), ("darken", BlendMode::Darken), ("color-dodge", BlendMode::ColorDodge), ("luminosity", BlendMode::Luminosity), ("plus-lighter", BlendMode::Normal), ("qwe", BlendMode::Normal)] {
+        let i = filtered(&format!(r#"<filter id="f"><feFlood flood-color="red" result="a"/><feBlend in="SourceGraphic" in2="a" mode="{mode}"/></filter>"#), SQUARE);
+        assert!(matches!(&graph_of(&i).nodes[1].op, FilterOp::Blend { mode: m, .. } if *m == want), "{mode}");
+    }
+}
+
+#[test]
+fn fe_composite_operators_and_constants() {
+    use msx_ast::{CompositeOp, FilterOp};
+    for (attrs, want) in [
+        ("", CompositeOp::Over),
+        (r#"operator="qwe""#, CompositeOp::Over),
+        (r#"operator="atop""#, CompositeOp::Atop),
+        (r#"operator="xor""#, CompositeOp::Xor),
+        (r#"operator="out""#, CompositeOp::Out),
+        (r#"operator="arithmetic" k2="0.5" k4="-1""#, CompositeOp::Arithmetic { k1: 0.0, k2: 0.5, k3: 0.0, k4: -1.0 }),
+    ] {
+        let i = filtered(&format!(r#"<filter id="f"><feFlood flood-color="red" result="a"/><feComposite in="SourceGraphic" in2="a" {attrs}/></filter>"#), SQUARE);
+        assert!(matches!(&graph_of(&i).nodes[1].op, FilterOp::Composite { op, .. } if *op == want), "{attrs}");
+    }
+}
+
+#[test]
+fn fe_component_transfer_reads_each_channel_and_the_last_function_wins() {
+    use msx_ast::{FilterOp, TransferFn};
+    let i = filtered(
+        r#"<filter id="f"><feComponentTransfer>
+            <feFuncR type="table" tableValues="0 0.5 1"/>
+            <feFuncG type="discrete" tableValues="0,1"/>
+            <feFuncB type="linear" slope="2" intercept="-0.5"/>
+            <feFuncA type="gamma" amplitude="2" exponent="3" offset="0.1"/>
+            <feFuncA type="linear" slope="0.5"/>
+        </feComponentTransfer></filter>"#,
+        SQUARE,
+    );
+    let FilterOp::ComponentTransfer { funcs, .. } = &graph_of(&i).nodes[0].op else { panic!() };
+    assert_eq!(funcs[0], TransferFn::Table(vec![0.0, 0.5, 1.0]));
+    assert_eq!(funcs[1], TransferFn::Discrete(vec![0.0, 1.0]));
+    assert_eq!(funcs[2], TransferFn::Linear { slope: 2.0, intercept: -0.5 });
+    assert_eq!(funcs[3], TransferFn::Linear { slope: 0.5, intercept: 0.0 }, "the last feFuncA replaces the first");
+    // No values, a token that is not a number and an unknown type leave the channel as it is.
+    let none = filtered(
+        r#"<filter id="f"><feComponentTransfer><feFuncR type="table"/><feFuncG type="table" tableValues="1px"/><feFuncB type="qwe"/><feFuncA type="discrete" tableValues=""/></feComponentTransfer></filter>"#,
+        SQUARE,
+    );
+    let FilterOp::ComponentTransfer { funcs, .. } = &graph_of(&none).nodes[0].op else { panic!() };
+    assert!(funcs.iter().all(|f| *f == TransferFn::Identity), "{funcs:?}");
+}
+
+#[test]
+fn flood_color_and_opacity_read_inherit_from_the_filter_and_the_current_color() {
+    use msx_ast::FilterOp;
+    let flood = |i: &Imported| match graph_of(i).nodes[0].op {
+        FilterOp::Flood { color } => color,
+        ref other => panic!("{other:?}"),
+    };
+    let inherit = filtered(r#"<filter id="f" flood-color="green" flood-opacity="0.5"><feFlood flood-color="inherit" flood-opacity="inherit"/></filter>"#, SQUARE);
+    assert_eq!(flood(&inherit), msx_ast::Color::rgba(0, 128, 0, 128));
+    // `currentColor` is the `color` of the primitive, which it inherits from the filter and
+    // not from the element that is filtered.
+    let current = imp(&doc(r##"<filter id="f" color="#0000ff"><feFlood flood-color="currentColor"/></filter><rect width="10" height="10" color="#ff0000" filter="url(#f)"/>"##));
+    assert_eq!(flood(&current), msx_ast::Color::rgba(0, 0, 255, 255));
+    let alpha = filtered(r#"<filter id="f"><feFlood flood-color="rgba(255,0,0,0.5)" flood-opacity="0.5"/></filter>"#, SQUARE);
+    assert_eq!(flood(&alpha).a, 64, "the color alpha and the flood opacity multiply");
+}
+
+#[test]
+fn a_filter_graph_picks_the_color_space_of_each_primitive() {
+    let i = filtered(
+        r#"<filter id="f"><feFlood flood-color="red" result="a" color-interpolation-filters="sRGB"/><feComposite in="a" in2="SourceAlpha" operator="in"/></filter>"#,
+        SQUARE,
+    );
+    let g = graph_of(&i);
+    assert!(!g.nodes[0].linear && g.nodes[1].linear);
+}
+
+#[test]
+fn a_drop_shadow_next_to_a_flood_is_part_of_the_graph() {
+    use msx_ast::FilterOp;
+    let i = filtered(
+        r#"<filter id="f"><feDropShadow dx="3" dy="4" stdDeviation="2" flood-color="blue"/><feFlood flood-color="red" result="r"/></filter>"#,
+        SQUARE,
+    );
+    let g = graph_of(&i);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(g.nodes.iter().any(|n| matches!(n.op, FilterOp::Offset { dx, dy, .. } if dx == 3.0 && dy == 4.0)));
+    assert!(g.nodes.iter().any(|n| matches!(n.op, FilterOp::Merge { .. })));
+    assert!(g.validate().is_ok());
+}
+
+#[test]
+fn a_graph_survives_write_and_parse() {
+    let i = filtered(
+        r#"<filter id="f"><feFlood flood-color="lime" result="tint" x="30" y="30" width="30" height="30"/>
+            <feComposite in="tint" in2="SourceGraphic" operator="arithmetic" k2="0.5" k3="0.5"/>
+            <feComponentTransfer><feFuncR type="table" tableValues="1 0"/></feComponentTransfer></filter>"#,
+        SQUARE,
+    );
+    let text = msx_parser::scene_to_msx(&i.scene).expect("a filter graph is writable");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}\n{text}"));
+    let want = graph_of(&i);
+    let reread = Imported { scene: back, warnings: Vec::new() };
+    assert_eq!(filter_layer(&reread).effects, vec![msx_ast::Effect::Graph(want)]);
 }

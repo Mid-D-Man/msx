@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod color;
 pub mod effect;
 pub mod element;
+pub mod filter;
 pub mod gradient;
 pub mod layer;
 pub mod media;
@@ -18,6 +19,7 @@ pub use animation::{AnimatedProperty, AnimationTrack, Easing, Keyframe, LoopMode
 pub use canvas::{Canvas, Scene};
 pub use color::{Color, Paint};
 pub use effect::{Effect, EffectType};
+pub use filter::{CompositeOp, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn, MAX_FILTER_NODES, MAX_MERGE_INPUTS, MAX_TRANSFER_VALUES};
 pub use element::{Circle, Ellipse, Element, Group, Image, Line, Path, Polyline, Polygon, Rect, Text, Use};
 pub use gradient::{gradient_matrix, usable_transform, ConicGradient, Def, GradientUnits, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, SpreadMethod, Stop};
 pub use layer::{layer_reordered, BlendMode, Layer, MaskType};

@@ -103,6 +103,31 @@ A `color_matrix` is the 4x5 matrix of `feColorMatrix`, row major. The four rows 
     0,      0,      0,      1, 0 ] }
 ```
 
+### Filter graph
+
+A `graph` effect is the form of an SVG `<filter>` that a chain of effects cannot say: named results, two inputs, a flood, a composite, a merge, a blend, a component transfer and regions of their own. It holds a list of nodes, and the result of the last node replaces the layer. Wire version 3. The CPU and SVG renderers draw it, the GPU renderer does not yet.
+
+```
+{ type = "graph", nodes = [
+    { op = "flood", color = #3ea6ffff },
+    { op = "composite", input = "0", input2 = "alpha", operator = "in" } ] }
+```
+
+A node has an `op`, its inputs, and optionally a `region = [x, y, width, height]` and `linear = true`. An input is `"source"` (the layer pixels), `"alpha"` (the layer alpha with the color set to black) or the index of an earlier node as text. A node that has no `input` reads the node before it, or the source for the first node. `input2` is the second input of a `composite` or `blend` and defaults to the source.
+
+| `op` | Fields | What it makes |
+|---|---|---|
+| `flood` | `color` | The color over the whole region. The alpha of the color is the flood opacity |
+| `composite` | `input`, `input2`, `operator`, `k` | `over` (default), `in`, `out`, `atop`, `xor`, or `arithmetic` with `k = [k1, k2, k3, k4]` for `k1 a b + k2 a + k3 b + k4` on premultiplied channels |
+| `merge` | `inputs` | The inputs painted over each other, the first at the bottom |
+| `blend` | `input`, `input2`, `mode` | `input` drawn over `input2` with a blend mode, from the same list as a layer |
+| `offset` | `input`, `dx`, `dy` | The input moved by whole pixels. A fraction is cut toward zero |
+| `blur` | `input`, `rx`, `ry` | A Gaussian blur with a deviation per axis |
+| `color_matrix` | `input`, `values` | The 4x5 matrix of `color_matrix` above |
+| `component_transfer` | `input`, `r`, `g`, `b`, `a` | One function per channel, left out for no change. A function is `{ kind = "table", values = [...] }`, `"discrete"`, `{ kind = "linear", slope = 1, intercept = 0 }` or `{ kind = "gamma", amplitude = 1, exponent = 1, offset = 0 }` |
+
+`linear = true` on a node makes it work on linear light, as `color-interpolation-filters="linearRGB"` does, which is the default of SVG filters. The node converts what it reads to that space, and the result goes back to sRGB at the end. A flood and an offset keep the space of what they hold. A `region` limits where the node paints and everything outside it is transparent. The region is in the units of the layer. When the layer transform keeps the axes it is exact, and under any other transform it becomes the box that holds the transformed rectangle. The graph has at most 256 nodes, and a node can read only nodes before it.
+
 The radius of a blur is its standard deviation, the same number as `stdDeviation` in SVG. Radii, spreads and offsets are in the coordinate system of the layer, so they follow its transform: a layer scaled by 2 blurs twice as far, and a layer rotated by 90 degrees turns the offset of its shadow. The CPU renderer blurs with the SVG definition (three box blurs from a standard deviation of 2, a true Gaussian kernel below that) and treats pixels outside the canvas as transparent.
 
 An unknown effect type stops the parse. The `std/effects.msx` file ships ready-made presets: `soft_blur`, `heavy_blur`, `soft_shadow`, `long_shadow`, `pressed_inset`, `neon_glow` and `highlight_rim`.

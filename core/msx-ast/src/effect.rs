@@ -7,6 +7,7 @@
 //!   msx-render-gpu (dedicated render passes, ping-pong FBOs).
 
 use crate::color::Color;
+use crate::filter::{scale_blur, FilterGraph};
 use crate::transform::Matrix2D;
 
 /// Discriminant for binary encoding. Maps to DixScript @ENUMS(EffectType)
@@ -23,6 +24,8 @@ pub enum EffectType {
     BlurXY      = 5,
     /// Wire version 3.
     ColorMatrix = 6,
+    /// Wire version 3.
+    Graph       = 7,
 }
 
 impl EffectType {
@@ -35,6 +38,7 @@ impl EffectType {
             4 => Some(EffectType::InnerGlow),
             5 => Some(EffectType::BlurXY),
             6 => Some(EffectType::ColorMatrix),
+            7 => Some(EffectType::Graph),
             _ => None,
         }
     }
@@ -94,6 +98,12 @@ pub enum Effect {
     /// to 1. `linear` runs it on linear light instead of sRGB values, which is
     /// the default of `feColorMatrix`. Wire version 3.
     ColorMatrix { values: [f64; 20], linear: bool },
+
+    /// A filter graph: primitives that read the layer pixels or the result of
+    /// an earlier primitive (`feFlood`, `feComposite`, `feMerge`, `feBlend`,
+    /// `feComponentTransfer`, named results and primitive regions). The result
+    /// of the last node replaces the layer. See [`FilterGraph`]. Wire version 3.
+    Graph(FilterGraph),
 }
 
 impl Effect {
@@ -106,6 +116,7 @@ impl Effect {
             Effect::InnerGlow { .. }   => EffectType::InnerGlow,
             Effect::BlurXY { .. }      => EffectType::BlurXY,
             Effect::ColorMatrix { .. } => EffectType::ColorMatrix,
+            Effect::Graph(_)           => EffectType::Graph,
         }
     }
 
@@ -134,20 +145,10 @@ impl Effect {
                 Effect::InnerGlow { color: *color, blur_radius: blur_radius * s, opacity: *opacity }
             }
             Effect::BlurXY { rx, ry } => {
-                // The blur runs on the device axes. A matrix that keeps the
-                // axes (scale, flip, quarter turn) scales each amount by the
-                // length of the axis it lands on. Any other matrix has no
-                // axis aligned answer, so both amounts use the mean scale.
-                let (sx, sy) = (m.a.hypot(m.b), m.c.hypot(m.d));
-                let keeps_axes = (m.b.abs() < 1e-9 && m.c.abs() < 1e-9) || (m.a.abs() < 1e-9 && m.d.abs() < 1e-9);
-                if !keeps_axes {
-                    Effect::BlurXY { rx: rx * s, ry: ry * s }
-                } else if m.b.abs() < 1e-9 {
-                    Effect::BlurXY { rx: rx * sx, ry: ry * sy }
-                } else {
-                    Effect::BlurXY { rx: ry * sy, ry: rx * sx }
-                }
+                let (rx, ry) = scale_blur(*rx, *ry, m);
+                Effect::BlurXY { rx, ry }
             }
+            Effect::Graph(g) => Effect::Graph(g.scaled(m)),
             Effect::ColorMatrix { .. } => self.clone(),
         }
     }
@@ -161,6 +162,7 @@ impl Effect {
             Effect::InnerShadow { .. } | Effect::InnerGlow { .. }                 => 0.0,
             Effect::BlurXY { rx, ry }                                              => rx.max(*ry) * 3.0,
             Effect::ColorMatrix { .. }                                             => 0.0,
+            Effect::Graph(g)                                                       => g.max_extent(),
         }
     }
       }
@@ -225,10 +227,11 @@ mod tests {
 
     #[test]
     fn effect_types_round_trip_through_bytes() {
-        for b in 0..=6u8 {
+        for b in 0..=7u8 {
             assert_eq!(EffectType::from_byte(b).unwrap() as u8, b);
         }
-        assert_eq!(EffectType::from_byte(7), None);
+        assert_eq!(EffectType::from_byte(8), None);
+        assert_eq!(Effect::Graph(FilterGraph::default()).effect_type(), EffectType::Graph);
         assert_eq!(Effect::BlurXY { rx: 1.0, ry: 2.0 }.effect_type(), EffectType::BlurXY);
         assert_eq!(Effect::ColorMatrix { values: [0.0; 20], linear: false }.effect_type(), EffectType::ColorMatrix);
     }

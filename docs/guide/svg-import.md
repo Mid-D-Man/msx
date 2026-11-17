@@ -127,7 +127,7 @@ An `end` that waits for an event is ignored, with a note. At most 4,000 wrappers
 
 ## Filters
 
-MSX has no filter graph. A layer can carry effects (blur, shadows and color matrices), so the importer reads the filters that are a chain of `feGaussianBlur`, `feColorMatrix`, `feDropShadow` and `feOffset` primitives, and the CSS functions `blur()`, `drop-shadow()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()` and `opacity()`. Each entry of the `filter` list becomes one layer: the effects, a clip to the filter region, and the content inside. The first entry of a list is the innermost.
+A layer carries effects, and a filter that is a chain of single input primitives (`feGaussianBlur`, `feColorMatrix`, `feDropShadow`, `feOffset`) becomes a chain of effects, so the importer reads those and the CSS functions `blur()`, `drop-shadow()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()` and `opacity()` that way. A filter that a chain cannot say, with `feFlood`, `feComposite`, `feMerge`, `feBlend`, `feComponentTransfer`, a result that is read twice or out of order, a standard input such as `SourceAlpha`, or a primitive region, becomes one [`graph` effect](layers.md#filter-graph). A filter that works as a chain is never turned into a graph, so files without the new primitives are written as before.
 
 | SVG | Result |
 |---|---|
@@ -139,6 +139,15 @@ MSX has no filter graph. A layer can carry effects (blur, shadows and color matr
 | `feDropShadow` | A `drop_shadow` effect. `dx` and `dy` default to 2, `stdDeviation` to 2, the color to `flood-color` and the opacity to `flood-opacity` times the alpha of the color |
 | `feOffset` | The content moves by `dx`, `dy` before the effects, which gives the same picture as moving the result |
 | A chain of these | The effects apply in order. A primitive reads the previous result, or `SourceGraphic` when it is the first |
+| `feFlood` | A `flood` node of a graph. The color is `flood-color` (with `inherit` and `currentColor`, which is the `color` of the filter) and its alpha is multiplied by `flood-opacity` |
+| `feComposite` | A `composite` node: `over` (also for an unknown operator), `in`, `out`, `atop`, `xor`, and `arithmetic` with `k1` to `k4` |
+| `feMerge` | A `merge` node of its `feMergeNode` inputs |
+| `feBlend` | A `blend` node. `mode` takes the blend modes of a layer, and an unknown one (`plus-lighter` included) is `normal` |
+| `feComponentTransfer` | A `component_transfer` node. `feFuncR`, `G`, `B` and `A` take `identity`, `table`, `discrete`, `linear` and `gamma`. The last function of a channel wins, and a table without values, with a token that is not a number, or an unknown `type` leaves the channel as it is |
+| `in`, `in2`, `result` | Names are read in order. A name no earlier primitive gave, or no `in`, reads the previous result, or the source graphic for the first. `SourceAlpha` is the layer alpha. `BackgroundImage`, `BackgroundAlpha`, `FillPaint` and `StrokePaint` read the source graphic, as resvg does. A result name used twice points at the latest |
+| `x`, `y`, `width`, `height` on a primitive | The region of the node. A value that is not given is the filter region's. In `objectBoundingBox` units `x` and `y` are fractions of the box from its corner and `width` and `height` fractions of its size. No attribute, no region. A region without area leaves the filter unsupported |
+| `feDropShadow` in a graph | Five nodes and a merge: the alpha of the input, blurred, moved, colored with a flood and put under the input |
+| A filter on an empty group | Drawn when the region does not need a box (`userSpaceOnUse`), for example an `feFlood`. With box units there is nothing to measure and the element is not drawn |
 | `filterUnits`, `x`, `y`, `width`, `height` | The region, as a clip on the layer. Both units work, the default is minus 10 percent and 120 percent |
 | `primitiveUnits="objectBoundingBox"` | `stdDeviation`, `dx` and `dy` scale with the bounding box |
 | `xlink:href` on a filter | Attributes and primitives are inherited. A reference to something else is ignored |
@@ -150,7 +159,7 @@ The element transform sits on the layer outside the filter layer, so distances a
 
 An element is not drawn when its only filter does not exist, is not a `filter`, has no primitives, has a region without area, or uses `objectBoundingBox` units on something without area (a vertical line). This follows resvg.
 
-What a layer effect cannot express is reported and the element is drawn without that filter: other primitives (`feFlood`, `feMerge`, `feComposite`, `feComponentTransfer`, lighting and the rest), an input other than the previous result, a primitive region of its own, and a shadow with a different blur per axis.
+What the graph cannot express is reported and the element is drawn without that filter: `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` and the lighting primitives. The region of a primitive under a transform that rotates or skews is the box that holds the transformed rectangle, and resvg draws that case differently.
 
 ## Encodings
 
@@ -160,7 +169,7 @@ What a layer effect cannot express is reported and the element is drawn without 
 
 | SVG feature | Result |
 |---|---|
-| `filter` with primitives other than blur, color matrix, shadow and offset, a primitive region, or a shadow that blurs differently per axis | Drawn without that filter |
+| `filter` with `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` or a lighting primitive | Drawn without that filter |
 | `filter` that points at a missing element, at something that is not a `filter`, or at a filter with no primitives or a region without area | The element is not drawn. A missing element or a non-`filter` inside a list that has other working filters is skipped instead |
 | `mask` that is not `url(#id)`, a mask in a reference cycle, or `color-interpolation: linearRGB` on a mask | Drawn without it, or read as sRGB |
 | `clip-path` that is not `url(#id)`, such as `circle()` | Drawn without it |

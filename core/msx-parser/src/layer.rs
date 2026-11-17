@@ -1,6 +1,6 @@
 // core/msx-parser/src/layer.rs
 use dixscript::Runtime::{DixData, dix_path};
-use msx_ast::{BlendMode, Color, Effect, Layer};
+use msx_ast::{BlendMode, Color, CompositeOp, Effect, FilterGraph, FilterInput, Layer, TransferFn};
 
 use crate::dix_helpers::{array_len, color_from, enum_discriminant, opt, raw, type_tag};
 use crate::element::parse_elements;
@@ -121,6 +121,117 @@ fn parse_effect(data: &DixData, prefix: &str) -> Result<Effect, String> {
             let values: [f64; 20] = list.try_into().map_err(|_| format!("{prefix}: a color_matrix needs 20 values, found {count}"))?;
             Ok(Effect::ColorMatrix { values, linear: opt::<bool>(data, prefix, "linear")?.unwrap_or(false) })
         }
+        "graph" => parse_graph(data, prefix).map(Effect::Graph),
         other => Err(format!("{}: unknown effect type '{}'", prefix, other)),
     }
                  }
+
+// ── Filter graph ─────────────────────────────────────────────────────────────
+
+/// `{ type = "graph", nodes = [ { op = "...", ... }, ... ] }`. An input
+/// (`input`, `input2`, and the entries of `inputs`) is `"source"`, `"alpha"` or
+/// the index of an earlier node as text. A node without `input` reads the
+/// node before it, or `"source"` when it is the first, which is what SVG does.
+fn parse_graph(data: &DixData, prefix: &str) -> Result<FilterGraph, String> {
+    use msx_ast::{FilterNode, FilterOp, FilterRegion};
+
+    let count = array_len(data, prefix, "nodes")?;
+    let mut nodes = Vec::with_capacity(count.min(msx_ast::MAX_FILTER_NODES));
+    for i in 0..count {
+        let p = format!("{}.nodes[{}]", prefix, i);
+        let previous = if i == 0 { FilterInput::SourceGraphic } else { FilterInput::Node((i - 1) as u16) };
+        let input = |data: &DixData, field: &str, default: FilterInput| -> Result<FilterInput, String> {
+            match opt::<String>(data, &p, field)? {
+                None => Ok(default),
+                Some(name) => FilterInput::from_source_name(&name).ok_or_else(|| format!("{p}.{field}: '{name}' is not source, alpha or a node index")),
+            }
+        };
+        let op = opt::<String>(data, &p, "op")?.ok_or_else(|| format!("{p}: a filter node needs `op`"))?;
+        let kind = match op.as_str() {
+            "flood" => FilterOp::Flood { color: color_from(raw(data, &p, "color")).unwrap_or(Color::BLACK) },
+            "composite" => {
+                let operator = opt::<String>(data, &p, "operator")?.unwrap_or_else(|| "over".to_string());
+                let op = match operator.as_str() {
+                    "over" => CompositeOp::Over,
+                    "in" => CompositeOp::In,
+                    "out" => CompositeOp::Out,
+                    "atop" => CompositeOp::Atop,
+                    "xor" => CompositeOp::Xor,
+                    "arithmetic" => {
+                        let k = opt::<Vec<f64>>(data, &p, "k")?.unwrap_or_default();
+                        let get = |n: usize| k.get(n).copied().unwrap_or(0.0);
+                        CompositeOp::Arithmetic { k1: get(0), k2: get(1), k3: get(2), k4: get(3) }
+                    }
+                    other => return Err(format!("{p}.operator: unknown composite operator '{other}'")),
+                };
+                FilterOp::Composite { a: input(data, "input", previous)?, b: input(data, "input2", FilterInput::SourceGraphic)?, op }
+            }
+            "merge" => {
+                let names = opt::<Vec<String>>(data, &p, "inputs")?.unwrap_or_default();
+                let mut inputs = Vec::with_capacity(names.len());
+                for name in names {
+                    inputs.push(FilterInput::from_source_name(&name).ok_or_else(|| format!("{p}.inputs: '{name}' is not source, alpha or a node index"))?);
+                }
+                FilterOp::Merge { inputs }
+            }
+            "blend" => FilterOp::Blend {
+                a: input(data, "input", previous)?,
+                b: input(data, "input2", FilterInput::SourceGraphic)?,
+                mode: opt::<String>(data, &p, "mode")?.map(|m| blend_mode_from_str(&m)).unwrap_or_default(),
+            },
+            "offset" => FilterOp::Offset {
+                input: input(data, "input", previous)?,
+                dx: opt::<f64>(data, &p, "dx")?.unwrap_or(0.0),
+                dy: opt::<f64>(data, &p, "dy")?.unwrap_or(0.0),
+            },
+            "blur" => FilterOp::Blur {
+                input: input(data, "input", previous)?,
+                rx: opt::<f64>(data, &p, "rx")?.unwrap_or(0.0),
+                ry: opt::<f64>(data, &p, "ry")?.unwrap_or(0.0),
+            },
+            "color_matrix" => {
+                let list = opt::<Vec<f64>>(data, &p, "values")?.ok_or_else(|| format!("{p}: a color_matrix needs `values`, 20 numbers"))?;
+                let found = list.len();
+                let values: [f64; 20] = list.try_into().map_err(|_| format!("{p}: a color_matrix needs 20 values, found {found}"))?;
+                FilterOp::ColorMatrix { input: input(data, "input", previous)?, values }
+            }
+            "component_transfer" => {
+                let mut funcs = [TransferFn::Identity, TransferFn::Identity, TransferFn::Identity, TransferFn::Identity];
+                for (slot, channel) in funcs.iter_mut().zip(["r", "g", "b", "a"]) {
+                    if raw(data, &p, channel).is_some() {
+                        *slot = parse_transfer(data, &format!("{p}.{channel}"))?;
+                    }
+                }
+                FilterOp::ComponentTransfer { input: input(data, "input", previous)?, funcs }
+            }
+            other => return Err(format!("{p}.op: unknown filter op '{other}'")),
+        };
+        let region = match opt::<Vec<f64>>(data, &p, "region")? {
+            None => None,
+            Some(r) if r.len() == 4 => Some(FilterRegion { x: r[0], y: r[1], width: r[2], height: r[3] }),
+            Some(r) => return Err(format!("{p}.region: expected [x, y, width, height], found {} values", r.len())),
+        };
+        nodes.push(FilterNode { op: kind, region, linear: opt::<bool>(data, &p, "linear")?.unwrap_or(false) });
+    }
+    let graph = FilterGraph { nodes };
+    graph.validate().map_err(|e| format!("{prefix}: {e}"))?;
+    Ok(graph)
+}
+
+/// `{ kind = "table", values = [...] }`, `"discrete"`, `"linear"` (`slope`,
+/// `intercept`), `"gamma"` (`amplitude`, `exponent`, `offset`) or `"identity"`.
+fn parse_transfer(data: &DixData, p: &str) -> Result<TransferFn, String> {
+    let kind = opt::<String>(data, p, "kind")?.unwrap_or_else(|| "identity".to_string());
+    match kind.as_str() {
+        "identity" => Ok(TransferFn::Identity),
+        "table" => Ok(TransferFn::Table(opt::<Vec<f64>>(data, p, "values")?.unwrap_or_default())),
+        "discrete" => Ok(TransferFn::Discrete(opt::<Vec<f64>>(data, p, "values")?.unwrap_or_default())),
+        "linear" => Ok(TransferFn::Linear { slope: opt::<f64>(data, p, "slope")?.unwrap_or(1.0), intercept: opt::<f64>(data, p, "intercept")?.unwrap_or(0.0) }),
+        "gamma" => Ok(TransferFn::Gamma {
+            amplitude: opt::<f64>(data, p, "amplitude")?.unwrap_or(1.0),
+            exponent: opt::<f64>(data, p, "exponent")?.unwrap_or(1.0),
+            offset: opt::<f64>(data, p, "offset")?.unwrap_or(0.0),
+        }),
+        other => Err(format!("{p}.kind: unknown transfer function '{other}'")),
+    }
+}

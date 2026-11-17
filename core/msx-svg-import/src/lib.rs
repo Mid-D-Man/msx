@@ -1182,7 +1182,9 @@ impl<'a, 'i> Importer<'a, 'i> {
     /// Wrap `kids` as needed: an isolated layer for group opacity, a group
     /// for a transform or id, nothing at all otherwise.
     fn emit(&mut self, kids: Vec<Element>, comp: Comp, transform: Option<Transform>, id: Option<String>, out: &mut Vec<Element>) {
-        if kids.is_empty() || comp.hidden {
+        // A filter can draw on nothing (an `feFlood` on an empty group, with a region
+        // that does not depend on a box), so an empty element keeps its filter layer.
+        if comp.hidden || (kids.is_empty() && comp.filter.is_empty()) {
             return;
         }
         if comp.needs_layer() {

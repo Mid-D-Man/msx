@@ -2,7 +2,7 @@
 
 This page tracks how much of SVG an imported file keeps. A feature ends up in one of three states. It is **native** when the MSX format and the renderers have it. It is **expanded** when the importer rewrites it into native features, so nothing is lost. It is a **gap** when the importer reports it as a warning and draws the file without it. The importer never drops a feature without saying so, with the exceptions marked "not read" below.
 
-Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched 53 of the 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji), the last being close, and 884 of the 960 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, of the 56 `image` tests 49, of the 34 `pattern` tests 26 (4 more agree with `rsvg-convert` and not with the resvg picture), and all 21 `style` tests and all 21 `mix-blend-mode` tests. The rest of the `image` tests use GIF, WebP or compressed SVG. Of the 416 `filters` tests, 185 match, among them all 9 `feDropShadow`, all 9 `feOffset` and all 16 `feColorMatrix` tests, 12 of 13 `feGaussianBlur`, 46 of 78 `filter` and 42 of 44 `filter-functions`. Most of the rest use primitives that need new effect kinds. Nearly every file that does not match uses a feature listed as a gap here.
+Progress is measured with `scripts/svg-compare/`. At the last full run the importer matched 53 of the 54 icons of a four set corpus (Feather, Bootstrap Icons, Simple Icons, Twemoji), the last being close, and 884 of the 960 files in the resvg shapes, painting, paint server, structure and masking tests. Of the 52 `clipPath` tests, 47 match, of the 40 `mask` tests 38, of the 56 `image` tests 49, of the 34 `pattern` tests 26 (4 more agree with `rsvg-convert` and not with the resvg picture), and all 21 `style` tests and all 21 `mix-blend-mode` tests. The rest of the `image` tests use GIF, WebP or compressed SVG. Of the 416 `filters` tests, 266 match, among them all 9 `feDropShadow`, all 9 `feOffset`, all 16 `feColorMatrix`, all 11 `feBlend`, all 22 `feComponentTransfer`, 19 of 20 `feComposite`, all 3 `feMerge`, all 21 `enable-background`, 12 of 13 `feGaussianBlur`, 68 of 78 `filter` and 42 of 44 `filter-functions`. Most of the rest use primitives that have no node yet: `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` and lighting. Nearly every file that does not match uses a feature listed as a gap here.
 
 ## Shapes and paths
 
@@ -47,7 +47,9 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `mask` with `url(#id)` | Expanded | A layer with a mask. Both units, the region, `mask-type`, nested masks and any paint in the mask work on all three renderers |
 | `mask` in a reference cycle, `color-interpolation: linearRGB` | Gap | Reported |
 | `filter` with `feGaussianBlur` (one or two deviations), `feColorMatrix`, `feDropShadow`, `feOffset`, and the functions `blur()`, `drop-shadow()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `brightness()`, `contrast()`, `invert()` and `opacity()` | Expanded | A layer with effects and a region clip. Units, `xlink:href`, chains and lists work. A color matrix and a blur with two deviations are binary version 3 |
-| `filter` with other primitives, a primitive region, a shadow that blurs differently per axis, `in` other than the previous result | Gap | Reported, drawn without that filter. They need effect kinds the format does not have: flood, component transfer, compositing and merge, blend, morphology, tile, turbulence, lighting |
+| `filter` with `feFlood`, `feComposite`, `feMerge`, `feBlend`, `feComponentTransfer`, named results, `SourceAlpha` and primitive regions | Expanded | One `graph` layer effect, binary version 3. Drawn by the SVG and CPU renderers. A filter that works as a chain stays a chain |
+| `filter` with `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` or lighting | Gap | Reported, drawn without that filter. They need graph nodes the format does not have |
+| A filter region that is smaller than the content | Gap | The filter region clips the result, and resvg also clips the source before the effects, so a blur at the edge of a small region is harder here |
 | `marker-start`, `marker-mid`, `marker-end`, `marker` in CSS | Expanded | Copies of the marker content at the vertices, on paths, lines, polylines, polygons, rectangles and ellipses. All marker attributes work, and the viewport clips |
 
 ## Structure
@@ -90,7 +92,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 |---|---|---|---|
 | Style inherited from a group | Yes | No | No |
 | `viewbox` block | Yes | No | No |
-| Layer effects | All | All | Blur, blur per axis and color matrix |
+| Layer effects | All | All | Blur, blur per axis and color matrix. Not the graph, the shadows and the glows |
 | Edge antialiasing | Yes | Yes | No |
 
 Imported files do not depend on the rows marked No, because the importer writes explicit style on every shape and a single wrapper transform.
@@ -104,7 +106,7 @@ The remaining gaps share a few causes, so they are closed in this order.
 3. Patterns. Done for fills by tile expansion in the importer. What is left is a real pattern def in the format, which would also give strokes and avoid one group per tile.
 4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.
-6. Done for blur (also per axis), color matrix, drop shadow and offset, and the CSS color functions. What is left needs new effect kinds: flood, component transfer and the compositing primitives, and primitive regions.
+6. Done for blur (also per axis), color matrix, drop shadow, offset, the CSS color functions and, as a filter graph, flood, composite, merge, blend, component transfer, named results, standard inputs and primitive regions. What is left is new graph nodes: `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` and lighting, the graph on the GPU renderer, and clipping the source graphic to the filter region before the effects run.
 7. Text styling, then `textPath`.
 8. Done: a binary version 3 with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`, written only for a scene that uses one. CPU and GPU now honor the two opacities.
 9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. CSS `@keyframes` followed. `set`, `animateMotion` and `steps()` followed. Style channels for fill and stroke color, stroke width and dash offset followed (binary version 3). What is left is the properties that have no track channel yet, such as rect width and height, `rx`, `ry`, the radius of a stroked circle, `d` and `points`.

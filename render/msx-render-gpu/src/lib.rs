@@ -811,6 +811,23 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         assert!(t.get_pixel(12, 10)[0] <= 1 && t.get_pixel(8, 10)[0] >= 254);
     }
 
+    /// A filter graph is not drawn on the GPU path yet, so the layer shows as if it had none,
+    /// the same as the shadows and glows.
+    #[test]
+    fn layer_filter_graph_is_skipped_and_the_layer_still_draws_if_a_gpu_adapter_is_available() {
+        let Ok(renderer) = GpuRenderer::new() else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        let graph = msx_ast::FilterGraph {
+            nodes: vec![msx_ast::FilterNode::new(msx_ast::FilterOp::Flood { color: Color::rgb(0, 255, 0) })],
+        };
+        let t = render_effect_layer(&renderer, 0.0, 0.0, 10.0, 20.0, Color::rgb(255, 0, 0), vec![msx_ast::Effect::Graph(graph)]);
+        let inside = t.get_pixel(4, 10);
+        assert!(inside[0] >= 253 && inside[1] <= 2, "the layer is drawn as it is, got {inside:?}");
+        assert_eq!(t.get_pixel(15, 10)[1], 0, "and nothing was flooded");
+    }
+
     fn clip_rect(x: f64, y: f64, w: f64, h: f64, color: Color) -> Element {
         let style = Style { fill: Some(Paint::Color(color)), stroke: Some(Paint::None), stroke_width: Some(0.0), opacity: Some(1.0), ..Default::default() };
         Element::Rect(Rect { x, y, width: w, height: h, rx: None, ry: None, id: None, transform: None, style })

@@ -110,6 +110,79 @@ fn num(v: f64) -> String {
 
 /// Same as [`num`], but always with a decimal point, so an array of
 /// numbers is read as floats and never as a mix of integers and floats.
+/// A filter graph as one inline object. See `parse_graph` in `layer.rs`.
+fn graph_text(g: &msx_ast::FilterGraph) -> String {
+    use msx_ast::{CompositeOp, FilterOp, TransferFn};
+
+    let list = |vs: &[f64]| vs.iter().map(|v| float(*v)).collect::<Vec<_>>().join(", ");
+    let input = |i: msx_ast::FilterInput| quote(&i.source_name());
+    let nodes: Vec<String> = g
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut f = vec![format!("op = {}", quote(n.op.source_name()))];
+            match &n.op {
+                FilterOp::Flood { color } => f.push(format!("color = {}", color_value(*color))),
+                FilterOp::Composite { a, b, op } => {
+                    f.push(format!("input = {}", input(*a)));
+                    f.push(format!("input2 = {}", input(*b)));
+                    f.push(format!("operator = {}", quote(op.source_name())));
+                    if let CompositeOp::Arithmetic { k1, k2, k3, k4 } = op {
+                        f.push(format!("k = [{}]", list(&[*k1, *k2, *k3, *k4])));
+                    }
+                }
+                FilterOp::Merge { inputs } => {
+                    f.push(format!("inputs = [{}]", inputs.iter().map(|i| input(*i)).collect::<Vec<_>>().join(", ")));
+                }
+                FilterOp::Blend { a, b, mode } => {
+                    f.push(format!("input = {}", input(*a)));
+                    f.push(format!("input2 = {}", input(*b)));
+                    f.push(format!("mode = {}", quote(blend_mode_text(*mode))));
+                }
+                FilterOp::Offset { input: i, dx, dy } => {
+                    f.push(format!("input = {}", input(*i)));
+                    f.push(format!("dx = {}", float(*dx)));
+                    f.push(format!("dy = {}", float(*dy)));
+                }
+                FilterOp::Blur { input: i, rx, ry } => {
+                    f.push(format!("input = {}", input(*i)));
+                    f.push(format!("rx = {}", float(*rx)));
+                    f.push(format!("ry = {}", float(*ry)));
+                }
+                FilterOp::ColorMatrix { input: i, values } => {
+                    f.push(format!("input = {}", input(*i)));
+                    f.push(format!("values = [{}]", list(values)));
+                }
+                FilterOp::ComponentTransfer { input: i, funcs } => {
+                    f.push(format!("input = {}", input(*i)));
+                    for (func, channel) in funcs.iter().zip(["r", "g", "b", "a"]) {
+                        if matches!(func, TransferFn::Identity) {
+                            continue;
+                        }
+                        let body = match func {
+                            TransferFn::Identity => unreachable!(),
+                            TransferFn::Table(t) | TransferFn::Discrete(t) => format!("values = [{}]", list(t)),
+                            TransferFn::Linear { slope, intercept } => format!("slope = {}, intercept = {}", float(*slope), float(*intercept)),
+                            TransferFn::Gamma { amplitude, exponent, offset } => {
+                                format!("amplitude = {}, exponent = {}, offset = {}", float(*amplitude), float(*exponent), float(*offset))
+                            }
+                        };
+                        f.push(format!("{channel} = {{ kind = {}, {body} }}", quote(func.source_name())));
+                    }
+                }
+            }
+            if let Some(r) = n.region {
+                f.push(format!("region = [{}]", list(&[r.x, r.y, r.width, r.height])));
+            }
+            if n.linear {
+                f.push("linear = true".to_string());
+            }
+            format!("{{ {} }}", f.join(", "))
+        })
+        .collect();
+    format!("type = \"graph\", nodes = [{}]", nodes.join(", "))
+}
+
 fn float(v: f64) -> String {
     let s = num(v);
     if s.contains('.') { s } else { format!("{s}.0") }
@@ -565,6 +638,7 @@ fn write_effects(out: &mut String, effects: &[msx_ast::Effect], indent: usize) {
                 "type = \"color_matrix\", linear = {linear}, values = [{}]",
                 values.iter().map(|v| float(*v)).collect::<Vec<_>>().join(", ")
             ),
+            Effect::Graph(g) => graph_text(g),
         };
         let comma = if i + 1 < effects.len() { "," } else { "" };
         let _ = writeln!(out, "{}{{ {body} }}{comma}", pad(indent + 2));
@@ -869,6 +943,77 @@ mod tests {
             Effect::ColorMatrix { values: [0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.2126, 0.7152, 0.0722, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -0.125], linear: true },
         ];
         assert_roundtrip(&scene_with(vec![], vec![Element::Layer(layer)]));
+    }
+
+    fn sample_graph() -> msx_ast::FilterGraph {
+        use msx_ast::{BlendMode, CompositeOp, FilterGraph, FilterInput as In, FilterNode, FilterOp, FilterRegion, TransferFn};
+        let mut flood = FilterNode::new(FilterOp::Flood { color: Color::rgba(10, 20, 30, 128) });
+        flood.region = Some(FilterRegion { x: 1.5, y: 2.0, width: 30.0, height: 40.0 });
+        let mut arithmetic = FilterNode::new(FilterOp::Composite { a: In::Node(0), b: In::SourceAlpha, op: CompositeOp::Arithmetic { k1: 0.0, k2: 1.0, k3: 0.5, k4: -0.25 } });
+        arithmetic.linear = true;
+        FilterGraph {
+            nodes: vec![
+                flood,
+                arithmetic,
+                FilterNode::new(FilterOp::Composite { a: In::SourceGraphic, b: In::Node(1), op: CompositeOp::Xor }),
+                FilterNode::new(FilterOp::Merge { inputs: vec![In::Node(1), In::Node(2), In::SourceGraphic] }),
+                FilterNode::new(FilterOp::Blend { a: In::Node(3), b: In::SourceGraphic, mode: BlendMode::Multiply }),
+                FilterNode::new(FilterOp::Offset { input: In::Node(4), dx: 3.0, dy: -2.5 }),
+                FilterNode::new(FilterOp::Blur { input: In::Node(5), rx: 2.0, ry: 0.0 }),
+                FilterNode::new(FilterOp::ColorMatrix { input: In::Node(6), values: [0.5; 20] }),
+                FilterNode::new(FilterOp::ComponentTransfer {
+                    input: In::Node(7),
+                    funcs: [TransferFn::Identity, TransferFn::Table(vec![0.0, 0.5, 1.0]), TransferFn::Discrete(vec![0.25, 0.75]), TransferFn::Linear { slope: 0.5, intercept: 0.25 }],
+                }),
+                FilterNode::new(FilterOp::ComponentTransfer {
+                    input: In::SourceGraphic,
+                    funcs: [TransferFn::Gamma { amplitude: 1.0, exponent: 2.0, offset: 0.0 }, TransferFn::Identity, TransferFn::Identity, TransferFn::Identity],
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_filter_graph_roundtrips_through_source() {
+        let mut layer = Layer::new(vec![rect(style())]);
+        layer.effects = vec![msx_ast::Effect::Blur { radius: 1.0 }, msx_ast::Effect::Graph(sample_graph())];
+        assert_roundtrip(&scene_with(vec![], vec![Element::Layer(layer)]));
+    }
+
+    #[test]
+    fn a_filter_graph_in_source_reads_defaults_and_refuses_what_is_wrong() {
+        let wrap = |nodes: &str| {
+            format!(
+                "@CONFIG( version -> \"1.0.0\" )\n@DATA(\n  scene = {{ width = 10, height = 10, background = #ffffff }}\n  elements::\n    {{ type = \"layer\", effects = [ {{ type = \"graph\", nodes = [{nodes}] }} ], elements = [ {{ type = \"rect\", x = 0, y = 0, width = 5, height = 5 }} ] }}\n)\n"
+            )
+        };
+        let graph_of = |nodes: &str| -> Result<msx_ast::FilterGraph, String> {
+            let scene = parse_scene(&wrap(nodes))?;
+            match &scene.elements[0] {
+                Element::Layer(l) => match &l.effects[0] {
+                    msx_ast::Effect::Graph(g) => Ok(g.clone()),
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            }
+        };
+        // No input reads the node before, and the first node reads the source.
+        let g = graph_of(r#"{ op = "blur", rx = 2.0, ry = 2.0 }, { op = "offset", dx = 1.0, dy = 0.0 }"#).unwrap();
+        assert!(matches!(g.nodes[0].op, msx_ast::FilterOp::Blur { input: msx_ast::FilterInput::SourceGraphic, .. }));
+        assert!(matches!(g.nodes[1].op, msx_ast::FilterOp::Offset { input: msx_ast::FilterInput::Node(0), .. }));
+        for (bad, needle) in [
+            (r#"{ op = "qwe" }"#, "unknown filter op"),
+            (r#"{ rx = 1.0 }"#, "needs `op`"),
+            (r#"{ op = "offset", input = "7" }"#, "not before it"),
+            (r#"{ op = "offset", input = "fill" }"#, "not source, alpha or a node index"),
+            (r#"{ op = "color_matrix", values = [1.0, 2.0] }"#, "20 values"),
+            (r#"{ op = "composite", operator = "nope" }"#, "unknown composite operator"),
+            (r#"{ op = "flood", region = [1.0, 2.0] }"#, "expected [x, y, width, height]"),
+            (r#"{ op = "flood", region = [0.0, 0.0, 0.0, 5.0] }"#, "region"),
+        ] {
+            let err = graph_of(bad).unwrap_err();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
     }
 
     #[test]

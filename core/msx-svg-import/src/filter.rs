@@ -16,7 +16,9 @@
 //! transform, so effect distances are in the element's own units and every
 //! renderer scales them with the transform.
 
-use msx_ast::{Color, Effect, Element, Group, Layer, Transform};
+use std::collections::HashMap;
+
+use msx_ast::{BlendMode, Color, CompositeOp, Effect, Element, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, Group, Layer, TransferFn, Transform};
 use roxmltree::Node;
 
 use crate::color_matrix as cm;
@@ -151,6 +153,31 @@ fn function(item: &str) -> Option<(String, &str)> {
     let open = item.find('(')?;
     let inner = item[open + 1..].strip_suffix(')')?;
     Some((item[..open].trim().to_ascii_lowercase(), inner))
+}
+
+/// One `feFuncR`, `feFuncG`, `feFuncB` or `feFuncA`. A `table` or `discrete`
+/// without values, and an unknown `type`, leave the channel as it is.
+fn transfer_function(node: &Node) -> TransferFn {
+    let number = |name: &str, default: f64| number_attr(node, name).unwrap_or(default);
+    // A list with a token that is not a number is no list at all.
+    let values = || -> Vec<f64> {
+        let raw = node.attribute("tableValues").unwrap_or("");
+        let parsed: Option<Vec<f64>> = raw.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f64>().ok().filter(|v| v.is_finite())).collect();
+        parsed.unwrap_or_default()
+    };
+    match node.attribute("type").map(str::trim) {
+        Some("table") => match values() {
+            v if v.is_empty() => TransferFn::Identity,
+            v => TransferFn::Table(v),
+        },
+        Some("discrete") => match values() {
+            v if v.is_empty() => TransferFn::Identity,
+            v => TransferFn::Discrete(v),
+        },
+        Some("linear") => TransferFn::Linear { slope: number("slope", 1.0), intercept: number("intercept", 0.0) },
+        Some("gamma") => TransferFn::Gamma { amplitude: number("amplitude", 1.0), exponent: number("exponent", 1.0), offset: number("offset", 0.0) },
+        _ => TransferFn::Identity,
+    }
 }
 
 fn split_color_opacity(color: Color, opacity: f64) -> (Color, f64) {
@@ -360,16 +387,218 @@ impl<'a, 'i> Importer<'a, 'i> {
             (1.0, 1.0)
         };
 
+        let (x, y, w, h) = region;
         match self.filter_primitives(&prims, primitive_scale) {
-            Ok((effects, offset)) => {
-                let (x, y, w, h) = region;
-                Ok(Some(Step { effects, offset, region: Some(plain_rect(x, y, x + w, y + h)) }))
-            }
-            Err(why) => {
-                self.warn(format!("{label} uses the filter #{id}, which is not supported ({why}); drawn without it"));
-                Ok(None)
+            Ok((effects, offset)) => Ok(Some(Step { effects, offset, region: Some(plain_rect(x, y, x + w, y + h)) })),
+            // A filter that is not a chain of single input effects becomes a graph.
+            Err(chain_why) => {
+                let object_units = attr("primitiveUnits") == Some("objectBoundingBox");
+                match self.filter_graph(&prims, object_units, region, bbox) {
+                    Ok(graph) => Ok(Some(Step { effects: vec![Effect::Graph(graph)], offset: (0.0, 0.0), region: Some(plain_rect(x, y, x + w, y + h)) })),
+                    Err(graph_why) => {
+                        // The graph reports the primitive it could not take. The chain
+                        // reason is the better one when the graph failed on the same.
+                        let why = if graph_why.is_empty() { chain_why } else { graph_why };
+                        self.warn(format!("{label} uses the filter #{id}, which is not supported ({why}); drawn without it"));
+                        Ok(None)
+                    }
+                }
             }
         }
+    }
+
+    /// The input a primitive reads. A name that no earlier primitive gave to
+    /// its result falls back to the previous result (or the source graphic for
+    /// the first primitive), and the standard inputs MSX has no layer for
+    /// (`BackgroundImage`, `BackgroundAlpha`, `FillPaint`, `StrokePaint`) read the
+    /// source graphic, as resvg does.
+    fn graph_input(raw: Option<&str>, names: &HashMap<String, u16>, previous: FilterInput) -> FilterInput {
+        match raw.map(str::trim) {
+            Some("SourceGraphic") | Some("BackgroundImage") | Some("BackgroundAlpha") | Some("FillPaint") | Some("StrokePaint") => FilterInput::SourceGraphic,
+            Some("SourceAlpha") => FilterInput::SourceAlpha,
+            Some(name) if !name.is_empty() => names.get(name).map(|i| FilterInput::Node(*i)).unwrap_or(previous),
+            _ => previous,
+        }
+    }
+
+    /// The color of a `feFlood` with its opacity in the alpha.
+    fn flood_color_of(&self, prim: Node<'a, 'i>) -> Color {
+        let color = match self.flood_property(prim, "flood-color").as_deref().map(str::trim) {
+            Some(s) if s.eq_ignore_ascii_case("currentcolor") => self.color_of(prim),
+            Some(s) => parse_color(s).unwrap_or(Color::BLACK),
+            None => Color::BLACK,
+        };
+        let opacity = flood_opacity(self.flood_property(prim, "flood-opacity").as_ref());
+        let (color, opacity) = split_color_opacity(color, opacity);
+        Color { a: (opacity * 255.0).round() as u8, ..color }
+    }
+
+    /// `flood-color` or `flood-opacity` of a primitive. These are not inherited
+    /// properties, so only the keyword `inherit` looks at the parent.
+    fn flood_property(&self, prim: Node<'a, 'i>, name: &str) -> Option<String> {
+        let mut cur = Some(prim);
+        while let Some(n) = cur {
+            match self.props_for(n).get(name).map(|v| v.trim().to_string()) {
+                Some(v) if v == "inherit" => cur = n.parent().filter(|p| p.is_element()),
+                other => return other,
+            }
+        }
+        None
+    }
+
+    /// The region of a primitive, or `None` for the whole filter region. A
+    /// value that is not given is the filter region's. In `objectBoundingBox`
+    /// units `x` and `y` are fractions of the box measured from its corner, and
+    /// `width` and `height` are fractions of its size.
+    fn graph_region(&self, prim: Node<'a, 'i>, object_units: bool, filter_region: (f64, f64, f64, f64), bbox: Option<BBox>) -> Result<Option<FilterRegion>, String> {
+        let any = ["x", "y", "width", "height"].iter().any(|a| prim.attribute(*a).is_some());
+        if !any {
+            return Ok(None);
+        }
+        let (vw, vh) = self.vp;
+        let read = |name: &str, base: f64| -> Option<f64> {
+            let raw = prim.attribute(name)?;
+            if object_units { obb_fraction(raw) } else { parse_length(raw).map(|l| l.to_px(16.0, base)) }
+        };
+        let (x, y, w, h) = (read("x", vw), read("y", vh), read("width", vw), read("height", vh));
+        let (fx, fy, fw, fh) = filter_region;
+        let rect = if object_units {
+            let b = bbox.filter(|b| b.w > 0.0 && b.h > 0.0).ok_or_else(|| "a primitive region in object units needs a box".to_string())?;
+            (x.map_or(fx, |v| b.x + v * b.w), y.map_or(fy, |v| b.y + v * b.h), w.map_or(fw, |v| v * b.w), h.map_or(fh, |v| v * b.h))
+        } else {
+            (x.unwrap_or(fx), y.unwrap_or(fy), w.unwrap_or(fw), h.unwrap_or(fh))
+        };
+        if !(rect.2 > 0.0 && rect.3 > 0.0 && [rect.0, rect.1, rect.2, rect.3].iter().all(|v| v.is_finite())) {
+            return Err(format!("{} has a region without area", prim.tag_name().name()));
+        }
+        Ok(Some(FilterRegion { x: rect.0, y: rect.1, width: rect.2, height: rect.3 }))
+    }
+
+    /// The primitives of a filter as a graph: every primitive MSX has a node
+    /// for, with named results, standard inputs and primitive regions. An
+    /// empty `Err` means the graph could not be built for the same reason the
+    /// chain could not.
+    fn filter_graph(&mut self, prims: &[Node<'a, 'i>], object_units: bool, region: (f64, f64, f64, f64), bbox: Option<BBox>) -> Result<FilterGraph, String> {
+        let scale = if object_units {
+            match bbox.filter(|b| b.w > 0.0 && b.h > 0.0) {
+                Some(b) => (b.w, b.h),
+                None => return Err(String::new()),
+            }
+        } else {
+            (1.0, 1.0)
+        };
+        let mut nodes: Vec<FilterNode> = Vec::new();
+        let mut names: HashMap<String, u16> = HashMap::new();
+        for prim in prims {
+            let tag = prim.tag_name().name();
+            let previous = match nodes.len().checked_sub(1) {
+                Some(i) => FilterInput::Node(i as u16),
+                None => FilterInput::SourceGraphic,
+            };
+            let input = |attr: &str| Self::graph_input(prim.attribute(attr), &names, previous);
+            let linear = self.filters_in_linear_light(*prim);
+            let passthrough = |input: FilterInput| FilterOp::Offset { input, dx: 0.0, dy: 0.0 };
+            // Primitives that make more than one node give the region and the
+            // space to the last, which is the one the result name points at.
+            let mut extra: Vec<FilterNode> = Vec::new();
+            let op = match tag {
+                "feGaussianBlur" => match deviation(prim.attribute("stdDeviation"), None, scale) {
+                    Deviation::Skip => passthrough(input("in")),
+                    Deviation::Even(r) => FilterOp::Blur { input: input("in"), rx: r, ry: r },
+                    Deviation::Uneven(rx, ry) => FilterOp::Blur { input: input("in"), rx, ry },
+                },
+                "feOffset" => FilterOp::Offset { input: input("in"), dx: number_attr(prim, "dx").unwrap_or(0.0) * scale.0, dy: number_attr(prim, "dy").unwrap_or(0.0) * scale.1 },
+                "feColorMatrix" => {
+                    let values = prim.attribute("values").map(number_list);
+                    let values = cm::from_primitive(prim.attribute("type"), values.as_deref());
+                    if cm::is_identity(&values) {
+                        passthrough(input("in"))
+                    } else {
+                        FilterOp::ColorMatrix { input: input("in"), values: cm::tidy(values) }
+                    }
+                }
+                "feFlood" => FilterOp::Flood { color: self.flood_color_of(*prim) },
+                "feComposite" => {
+                    let op = match prim.attribute("operator").map(str::trim) {
+                        Some("in") => CompositeOp::In,
+                        Some("out") => CompositeOp::Out,
+                        Some("atop") => CompositeOp::Atop,
+                        Some("xor") => CompositeOp::Xor,
+                        Some("arithmetic") => CompositeOp::Arithmetic {
+                            k1: number_attr(prim, "k1").unwrap_or(0.0),
+                            k2: number_attr(prim, "k2").unwrap_or(0.0),
+                            k3: number_attr(prim, "k3").unwrap_or(0.0),
+                            k4: number_attr(prim, "k4").unwrap_or(0.0),
+                        },
+                        _ => CompositeOp::Over,
+                    };
+                    FilterOp::Composite { a: input("in"), b: input("in2"), op }
+                }
+                "feMerge" => FilterOp::Merge {
+                    inputs: prim
+                        .children()
+                        .filter(|c| c.is_element() && c.tag_name().name() == "feMergeNode")
+                        .map(|c| Self::graph_input(c.attribute("in"), &names, previous))
+                        .collect(),
+                },
+                "feBlend" => FilterOp::Blend {
+                    a: input("in"),
+                    b: input("in2"),
+                    // `plus-lighter` is a compositing operator, not a blend mode of `feBlend`.
+                    mode: prim.attribute("mode").map(str::trim).filter(|m| *m != "plus-lighter").and_then(BlendMode::from_css_name).unwrap_or(BlendMode::Normal),
+                },
+                "feComponentTransfer" => {
+                    let mut funcs = [TransferFn::Identity, TransferFn::Identity, TransferFn::Identity, TransferFn::Identity];
+                    for child in prim.children().filter(|c| c.is_element()) {
+                        let slot = match child.tag_name().name() {
+                            "feFuncR" => 0,
+                            "feFuncG" => 1,
+                            "feFuncB" => 2,
+                            "feFuncA" => 3,
+                            _ => continue,
+                        };
+                        // The last function of a channel wins.
+                        funcs[slot] = transfer_function(&child);
+                    }
+                    FilterOp::ComponentTransfer { input: input("in"), funcs }
+                }
+                "feDropShadow" => {
+                    // blur and offset the alpha of the input, color it, and put the input over it
+                    let src = input("in");
+                    let blur = match deviation(prim.attribute("stdDeviation"), Some(2.0), scale) {
+                        Deviation::Skip => (0.0, 0.0),
+                        Deviation::Even(r) => (r, r),
+                        Deviation::Uneven(rx, ry) => (rx, ry),
+                    };
+                    let base = nodes.len() as u16;
+                    let mut alpha = [0.0; 20];
+                    alpha[18] = 1.0;
+                    let mut n = vec![
+                        FilterNode { op: FilterOp::ColorMatrix { input: src, values: alpha }, region: None, linear: false },
+                        FilterNode { op: FilterOp::Blur { input: FilterInput::Node(base), rx: blur.0, ry: blur.1 }, region: None, linear },
+                        FilterNode { op: FilterOp::Offset { input: FilterInput::Node(base + 1), dx: number_attr(prim, "dx").unwrap_or(2.0) * scale.0, dy: number_attr(prim, "dy").unwrap_or(2.0) * scale.1 }, region: None, linear },
+                        FilterNode { op: FilterOp::Flood { color: self.flood_color_of(*prim) }, region: None, linear: false },
+                        FilterNode { op: FilterOp::Composite { a: FilterInput::Node(base + 3), b: FilterInput::Node(base + 2), op: CompositeOp::In }, region: None, linear },
+                    ];
+                    let last = FilterOp::Merge { inputs: vec![FilterInput::Node(base + 4), src] };
+                    extra.append(&mut n);
+                    last
+                }
+                other => return Err(format!("{other} has no filter graph node")),
+            };
+            let region_of = self.graph_region(*prim, object_units, region, bbox)?;
+            nodes.append(&mut extra);
+            nodes.push(FilterNode { op, region: region_of, linear });
+            if nodes.len() > msx_ast::MAX_FILTER_NODES {
+                return Err(format!("the filter has more than {} nodes", msx_ast::MAX_FILTER_NODES));
+            }
+            if let Some(r) = prim.attribute("result").map(str::trim).filter(|r| !r.is_empty()) {
+                names.insert(r.to_string(), (nodes.len() - 1) as u16);
+            }
+        }
+        let graph = FilterGraph { nodes };
+        graph.validate().map_err(|e| e.to_string())?;
+        Ok(graph)
     }
 
     /// The filter element and the filters it refers to through `href`, nearest first.

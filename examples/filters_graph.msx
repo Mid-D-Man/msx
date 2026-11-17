@@ -1,0 +1,94 @@
+// examples/filters_graph.msx
+// Filter graph effects after import. Six tiles: a duotone (a color matrix and a component
+// transfer with tables), a posterize (discrete component transfer), a multiply blend with
+// a flood, a flood kept inside the silhouette (feComposite in), a soft colored shadow made
+// from offset, blur, flood, composite and merge, and a negative (linear component transfer).
+// Each filter is one `graph` layer effect, which makes the file wire version 3. The
+// graph effect is drawn by the SVG and CPU renderers. Made from examples/svg/filters_graph.svg
+// with `msx import`.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 240, height = 160, background = "#00000000" }
+  defs::
+    { type = "linear_gradient", id = "ramp", x1 = 0, y1 = 0, x2 = 1, y2 = 1, stops = [{ offset = 0, color = #ff5a5f }, { offset = 0.5, color = #ffd23f }, { offset = 1, color = #3ea6ff }] }
+  elements::
+    { type = "rect", x = 0, y = 0, width = 240, height = 160, style = { fill = #0f1220 } }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 5.6, y = 3.5999999999999996, width = 76.8, height = 76.8 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "color_matrix", input = "source", values = [0.213, 0.715, 0.072, 0.0, 0.0, 0.213, 0.715, 0.072, 0.0, 0.0, 0.213, 0.715, 0.072, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] }, { op = "component_transfer", input = "0", r = { kind = "table", values = [0.05, 1.0] }, g = { kind = "table", values = [0.1, 0.85] }, b = { kind = "table", values = [0.35, 0.2] } }] }
+          ],
+          elements = [
+            { type = "rect", x = 12, y = 10, width = 64, height = 64, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 81.6, y = 3.5999999999999996, width = 76.79999999999998, height = 76.8 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "component_transfer", input = "source", r = { kind = "discrete", values = [0.0, 0.34, 0.67, 1.0] }, g = { kind = "discrete", values = [0.0, 0.34, 0.67, 1.0] }, b = { kind = "discrete", values = [0.0, 0.34, 0.67, 1.0] } }] }
+          ],
+          elements = [
+            { type = "rect", x = 88, y = 10, width = 64, height = 64, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 157.6, y = 3.5999999999999996, width = 76.79999999999998, height = 76.8 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "flood", color = #ff9a3c }, { op = "blend", input = "source", input2 = "0", mode = "multiply" }, { op = "composite", input = "1", input2 = "alpha", operator = "in" }] }
+          ],
+          elements = [
+            { type = "rect", x = 164, y = 10, width = 64, height = 64, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1, transform = "translate(14 88)",
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = -3.4000000000000004, y = -2.2, width = 64.8, height = 62.4 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "flood", color = #3ea6ff }, { op = "composite", input = "0", input2 = "alpha", operator = "in" }] }
+          ],
+          elements = [
+            { type = "polygon", points = [[29.0, 3.0], [36.0, 23.0], [56.0, 23.0], [40.0, 35.0], [46.0, 55.0], [29.0, 43.0], [12.0, 55.0], [18.0, 35.0], [2.0, 23.0], [22.0, 23.0]], style = { fill = #ffffff } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1, transform = "translate(90 88)",
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = -14.2, y = -12.6, width = 91.8, height = 88.39999999999999 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "offset", input = "alpha", dx = 4.0, dy = 5.0 }, { op = "blur", input = "0", rx = 3.0, ry = 3.0 }, { op = "flood", color = "#ff5a5fe6" }, { op = "composite", input = "2", input2 = "1", operator = "in" }, { op = "merge", inputs = ["3", "source"] }] }
+          ],
+          elements = [
+            { type = "polygon", points = [[29.0, 3.0], [36.0, 23.0], [56.0, 23.0], [40.0, 35.0], [46.0, 55.0], [29.0, 43.0], [12.0, 55.0], [18.0, 35.0], [2.0, 23.0], [22.0, 23.0]], style = { fill = #ffd23f } }
+          ] }
+      ] }
+    { type = "layer", blend_mode = "normal", opacity = 1,
+      elements = [
+        { type = "layer", blend_mode = "normal", opacity = 1,
+          clip_path = [
+            { type = "rect", x = 157.6, y = 84.2, width = 76.79999999999998, height = 69.60000000000001 }
+          ],
+          effects = [
+            { type = "graph", nodes = [{ op = "component_transfer", input = "source", r = { kind = "linear", slope = -1.0, intercept = 1.0 }, g = { kind = "linear", slope = -1.0, intercept = 1.0 }, b = { kind = "linear", slope = -1.0, intercept = 1.0 } }] }
+          ],
+          elements = [
+            { type = "rect", x = 164, y = 90, width = 64, height = 58, rx = 6, ry = 6, style = { fill = "url(#ramp)" } }
+          ] }
+      ] }
+)

@@ -80,3 +80,5 @@ pub const EFFECT_TAG_INNER_GLOW:   u8 = 0x04;
 pub const EFFECT_TAG_BLUR_XY:      u8 = 0x05;
 /// Wire version 3.
 pub const EFFECT_TAG_COLOR_MATRIX: u8 = 0x06;
+/// Wire version 3.
+pub const EFFECT_TAG_GRAPH:        u8 = 0x07;

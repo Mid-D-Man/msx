@@ -14,6 +14,7 @@
 
 mod composite;
 mod effects;
+mod filter_graph;
 mod geom;
 mod gradient;
 mod image;

@@ -135,6 +135,8 @@ fn effect_primitive(effect: &Effect, input: &str, result: &str, idx: usize) -> S
             result = result,
         ),
 
+        Effect::Graph(graph) => graph_primitives(graph, input, result, &p),
+
         Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => format!(
             r#"<feDropShadow in="{input}" dx="{dx}" dy="{dy}" stdDeviation="{blur}" flood-color="{color}" flood-opacity="{op}" result="{result}"/>"#,
             input = input,
@@ -194,4 +196,168 @@ fn fmt_matrix_value(v: f64) -> String {
     let s = format!("{v:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-0" { "0".to_string() } else { s.to_string() }
+}
+
+/// One SVG primitive per node of a filter graph. The node `j` is named
+/// `{prefix}n{j}` and the last one takes `result`, so the graph chains with the
+/// effects around it. The source graphic is `input`, the result of the effect
+/// before, and its alpha is `SourceAlpha` when that is the layer itself or a
+/// color matrix that keeps the alpha and sets the color to black otherwise.
+/// Every primitive writes its color space, because the filter default
+/// (linearRGB) would otherwise apply to all of them.
+fn graph_primitives(graph: &msx_ast::FilterGraph, input: &str, result: &str, prefix: &str) -> String {
+    use msx_ast::{CompositeOp, FilterInput, FilterOp, TransferFn};
+
+    let mut out = String::new();
+    let needs_alpha = graph.nodes.iter().any(|n| n.op.inputs().contains(&FilterInput::SourceAlpha));
+    let alpha_name = if input == "SourceGraphic" {
+        "SourceAlpha".to_string()
+    } else {
+        let name = format!("{prefix}alpha");
+        if needs_alpha {
+            out.push_str(&format!(
+                r#"<feColorMatrix in="{input}" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" color-interpolation-filters="sRGB" result="{name}"/>"#
+            ));
+        }
+        name
+    };
+    let name_of = |i: FilterInput| match i {
+        FilterInput::SourceGraphic => input.to_string(),
+        FilterInput::SourceAlpha => alpha_name.clone(),
+        FilterInput::Node(j) => format!("{prefix}n{j}"),
+    };
+    if graph.nodes.is_empty() {
+        return format!(r#"<feOffset in="{input}" dx="0" dy="0" result="{result}"/>"#);
+    }
+    let num = |v: f64| fmt_matrix_value(v);
+    let list = |vs: &[f64]| vs.iter().map(|v| num(*v)).collect::<Vec<_>>().join(" ");
+    for (j, node) in graph.nodes.iter().enumerate() {
+        let name = if j + 1 == graph.nodes.len() { result.to_string() } else { format!("{prefix}n{j}") };
+        let mut attrs = String::new();
+        if let Some(r) = node.region {
+            attrs.push_str(&format!(r#" x="{}" y="{}" width="{}" height="{}""#, num(r.x), num(r.y), num(r.width), num(r.height)));
+        }
+        attrs.push_str(&format!(r#" color-interpolation-filters="{}" result="{name}""#, if node.linear { "linearRGB" } else { "sRGB" }));
+        let prim = match &node.op {
+            FilterOp::Flood { color } => format!(
+                r#"<feFlood flood-color="rgb({},{},{})" flood-opacity="{}"{attrs}/>"#,
+                color.r,
+                color.g,
+                color.b,
+                num(f64::from(color.a) / 255.0)
+            ),
+            FilterOp::Composite { a, b, op } => {
+                let k = match op {
+                    CompositeOp::Arithmetic { k1, k2, k3, k4 } => format!(r#" k1="{}" k2="{}" k3="{}" k4="{}""#, num(*k1), num(*k2), num(*k3), num(*k4)),
+                    _ => String::new(),
+                };
+                format!(r#"<feComposite in="{}" in2="{}" operator="{}"{k}{attrs}/>"#, name_of(*a), name_of(*b), op.source_name())
+            }
+            FilterOp::Merge { inputs } => {
+                let nodes: String = inputs.iter().map(|i| format!(r#"<feMergeNode in="{}"/>"#, name_of(*i))).collect();
+                format!("<feMerge{attrs}>{nodes}</feMerge>")
+            }
+            FilterOp::Blend { a, b, mode } => {
+                format!(r#"<feBlend in="{}" in2="{}" mode="{}"{attrs}/>"#, name_of(*a), name_of(*b), mode.to_css_blend_mode().unwrap_or("normal"))
+            }
+            FilterOp::Offset { input: i, dx, dy } => format!(r#"<feOffset in="{}" dx="{}" dy="{}"{attrs}/>"#, name_of(*i), num(*dx), num(*dy)),
+            FilterOp::Blur { input: i, rx, ry } => {
+                format!(r#"<feGaussianBlur in="{}" stdDeviation="{} {}"{attrs}/>"#, name_of(*i), num(rx.max(0.0)), num(ry.max(0.0)))
+            }
+            FilterOp::ColorMatrix { input: i, values } => format!(r#"<feColorMatrix in="{}" type="matrix" values="{}"{attrs}/>"#, name_of(*i), list(values)),
+            FilterOp::ComponentTransfer { input: i, funcs } => {
+                let mut body = String::new();
+                for (func, tag) in funcs.iter().zip(["R", "G", "B", "A"]) {
+                    match func {
+                        TransferFn::Identity => {}
+                        TransferFn::Table(t) | TransferFn::Discrete(t) => {
+                            body.push_str(&format!(r#"<feFunc{tag} type="{}" tableValues="{}"/>"#, func.source_name(), list(t)));
+                        }
+                        TransferFn::Linear { slope, intercept } => {
+                            body.push_str(&format!(r#"<feFunc{tag} type="linear" slope="{}" intercept="{}"/>"#, num(*slope), num(*intercept)));
+                        }
+                        TransferFn::Gamma { amplitude, exponent, offset } => body.push_str(&format!(
+                            r#"<feFunc{tag} type="gamma" amplitude="{}" exponent="{}" offset="{}"/>"#,
+                            num(*amplitude),
+                            num(*exponent),
+                            num(*offset)
+                        )),
+                    }
+                }
+                format!(r#"<feComponentTransfer in="{}"{attrs}>{body}</feComponentTransfer>"#, name_of(*i))
+            }
+        };
+        out.push_str(&prim);
+    }
+    out
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    use msx_ast::{CompositeOp, FilterGraph, FilterInput as In, FilterNode, FilterOp, FilterRegion, TransferFn};
+
+    fn emit(graph: FilterGraph, input: &str) -> String {
+        graph_primitives(&graph, input, "out", "fx3-")
+    }
+
+    #[test]
+    fn nodes_chain_by_name_and_the_last_takes_the_result_name() {
+        let g = FilterGraph {
+            nodes: vec![
+                FilterNode::new(FilterOp::Flood { color: msx_ast::Color::rgba(255, 0, 0, 128) }),
+                FilterNode::new(FilterOp::Composite { a: In::Node(0), b: In::SourceAlpha, op: CompositeOp::In }),
+                FilterNode::new(FilterOp::Merge { inputs: vec![In::Node(1), In::SourceGraphic] }),
+            ],
+        };
+        let svg = emit(g, "SourceGraphic");
+        assert!(svg.contains(r#"<feFlood flood-color="rgb(255,0,0)" flood-opacity="0.501961" color-interpolation-filters="sRGB" result="fx3-n0"/>"#), "{svg}");
+        assert!(svg.contains(r#"<feComposite in="fx3-n0" in2="SourceAlpha" operator="in""#));
+        assert!(svg.contains(r#"<feMerge color-interpolation-filters="sRGB" result="out"><feMergeNode in="fx3-n1"/><feMergeNode in="SourceGraphic"/></feMerge>"#));
+    }
+
+    #[test]
+    fn after_another_effect_the_alpha_comes_from_a_matrix() {
+        let g = FilterGraph { nodes: vec![FilterNode::new(FilterOp::Offset { input: In::SourceAlpha, dx: 2.0, dy: 3.0 })] };
+        let svg = emit(g, "fx2-out");
+        assert!(svg.starts_with(r#"<feColorMatrix in="fx2-out" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0""#), "{svg}");
+        assert!(svg.contains(r#"<feOffset in="fx3-alpha" dx="2" dy="3""#), "{svg}");
+        // A graph that does not read the alpha does not add the matrix.
+        let plain = emit(FilterGraph { nodes: vec![FilterNode::new(FilterOp::Offset { input: In::SourceGraphic, dx: 2.0, dy: 3.0 })] }, "fx2-out");
+        assert!(!plain.contains("feColorMatrix"), "{plain}");
+        assert!(plain.contains(r#"<feOffset in="fx2-out""#));
+    }
+
+    #[test]
+    fn regions_spaces_and_function_channels_are_written() {
+        let mut blur = FilterNode::new(FilterOp::Blur { input: In::SourceGraphic, rx: 4.0, ry: 0.0 });
+        blur.linear = true;
+        blur.region = Some(FilterRegion { x: 1.0, y: 2.5, width: 30.0, height: 40.0 });
+        let ct = FilterNode::new(FilterOp::ComponentTransfer {
+            input: In::Node(0),
+            funcs: [TransferFn::Identity, TransferFn::Table(vec![0.0, 0.5, 1.0]), TransferFn::Linear { slope: 2.0, intercept: -0.5 }, TransferFn::Gamma { amplitude: 1.0, exponent: 2.0, offset: 0.0 }],
+        });
+        let svg = emit(FilterGraph { nodes: vec![blur, ct] }, "SourceGraphic");
+        assert!(svg.contains(r#"<feGaussianBlur in="SourceGraphic" stdDeviation="4 0" x="1" y="2.5" width="30" height="40" color-interpolation-filters="linearRGB" result="fx3-n0"/>"#), "{svg}");
+        assert!(!svg.contains("feFuncR"), "an identity channel writes nothing");
+        assert!(svg.contains(r#"<feFuncG type="table" tableValues="0 0.5 1"/>"#));
+        assert!(svg.contains(r#"<feFuncB type="linear" slope="2" intercept="-0.5"/>"#));
+        assert!(svg.contains(r#"<feFuncA type="gamma" amplitude="1" exponent="2" offset="0"/>"#));
+    }
+
+    #[test]
+    fn blend_modes_use_the_css_names_and_arithmetic_writes_its_constants() {
+        let blend = FilterNode::new(FilterOp::Blend { a: In::SourceGraphic, b: In::SourceAlpha, mode: msx_ast::BlendMode::Multiply });
+        let arith = FilterNode::new(FilterOp::Composite { a: In::Node(0), b: In::SourceGraphic, op: CompositeOp::Arithmetic { k1: 0.0, k2: 1.0, k3: 0.5, k4: -0.25 } });
+        let svg = emit(FilterGraph { nodes: vec![blend, arith] }, "SourceGraphic");
+        assert!(svg.contains(r#"mode="multiply""#));
+        assert!(svg.contains(r#"operator="arithmetic" k1="0" k2="1" k3="0.5" k4="-0.25""#), "{svg}");
+        let normal = emit(FilterGraph { nodes: vec![FilterNode::new(FilterOp::Blend { a: In::SourceGraphic, b: In::SourceGraphic, mode: msx_ast::BlendMode::Subtract })] }, "SourceGraphic");
+        assert!(normal.contains(r#"mode="normal""#), "a mode with no CSS name falls back to normal");
+    }
+
+    #[test]
+    fn an_empty_graph_passes_the_input_through() {
+        assert_eq!(emit(FilterGraph::default(), "SourceGraphic"), r#"<feOffset in="SourceGraphic" dx="0" dy="0" result="out"/>"#);
+    }
 }

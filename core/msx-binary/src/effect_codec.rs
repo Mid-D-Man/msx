@@ -61,6 +61,11 @@ pub fn write_effect(out: &mut Vec<u8>, effect: &Effect) {
                 write_f32(out, *v);
             }
         }
+        Effect::Graph(graph) => {
+            crate::version::require(3);
+            write_u8(out, EFFECT_TAG_GRAPH);
+            crate::filter_codec::write_graph(out, graph);
+        }
     }
 }
 
@@ -116,6 +121,7 @@ pub fn read_effect(data: &[u8], cursor: &mut usize) -> io::Result<Effect> {
             }
             Ok(Effect::ColorMatrix { values, linear: flags == 1 })
         }
+        EFFECT_TAG_GRAPH => Ok(Effect::Graph(crate::filter_codec::read_graph(data, cursor)?)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown effect tag 0x{:02x}", other),
@@ -183,6 +189,10 @@ mod tests {
         crate::version::begin();
         write_effect(&mut Vec::new(), &Effect::Blur { radius: 1.0 });
         assert_eq!(crate::version::needed(), crate::MIN_VERSION);
+        // A graph needs version 3 too.
+        crate::version::begin();
+        write_effect(&mut Vec::new(), &Effect::Graph(msx_ast::FilterGraph::default()));
+        assert_eq!(crate::version::needed(), 3);
         // Flags other than the linear bit are refused.
         let mut bad = vec![EFFECT_TAG_COLOR_MATRIX, 2];
         bad.extend([0u8; 80]);

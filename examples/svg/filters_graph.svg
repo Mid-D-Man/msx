@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160" viewBox="0 0 240 160">
+  <defs>
+    <linearGradient id="ramp" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5a5f"/>
+      <stop offset="0.5" stop-color="#ffd23f"/>
+      <stop offset="1" stop-color="#3ea6ff"/>
+    </linearGradient>
+    <filter id="duotone" color-interpolation-filters="sRGB">
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncR type="table" tableValues="0.05 1"/>
+        <feFuncG type="table" tableValues="0.1 0.85"/>
+        <feFuncB type="table" tableValues="0.35 0.2"/>
+      </feComponentTransfer>
+    </filter>
+    <filter id="poster" color-interpolation-filters="sRGB">
+      <feComponentTransfer>
+        <feFuncR type="discrete" tableValues="0 0.34 0.67 1"/>
+        <feFuncG type="discrete" tableValues="0 0.34 0.67 1"/>
+        <feFuncB type="discrete" tableValues="0 0.34 0.67 1"/>
+      </feComponentTransfer>
+    </filter>
+    <filter id="multiply" color-interpolation-filters="sRGB">
+      <feFlood flood-color="#ff9a3c" result="paint"/>
+      <feBlend in="SourceGraphic" in2="paint" mode="multiply" result="mixed"/>
+      <feComposite in="mixed" in2="SourceAlpha" operator="in"/>
+    </filter>
+    <filter id="tint" color-interpolation-filters="sRGB">
+      <feFlood flood-color="#3ea6ff"/>
+      <feComposite in2="SourceAlpha" operator="in"/>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="170%" height="170%" color-interpolation-filters="sRGB">
+      <feOffset in="SourceAlpha" dx="4" dy="5" result="moved"/>
+      <feGaussianBlur in="moved" stdDeviation="3" result="soft"/>
+      <feFlood flood-color="#ff5a5f" flood-opacity="0.9" result="color"/>
+      <feComposite in="color" in2="soft" operator="in" result="cast"/>
+      <feMerge>
+        <feMergeNode in="cast"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="negative" color-interpolation-filters="sRGB">
+      <feComponentTransfer>
+        <feFuncR type="linear" slope="-1" intercept="1"/>
+        <feFuncG type="linear" slope="-1" intercept="1"/>
+        <feFuncB type="linear" slope="-1" intercept="1"/>
+      </feComponentTransfer>
+    </filter>
+  </defs>
+  <rect width="240" height="160" fill="#0f1220"/>
+  <rect x="12" y="10" width="64" height="64" rx="6" fill="url(#ramp)" filter="url(#duotone)"/>
+  <rect x="88" y="10" width="64" height="64" rx="6" fill="url(#ramp)" filter="url(#poster)"/>
+  <rect x="164" y="10" width="64" height="64" rx="6" fill="url(#ramp)" filter="url(#multiply)"/>
+  <polygon transform="translate(14 88)" points="29,3 36,23 56,23 40,35 46,55 29,43 12,55 18,35 2,23 22,23" fill="#ffffff" filter="url(#tint)"/>
+  <polygon transform="translate(90 88)" points="29,3 36,23 56,23 40,35 46,55 29,43 12,55 18,35 2,23 22,23" fill="#ffd23f" filter="url(#shadow)"/>
+  <rect x="164" y="90" width="64" height="58" rx="6" fill="url(#ramp)" filter="url(#negative)"/>
+</svg>

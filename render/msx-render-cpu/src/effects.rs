@@ -30,6 +30,7 @@ pub fn apply_effects(pixmap: &mut Pixmap, effects: &[Effect]) {
             Effect::Blur { radius } => gaussian_blur(pixmap, *radius as f32),
             Effect::BlurXY { rx, ry } => gaussian_blur_xy(pixmap, *rx as f32, *ry as f32),
             Effect::ColorMatrix { values, linear } => color_matrix(pixmap, values, *linear),
+            Effect::Graph(graph) => crate::filter_graph::apply_graph(pixmap, graph),
             Effect::DropShadow { offset_x, offset_y, blur_radius, color, opacity } => {
                 drop_shadow(pixmap, *offset_x as f32, *offset_y as f32, *blur_radius as f32, *color, *opacity as f32);
             }
@@ -118,14 +119,14 @@ pub fn color_matrix(pixmap: &mut Pixmap, values: &[f64; 20], linear: bool) {
 }
 
 /// Blurs every row of an RGBA `f32` buffer that is `width` pixels wide.
-fn blur_rows(buf: &mut [f32], width: usize, sigma: f32) {
+pub(crate) fn blur_rows(buf: &mut [f32], width: usize, sigma: f32) {
     if width == 0 {
         return;
     }
     buf.par_chunks_mut(width * 4).for_each(|row| blur_line(row, width, sigma));
 }
 
-fn transpose(src: &[f32], width: usize, height: usize) -> Vec<f32> {
+pub(crate) fn transpose(src: &[f32], width: usize, height: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; src.len()];
     for y in 0..height {
         for x in 0..width {
