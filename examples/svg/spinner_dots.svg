@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="48" viewBox="0 0 120 48">
+  <rect width="120" height="48" fill="#0f1220"/>
+  <!-- Three dots that grow one after the other. Each one starts a fixed time after the
+       one before, and the first starts again a quarter second after the last ends. -->
+  <circle cx="30" cy="24" r="0" fill="#4a9eff">
+    <animate id="d1" attributeName="r" values="0;9;0" dur="0.8s" begin="0;d3.end+0.25s"/>
+  </circle>
+  <circle cx="60" cy="24" r="0" fill="#2ecc71">
+    <animate id="d2" attributeName="r" values="0;9;0" dur="0.8s" begin="d1.begin+0.25s"/>
+  </circle>
+  <circle cx="90" cy="24" r="0" fill="#ffb84a">
+    <animate id="d3" attributeName="r" values="0;9;0" dur="0.8s" begin="d2.begin+0.25s"/>
+  </circle>
+</svg>

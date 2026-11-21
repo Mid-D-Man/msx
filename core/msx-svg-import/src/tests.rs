@@ -1114,9 +1114,9 @@ fn nested_svg_viewport_clips_through_a_use_size() {
 #[test]
 fn animations_without_a_channel_are_reported_instead_of_dropped_silently() {
     let i = imp(&doc(r##"<style>@keyframes spin { to { width: 9px } } .a { animation: spin 2s infinite }</style>
-        <rect width="5" height="5"><animate attributeName="width" from="5" to="9" dur="1s"/></rect>
+        <rect width="5" height="5"><animate attributeName="d" from="5" to="9" dur="1s"/></rect>
         <circle class="a" r="3"/><g><animateTransform attributeName="transform" type="skewX" to="30" dur="1s"/><rect width="1" height="1"/></g>
-        <rect width="5" height="5"><set attributeName="height" to="9"/></rect>"##));
+        <rect width="5" height="5"><set attributeName="points" to="9"/></rect>"##));
     for needle in ["keyframe property width", "<animate>", "CSS animation", "<animateTransform>", "<set>"] {
         assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
     }
@@ -1811,12 +1811,12 @@ fn key_splines_are_baked_into_keyframes() {
 #[test]
 fn animations_that_cannot_run_are_reported_and_the_static_frame_stays() {
     let i = imp(&doc(r##"<rect width="5" height="5"><animate attributeName="opacity" from="0" to="1" begin="click" dur="1s"/></rect>
-        <rect width="5" height="5"><animate attributeName="width" from="1" to="9" dur="1s"/></rect>
+        <rect width="5" height="5"><animate attributeName="points" from="1" to="9" dur="1s"/></rect>
         <rect width="5" height="5"><animate attributeName="opacity" from="0" to="1"/></rect>
         <rect width="5" height="5"><animateMotion path="M0 0 L9 9" calcMode="discrete" dur="1s"/></rect>
         <rect width="5" height="5"><animate attributeName="opacity" values="0;1" keyTimes="0;0.5" dur="1s"/></rect>
         <text x="1" y="1"><animate attributeName="x" from="0" to="5" dur="1s"/>hi</text>"##));
-    for needle in ["waits for an event", "animating width", "no finite dur", "<animateMotion>", "keyTimes must rise", "x on <text>"] {
+    for needle in ["waits for an event", "animating points", "no finite dur", "<animateMotion>", "keyTimes must rise", "x on <text>"] {
         assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
     }
     assert!(i.scene.animations.is_empty());
@@ -1919,37 +1919,75 @@ fn a_static_fill_opacity_of_zero_is_a_valid_start() {
 }
 
 #[test]
-fn fill_opacity_is_refused_where_it_would_not_be_exact() {
-    let both = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00" stroke="#000" stroke-width="2"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
-    assert!(has_warning(&both, "also paints its stroke"), "{:?}", both.warnings);
-    let inherited = imp(&doc(r##"<g stroke="#000"><circle cx="5" cy="5" r="4"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle></g>"##));
-    assert!(has_warning(&inherited, "also paints its stroke"), "a stroke inherited from the group counts: {:?}", inherited.warnings);
+fn fill_opacity_on_a_shape_that_also_strokes_is_the_alpha_of_the_fill_color() {
+    use msx_ast::AnimatedProperty as P;
+    for body in [
+        r##"<circle cx="5" cy="5" r="4" fill="#f00" stroke="#000" stroke-width="2"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##,
+        // A stroke inherited from the group counts as well.
+        r##"<g stroke="#000"><circle cx="5" cy="5" r="4" fill="#f00"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle></g>"##,
+    ] {
+        let i = imp(&doc(body));
+        assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+        assert_eq!(track(&i, P::FillA).len(), 1, "one alpha track, no layer fade: {body}");
+        assert!(track(&i, P::Opacity).is_empty());
+        let mid = resolved_circle(&i, 0.5);
+        assert_eq!(mid.style.fill, Some(msx_ast::Paint::Color(msx_ast::Color::rgba(255, 0, 0, 0))), "the fill is clear at the middle");
+        assert_eq!(resolved_circle(&i, 0.0).style.fill, Some(msx_ast::Paint::Color(msx_ast::Color::rgba(255, 0, 0, 255))));
+        let stroke = mid.style.stroke.clone();
+        assert!(matches!(stroke, Some(msx_ast::Paint::Color(c)) if c.a == 255), "the stroke is not faded: {stroke:?}");
+    }
+    // The opacity the shape already has is part of the alpha at rest.
+    let half = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#f00" fill-opacity="0.5" stroke="#000"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
+    assert!(half.warnings.is_empty(), "{:?}", half.warnings);
+    assert_eq!(resolved_circle(&half, 0.0).style.fill, Some(msx_ast::Paint::Color(msx_ast::Color::rgba(255, 0, 0, 255))), "the animation replaces the static 0.5");
+    // A shape that paints no fill has nothing to fade, and a paint that is not a color has no alpha to carry it.
     let none = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="none"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
     assert!(has_warning(&none, "no fill to fade"), "{:?}", none.warnings);
-    for i in [&both, &inherited, &none] {
+    let gradient = imp(&doc(r##"<linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient><circle cx="5" cy="5" r="4" fill="url(#g)" stroke="#000"><animate attributeName="fill-opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></circle>"##));
+    assert!(has_warning(&gradient, "also paints its stroke"), "{:?}", gradient.warnings);
+    for i in [&none, &gradient] {
         assert!(i.scene.animations.is_empty());
     }
 }
 
 #[test]
-fn stroke_opacity_works_on_a_shape_that_only_strokes() {
+fn stroke_opacity_fades_the_layer_when_only_the_stroke_paints_and_the_alpha_otherwise() {
+    use msx_ast::AnimatedProperty as P;
     let i = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="none" stroke="#000" stroke-width="2"><animate attributeName="stroke-opacity" values="1;0;1" dur="2s" repeatCount="indefinite"/></circle>"##));
     assert!(i.warnings.is_empty(), "{:?}", i.warnings);
     assert!(close(layer_opacity_at(&i, 1.0), 0.0));
-    let filled = imp(&doc(r##"<circle cx="5" cy="5" r="4" stroke="#000"><animate attributeName="stroke-opacity" values="1;0;1" dur="2s" repeatCount="indefinite"/></circle>"##));
-    assert!(has_warning(&filled, "also paints its fill"), "{:?}", filled.warnings);
+    let filled = imp(&doc(r##"<circle cx="5" cy="5" r="4" fill="#0f0" stroke="#000"><animate attributeName="stroke-opacity" values="1;0;1" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(filled.warnings.is_empty(), "{:?}", filled.warnings);
+    assert_eq!(track(&filled, P::StrokeA).len(), 1);
+    let mid = resolved_circle(&filled, 1.0);
+    assert!(matches!(mid.style.stroke, Some(msx_ast::Paint::Color(c)) if c.a == 0), "{:?}", mid.style.stroke);
+    assert!(matches!(mid.style.fill, Some(msx_ast::Paint::Color(c)) if c.a == 255), "the fill stays: {:?}", mid.style.fill);
+}
+
+/// The first circle of the frame at `t`, wherever it sits in the groups and layers.
+fn resolved_circle(i: &Imported, t: f64) -> msx_ast::Circle {
+    fn find(e: &Element) -> Option<msx_ast::Circle> {
+        match e {
+            Element::Circle(c) => Some(c.clone()),
+            Element::Group(g) => g.children.iter().find_map(find),
+            Element::Layer(l) => l.children.iter().find_map(find),
+            _ => None,
+        }
+    }
+    msx_anim::resolve_at_time(&i.scene, t).elements.iter().find_map(find).expect("a circle in the frame")
 }
 
 #[test]
-fn circle_radius_scales_about_the_centre() {
+fn circle_radius_is_a_radius_channel_and_the_centre_stays_put() {
+    use msx_ast::AnimatedProperty as P;
     let i = imp(&doc(r##"<circle cx="10" cy="10" r="4" fill="#00f"><animate attributeName="r" from="4" to="12" dur="1s" fill="freeze"/></circle>"##));
     assert!(i.warnings.is_empty(), "{:?}", i.warnings);
-    // The point on the right edge follows the radius, the centre stays put.
-    assert!(near(shape_point(&i, 0.0, 14.0, 10.0), (14.0, 10.0)));
-    assert!(near(shape_point(&i, 0.5, 14.0, 10.0), (18.0, 10.0)));
-    assert!(near(shape_point(&i, 1.0, 14.0, 10.0), (22.0, 10.0)));
-    assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (10.0, 10.0)));
-    assert!(near(shape_point(&i, 1.0, 10.0, 14.0), (10.0, 22.0)));
+    assert_eq!(track(&i, P::R).len(), 1, "one radius track");
+    assert!(track(&i, P::ScaleX).is_empty(), "no scale wrapper");
+    for (t, r) in [(0.0, 4.0), (0.5, 8.0), (1.0, 12.0)] {
+        let c = resolved_circle(&i, t);
+        assert!(close(c.r, r) && (c.cx, c.cy) == (10.0, 10.0), "t={t}: {c:?}");
+    }
 }
 
 #[test]
@@ -1957,22 +1995,30 @@ fn radius_combines_with_a_moving_centre_and_a_static_transform() {
     let i = imp(&doc(r##"<g transform="translate(100 0)"><circle cx="10" cy="10" r="2" fill="#00f">
         <animate attributeName="r" from="2" to="6" dur="1s" fill="freeze"/><animate attributeName="cx" from="10" to="30" dur="1s" fill="freeze"/></circle></g>"##));
     assert!(i.warnings.is_empty(), "{:?}", i.warnings);
-    // At the end the centre is (30,10) and the radius 6, all inside translate(100 0).
-    assert!(near(shape_point(&i, 1.0, 12.0, 10.0), (136.0, 10.0)), "{:?}", shape_point(&i, 1.0, 12.0, 10.0));
-    assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (130.0, 10.0)));
+    // At the end the radius is 6 and the centre (30,10) inside translate(100 0).
+    assert!(close(resolved_circle(&i, 1.0).r, 6.0));
+    assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (130.0, 10.0)), "{:?}", shape_point(&i, 1.0, 10.0, 10.0));
 }
 
 #[test]
-fn radius_is_refused_where_it_would_not_be_exact() {
-    let stroked = imp(&doc(r##"<circle cx="10" cy="10" r="4" fill="#00f" stroke="#000" stroke-width="2"><animate attributeName="r" from="4" to="8" dur="1s"/></circle>"##));
-    assert!(has_warning(&stroked, "stroke, which would scale"), "{:?}", stroked.warnings);
-    let none = imp(&doc(r##"<circle cx="10" cy="10" r="0" fill="#00f"><animate attributeName="r" from="0" to="8" dur="1s"/></circle>"##));
-    assert!(has_warning(&none, "no static r"), "{:?}", none.warnings);
+fn radius_animates_on_a_stroked_circle_and_from_zero() {
+    use msx_ast::AnimatedProperty as P;
+    // A stroke keeps its width, which a scale would have changed.
+    let stroked = imp(&doc(r##"<circle cx="10" cy="10" r="4" fill="#00f" stroke="#000" stroke-width="2"><animate attributeName="r" from="4" to="8" dur="1s" fill="freeze"/></circle>"##));
+    assert!(stroked.warnings.is_empty(), "{:?}", stroked.warnings);
+    assert!(close(resolved_circle(&stroked, 1.0).r, 8.0));
+    assert!(close(resolved_circle(&stroked, 1.0).style.stroke_width.unwrap_or(1.0), 2.0));
+    // A circle with no radius or a radius of 0 is still built, so there is something to grow.
+    for r in [r#"r="0""#, ""] {
+        let from_zero = imp(&doc(&format!(r##"<circle cx="10" cy="10" {r} fill="#00f"><animate attributeName="r" from="0" to="8" dur="1s" fill="freeze"/></circle>"##)));
+        assert!(from_zero.warnings.is_empty(), "{r}: {:?}", from_zero.warnings);
+        assert_eq!(track(&from_zero, P::R).len(), 1, "{r}");
+        assert!(close(resolved_circle(&from_zero, 0.0).r, 0.0) && close(resolved_circle(&from_zero, 1.0).r, 8.0), "{r}");
+    }
+    // `r` is not an attribute of an ellipse.
     let ellipse = imp(&doc(r##"<ellipse cx="10" cy="10" rx="4" ry="2" fill="#00f"><animate attributeName="r" from="4" to="8" dur="1s"/></ellipse>"##));
     assert!(has_warning(&ellipse, "r on <ellipse>"), "{:?}", ellipse.warnings);
-    for i in [&stroked, &none, &ellipse] {
-        assert!(i.scene.animations.is_empty());
-    }
+    assert!(ellipse.scene.animations.is_empty());
 }
 
 #[test]
@@ -1981,7 +2027,7 @@ fn geometry_animations_do_not_depend_on_their_order_in_the_file() {
     let cx_first = r##"<animate attributeName="cx" from="10" to="30" dur="1s" fill="freeze"/><animate attributeName="r" from="2" to="6" dur="1s" fill="freeze"/>"##;
     for body in [r_first, cx_first] {
         let i = imp(&doc(&format!(r##"<circle cx="10" cy="10" r="2" fill="#00f">{body}</circle>"##)));
-        assert!(near(shape_point(&i, 1.0, 12.0, 10.0), (36.0, 10.0)), "{:?}", shape_point(&i, 1.0, 12.0, 10.0));
+        assert!(close(resolved_circle(&i, 1.0).r, 6.0) && close(resolved_circle(&i, 0.5).r, 4.0), "{body}");
         assert!(near(shape_point(&i, 1.0, 10.0, 10.0), (30.0, 10.0)));
         assert!(near(shape_point(&i, 0.5, 10.0, 10.0), (20.0, 10.0)));
     }
@@ -2362,7 +2408,7 @@ fn an_svg_image_keeps_its_ids_styles_and_gradients_to_itself() {
 
 #[test]
 fn warnings_of_an_svg_image_are_reported_with_the_image() {
-    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"><animate attributeName="width" from="5" to="9" dur="1s"/></rect></svg>"##;
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"><animate attributeName="d" from="5" to="9" dur="1s"/></rect></svg>"##;
     let i = image_doc(inner, r#"id="pic" width="10" height="10""#);
     assert!(i.warnings.iter().any(|w| w.contains("<image id=\"pic\">") && w.contains("<animate>")), "{:?}", i.warnings);
 }
@@ -3814,4 +3860,223 @@ fn a_graph_survives_write_and_parse() {
     let want = graph_of(&i);
     let reread = Imported { scene: back, warnings: Vec::new() };
     assert_eq!(filter_layer(&reread).effects, vec![msx_ast::Effect::Graph(want)]);
+}
+
+// ── Geometry channels in the importer ────────────────────────────────────────
+
+fn resolved_rect(i: &Imported, t: f64) -> msx_ast::Rect {
+    fn find(e: &Element) -> Option<msx_ast::Rect> {
+        match e {
+            Element::Rect(r) => Some(r.clone()),
+            Element::Group(g) => g.children.iter().find_map(find),
+            Element::Layer(l) => l.children.iter().find_map(find),
+            _ => None,
+        }
+    }
+    msx_anim::resolve_at_time(&i.scene, t).elements.iter().find_map(find).expect("a rect in the frame")
+}
+
+#[test]
+fn rect_height_width_and_corner_radius_animate_as_channels() {
+    use msx_ast::AnimatedProperty as P;
+    let i = imp(&doc(r##"<rect x="2" y="3" width="10" height="20" fill="#00f">
+        <animate attributeName="height" values="20;4;20" dur="2s" repeatCount="indefinite"/>
+        <animate attributeName="width" from="10" to="30" dur="2s" fill="freeze"/>
+        <animate attributeName="rx" from="0" to="5" dur="2s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    for p in [P::Height, P::Width, P::Rx] {
+        assert_eq!(track(&i, p).len(), 1, "{p:?}");
+    }
+    let mid = resolved_rect(&i, 1.0);
+    assert!(close(mid.height, 4.0) && close(mid.width, 20.0), "{mid:?}");
+    assert_eq!((mid.x, mid.y), (2.0, 3.0));
+    assert!(close(mid.rx.unwrap(), 2.5), "{:?}", mid.rx);
+}
+
+#[test]
+fn a_rect_with_no_size_is_built_when_its_size_is_animated() {
+    let i = imp(&doc(r##"<rect x="2" y="3" fill="#00f"><animate attributeName="height" from="0" to="8" dur="1s" fill="freeze"/><animate attributeName="width" from="0" to="6" dur="1s" fill="freeze"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let end = resolved_rect(&i, 1.0);
+    assert!(close(end.width, 6.0) && close(end.height, 8.0));
+    // Without an animation a rect with no size draws nothing, as before.
+    let plain = imp(&doc(r##"<rect x="2" y="3" fill="#00f"/>"##));
+    assert!(plain.scene.elements.is_empty());
+}
+
+#[test]
+fn the_audio_bars_pattern_height_and_y_together() {
+    // The usual bar: the top edge moves and the height changes, so both stay in step.
+    let i = imp(&doc(r##"<rect x="2" y="10" width="4" height="0" fill="#00f">
+        <animate attributeName="height" values="0;10;0" dur="1s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="10;0;10" dur="1s" repeatCount="indefinite"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(resolved_rect(&i, 0.5).height, 10.0));
+    // The rect is at y = 10 and the wrapper moves it by -10 at the middle of the cycle, so its top edge is at 0.
+    assert!(close(shape_point(&i, 0.5, 2.0, 10.0).1, 0.0), "{:?}", shape_point(&i, 0.5, 2.0, 10.0));
+}
+
+#[test]
+fn ellipse_radii_and_line_ends_animate_as_channels() {
+    let e = imp(&doc(r##"<ellipse cx="10" cy="10" rx="2" ry="3" fill="#00f"><animate attributeName="rx" from="2" to="6" dur="1s" fill="freeze"/></ellipse>"##));
+    assert!(e.warnings.is_empty(), "{:?}", e.warnings);
+    let end = msx_anim::resolve_at_time(&e.scene, 1.0);
+    let Element::Ellipse(el) = &end.elements[0] else { panic!("an ellipse, got {:?}", end.elements[0]) };
+    assert!(close(el.rx, 6.0) && close(el.ry, 3.0));
+
+    let l = imp(&doc(r##"<line x1="0" y1="0" x2="10" y2="0" stroke="#000"><animate attributeName="x2" from="10" to="20" dur="1s" fill="freeze"/><animate attributeName="y1" from="0" to="5" dur="1s" fill="freeze"/></line>"##));
+    assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    let Element::Line(ln) = &msx_anim::resolve_at_time(&l.scene, 1.0).elements[0] else { panic!("a line") };
+    assert!(close(ln.x2, 20.0) && close(ln.y1, 5.0) && (ln.x1, ln.y2) == (0.0, 0.0));
+}
+
+#[test]
+fn geometry_animations_on_the_wrong_element_or_with_bad_values_are_reported() {
+    for (body, needle) in [
+        (r##"<circle cx="5" cy="5" r="3"><animate attributeName="width" from="1" to="9" dur="1s"/></circle>"##, "width on <circle>"),
+        (r##"<rect width="5" height="5"><animate attributeName="r" from="1" to="9" dur="1s"/></rect>"##, "r on <rect>"),
+        (r##"<g><animate attributeName="height" from="1" to="9" dur="1s"/><rect width="5" height="5"/></g>"##, "height on <g>"),
+        (r##"<rect width="5" height="5"><animate attributeName="width" from="-4" to="9" dur="1s"/></rect>"##, "cannot be read"),
+        (r##"<path d="M0 0L5 5" stroke="#000"><animate attributeName="x1" from="1" to="9" dur="1s"/></path>"##, "x1 on <path>"),
+    ] {
+        let i = imp(&doc(body));
+        assert!(has_warning(&i, needle), "no warning for {needle}: {:?}", i.warnings);
+        assert!(i.scene.animations.is_empty(), "{needle}: {:?}", i.scene.animations);
+    }
+}
+
+#[test]
+fn a_dash_array_animation_is_two_channels_and_a_single_number_is_both() {
+    use msx_ast::AnimatedProperty as P;
+    let i = imp(&doc(r##"<circle cx="10" cy="10" r="8" fill="none" stroke="#000" stroke-width="2" stroke-dasharray="0 50">
+        <animate attributeName="stroke-dasharray" values="0 50;40 10;0 50" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert_eq!(track(&i, P::DashArray0).len(), 1);
+    assert!(!track(&i, P::DashArray1).is_empty(), "the gap changes too");
+    let mid = msx_anim::resolve_at_time(&i.scene, 1.0);
+    let Element::Circle(c) = &mid.elements[0] else { panic!("a circle") };
+    assert_eq!(c.style.stroke_dasharray, Some(vec![40.0, 10.0]));
+    // One number is the dash and the gap.
+    let single = imp(&doc(r##"<circle cx="10" cy="10" r="8" fill="none" stroke="#000"><animate attributeName="stroke-dasharray" from="2" to="6" dur="1s" fill="freeze"/></circle>"##));
+    assert!(single.warnings.is_empty(), "{:?}", single.warnings);
+    let Element::Circle(c) = &msx_anim::resolve_at_time(&single.scene, 1.0).elements[0] else { panic!("a circle") };
+    assert_eq!(c.style.stroke_dasharray, Some(vec![6.0, 6.0]));
+    // Three or more entries have no channel.
+    let long = imp(&doc(r##"<circle cx="10" cy="10" r="8" fill="none" stroke="#000"><animate attributeName="stroke-dasharray" values="1 2 3;4 5 6" dur="1s"/></circle>"##));
+    assert!(has_warning(&long, "cannot be read"), "{:?}", long.warnings);
+}
+
+#[test]
+fn geometry_animation_survives_write_and_parse() {
+    let i = imp(&doc(r##"<rect x="2" y="3" width="10" height="20" rx="1" fill="#00f">
+        <animate attributeName="height" values="20;4;20" dur="2s" repeatCount="indefinite"/>
+        <animate attributeName="rx" from="1" to="5" dur="2s" repeatCount="indefinite"/></rect>
+        <circle cx="30" cy="10" r="0" fill="#f00"><animate attributeName="r" values="0;8;0" dur="2s" repeatCount="indefinite"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let text = msx_parser::scene_to_msx(&i.scene).expect("geometry tracks are writable");
+    let back = msx_parser::parse_scene(&text).unwrap_or_else(|e| panic!("written source must parse: {e}"));
+    for t in [0.0, 0.5, 1.0, 1.5] {
+        assert_eq!(format!("{:?}", msx_anim::resolve_at_time(&back, t).elements), format!("{:?}", msx_anim::resolve_at_time(&i.scene, t).elements), "t={t}");
+    }
+}
+
+// ── Syncbase begin and replaced transforms ───────────────────────────────────
+
+/// Three dots that start 0.2 s after each other, 0.6 s long each, and the first one starts again
+/// 0.25 s after the last ends. Each dot grows its radius.
+const THREE_DOTS: &str = r##"
+<circle cx="4" cy="12" r="0" fill="#00f"><animate id="a" begin="0;c.end+0.25s" attributeName="r" dur="0.6s" values="0;3" fill="freeze"/></circle>
+<circle cx="12" cy="12" r="0" fill="#00f"><animate id="b" begin="a.begin+0.2s" attributeName="r" dur="0.6s" values="0;3" fill="freeze"/></circle>
+<circle cx="20" cy="12" r="0" fill="#00f"><animate id="c" begin="b.begin+0.2s" attributeName="r" dur="0.6s" values="0;3" fill="freeze"/></circle>"##;
+
+fn radii_at(i: &Imported, t: f64) -> Vec<f64> {
+    msx_anim::resolve_at_time(&i.scene, t)
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            Element::Circle(c) => Some(c.r),
+            Element::Group(g) => g.children.iter().find_map(|c| if let Element::Circle(c) = c { Some(c.r) } else { None }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn animations_that_start_each_other_in_a_ring_repeat_with_the_period_of_the_ring() {
+    let i = imp(&doc(THREE_DOTS));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // The ring is 1.25 s: c starts at 0.4, ends at 1.0, and a starts again at 1.25.
+    assert!(close(i.scene.duration, 1.25), "{}", i.scene.duration);
+    let at = |t: f64| radii_at(&i, t);
+    // Dot a grows from 0 at 0 and is full (frozen) by 0.6; b starts at 0.2; c at 0.4.
+    assert!(at(0.3)[0] > 0.0 && at(0.3)[0] < 3.0, "a is growing: {:?}", at(0.3));
+    assert!(close(at(0.3)[2], 3.0), "c has not started this round and holds the end of the last one: {:?}", at(0.3));
+    assert!(close(at(0.4)[2], 0.0) && at(0.6)[2] > 0.0 && at(0.6)[2] < 3.0, "c starts at 0.4: {:?} {:?}", at(0.4), at(0.6));
+    assert!(close(at(0.8)[0], 3.0) && at(0.8)[1] > 0.0, "{:?}", at(0.8));
+    assert!(close(at(1.1)[2], 3.0), "c is full after 1.0: {:?}", at(1.1));
+    // The loop closes: the frame at t and at t + the period are the same.
+    for t in [0.1, 0.45, 0.9] {
+        for (x, y) in at(t).iter().zip(at(t + 1.25).iter()) {
+            assert!(close(*x, *y), "t={t}");
+        }
+    }
+}
+
+#[test]
+fn a_begin_that_adds_an_offset_to_another_animation_is_that_time_plus_the_offset() {
+    let i = imp(&doc(r##"<circle cx="4" cy="4" r="0" fill="#00f"><animate id="a" begin="0.5s" attributeName="r" dur="1s" values="0;4" fill="freeze"/></circle>
+        <circle cx="12" cy="4" r="0" fill="#00f"><animate begin="a.begin+1s" attributeName="r" dur="1s" values="0;4" fill="freeze"/></circle>
+        <circle cx="20" cy="4" r="0" fill="#00f"><animate begin="a.end-0.25s" attributeName="r" dur="1s" values="0;4" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let at = |t: f64| radii_at(&i, t);
+    assert!(close(at(1.0)[0], 2.0), "a: halfway at 1.0: {:?}", at(1.0));
+    assert!(close(at(1.5)[1], 0.0) && close(at(2.0)[1], 2.0), "b starts at 1.5: {:?} {:?}", at(1.5), at(2.0));
+    assert!(close(at(1.25)[2], 0.0) && close(at(1.75)[2], 2.0), "c starts at 1.25: {:?} {:?}", at(1.25), at(1.75));
+}
+
+#[test]
+fn a_begin_that_waits_for_an_event_or_for_nothing_is_still_reported() {
+    for (begin, needle) in [
+        ("click", "waits for an event"),
+        ("a.click", "waits for an event"),
+        ("ghost.end", "never starts"),
+    ] {
+        let i = imp(&doc(&format!(r##"<circle cx="4" cy="4" r="0" fill="#00f"><animate id="a" begin="{begin}" attributeName="r" dur="1s" values="0;4"/></circle>"##)));
+        assert!(has_warning(&i, needle), "{begin}: {:?}", i.warnings);
+        assert!(i.scene.animations.is_empty(), "{begin}");
+    }
+    // Two animations that wait for each other and nothing else never start.
+    let ring = imp(&doc(r##"<circle cx="4" cy="4" r="0" fill="#00f"><animate id="a" begin="b.end" attributeName="r" dur="1s" values="0;4"/><animate id="b" begin="a.end" attributeName="r" dur="1s" values="0;4"/></circle>"##));
+    assert!(has_warning(&ring, "never starts"), "{:?}", ring.warnings);
+}
+
+#[test]
+fn a_list_of_plain_times_still_takes_the_earliest() {
+    let i = imp(&doc(r##"<circle cx="4" cy="4" r="0" fill="#00f"><animate begin="2s;1s" attributeName="r" dur="1s" values="0;4" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(close(radii_at(&i, 1.5)[0], 2.0) && close(radii_at(&i, 0.9)[0], 0.0));
+}
+
+#[test]
+fn an_animate_transform_that_replaces_the_transform_drops_the_static_one_when_it_runs_all_the_time() {
+    // The static scale(0) would make the shape vanish. The animation replaces it.
+    let i = imp(&doc(r##"<rect width="10" height="10" fill="#00f" transform="translate(50 50) scale(0)"><animateTransform attributeName="transform" type="translate" values="0 0;20 0" dur="1s" repeatCount="indefinite"/></rect>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    assert!(near(shape_point(&i, 0.5, 0.0, 0.0), (10.0, 0.0)), "{:?}", shape_point(&i, 0.5, 0.0, 0.0));
+    // With additive="sum" the static transform stays.
+    let sum = imp(&doc(r##"<rect width="10" height="10" fill="#00f" transform="translate(50 50)"><animateTransform attributeName="transform" type="translate" additive="sum" values="0 0;20 0" dur="1s" repeatCount="indefinite"/></rect>"##));
+    assert!(sum.warnings.is_empty(), "{:?}", sum.warnings);
+    assert!(near(shape_point(&sum, 0.5, 0.0, 0.0), (60.0, 50.0)), "{:?}", shape_point(&sum, 0.5, 0.0, 0.0));
+    // An animation that does not run all the time cannot replace it, and the old note stays.
+    let partial = imp(&doc(r##"<rect width="10" height="10" fill="#00f" transform="translate(50 50)"><animateTransform attributeName="transform" type="translate" values="0 0;20 0" begin="1s" dur="1s"/></rect>"##));
+    assert!(has_warning(&partial, "replaces the transform attribute"), "{:?}", partial.warnings);
+}
+
+#[test]
+fn a_step_written_as_a_dur_of_one_millisecond_is_taken() {
+    let i = imp(&doc(r##"<circle cx="4" cy="4" r="3" fill="#00f"><animate attributeName="cx" dur="0.001s" values="20;4" fill="freeze"/></circle>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    // The circle moves from 20 to 4 and stays there.
+    assert!(near(shape_point(&i, 0.0, 4.0, 4.0), (20.0, 4.0)), "{:?}", shape_point(&i, 0.0, 4.0, 4.0));
+    assert!(near(shape_point(&i, i.scene.duration, 4.0, 4.0), (4.0, 4.0)), "{:?}", shape_point(&i, i.scene.duration, 4.0, 4.0));
 }

@@ -7,8 +7,9 @@
 //! - Tracks live on `Scene.animations[]`, targeting elements by id string
 //!   — avoids touching all 13 element structs just to add animation.
 //! - Channels are TRS, opacity and z-index (wire version 2), plus ten style
-//!   channels for fill and stroke color, stroke width and dash offset (wire
-//!   version 3).
+//!   channels for fill and stroke color, stroke width and dash offset, and
+//!   eleven geometry channels for sizes, radii, line ends and the dash array
+//!   (wire version 3).
 //! - Easing describes arriving *into* a keyframe (destination keyframe's
 //!   easing applies). First keyframe's easing is never consulted.
 //! - Time outside [first, last] keyframe holds at that endpoint's value.
@@ -113,6 +114,26 @@ pub enum AnimatedProperty {
     StrokeWidth,
     /// Dash offset in user units.
     DashOffset,
+    /// The `width` and `height` of a `rect`, in user units, never below 0. The
+    /// geometry channels (`Width` to `DashArray1`) are wire version 3. Like the
+    /// style channels they replace the value on the shape.
+    Width,
+    Height,
+    /// The `rx` and `ry` of a `rect` or an `ellipse`, never below 0.
+    Rx,
+    Ry,
+    /// The radius of a `circle`, never below 0.
+    R,
+    /// The end points of a `line`.
+    X1,
+    Y1,
+    X2,
+    Y2,
+    /// The first two entries of `stroke-dasharray`. A track on one of them
+    /// makes the array two entries long (a missing one keeps what the shape
+    /// has, or 0), which is the dash and gap of a spinner.
+    DashArray0,
+    DashArray1,
 }
 
 impl AnimatedProperty {
@@ -135,6 +156,17 @@ impl AnimatedProperty {
             AnimatedProperty::StrokeA     => 14,
             AnimatedProperty::StrokeWidth => 15,
             AnimatedProperty::DashOffset  => 16,
+            AnimatedProperty::Width       => 17,
+            AnimatedProperty::Height      => 18,
+            AnimatedProperty::Rx          => 19,
+            AnimatedProperty::Ry          => 20,
+            AnimatedProperty::R           => 21,
+            AnimatedProperty::X1          => 22,
+            AnimatedProperty::Y1          => 23,
+            AnimatedProperty::X2          => 24,
+            AnimatedProperty::Y2          => 25,
+            AnimatedProperty::DashArray0  => 26,
+            AnimatedProperty::DashArray1  => 27,
         }
     }
 
@@ -157,6 +189,17 @@ impl AnimatedProperty {
             14 => Some(AnimatedProperty::StrokeA),
             15 => Some(AnimatedProperty::StrokeWidth),
             16 => Some(AnimatedProperty::DashOffset),
+            17 => Some(AnimatedProperty::Width),
+            18 => Some(AnimatedProperty::Height),
+            19 => Some(AnimatedProperty::Rx),
+            20 => Some(AnimatedProperty::Ry),
+            21 => Some(AnimatedProperty::R),
+            22 => Some(AnimatedProperty::X1),
+            23 => Some(AnimatedProperty::Y1),
+            24 => Some(AnimatedProperty::X2),
+            25 => Some(AnimatedProperty::Y2),
+            26 => Some(AnimatedProperty::DashArray0),
+            27 => Some(AnimatedProperty::DashArray1),
             _ => None,
         }
     }
@@ -180,6 +223,17 @@ impl AnimatedProperty {
             "stroke_a"     => Some(AnimatedProperty::StrokeA),
             "stroke_width" => Some(AnimatedProperty::StrokeWidth),
             "dash_offset"  => Some(AnimatedProperty::DashOffset),
+            "width"        => Some(AnimatedProperty::Width),
+            "height"       => Some(AnimatedProperty::Height),
+            "rx"           => Some(AnimatedProperty::Rx),
+            "ry"           => Some(AnimatedProperty::Ry),
+            "r"            => Some(AnimatedProperty::R),
+            "x1"           => Some(AnimatedProperty::X1),
+            "y1"           => Some(AnimatedProperty::Y1),
+            "x2"           => Some(AnimatedProperty::X2),
+            "y2"           => Some(AnimatedProperty::Y2),
+            "dash_array_0" => Some(AnimatedProperty::DashArray0),
+            "dash_array_1" => Some(AnimatedProperty::DashArray1),
             _             => None,
         }
     }
@@ -203,12 +257,34 @@ impl AnimatedProperty {
             AnimatedProperty::StrokeA     => "stroke_a",
             AnimatedProperty::StrokeWidth => "stroke_width",
             AnimatedProperty::DashOffset  => "dash_offset",
+            AnimatedProperty::Width       => "width",
+            AnimatedProperty::Height      => "height",
+            AnimatedProperty::Rx          => "rx",
+            AnimatedProperty::Ry          => "ry",
+            AnimatedProperty::R           => "r",
+            AnimatedProperty::X1          => "x1",
+            AnimatedProperty::Y1          => "y1",
+            AnimatedProperty::X2          => "x2",
+            AnimatedProperty::Y2          => "y2",
+            AnimatedProperty::DashArray0  => "dash_array_0",
+            AnimatedProperty::DashArray1  => "dash_array_1",
         }
     }
 
     /// Whether this is one of the ten style channels (`FillR` to
     /// `DashOffset`), which need wire version 3.
     pub fn is_style(self) -> bool {
+        (7..=16).contains(&self.to_byte())
+    }
+
+    /// Whether this is one of the eleven geometry channels (`Width` to
+    /// `DashArray1`), which need wire version 3.
+    pub fn is_geometry(self) -> bool {
+        self.to_byte() >= 17
+    }
+
+    /// Whether a track on this channel needs wire version 3.
+    pub fn needs_v3(self) -> bool {
         self.to_byte() >= 7
     }
 
@@ -402,13 +478,17 @@ mod tests {
             AnimatedProperty::StrokeR,    AnimatedProperty::StrokeG,
             AnimatedProperty::StrokeB,    AnimatedProperty::StrokeA,
             AnimatedProperty::StrokeWidth, AnimatedProperty::DashOffset,
+            AnimatedProperty::Width, AnimatedProperty::Height,
+            AnimatedProperty::Rx, AnimatedProperty::Ry, AnimatedProperty::R,
+            AnimatedProperty::X1, AnimatedProperty::Y1, AnimatedProperty::X2, AnimatedProperty::Y2,
+            AnimatedProperty::DashArray0, AnimatedProperty::DashArray1,
         ];
         for (i, p) in all.into_iter().enumerate() {
             assert_eq!(p.to_byte() as usize, i);
             assert_eq!(AnimatedProperty::from_byte(p.to_byte()), Some(p));
             assert_eq!(AnimatedProperty::parse(p.to_dixscript_str()), Some(p));
         }
-        assert_eq!(AnimatedProperty::from_byte(17), None);
+        assert_eq!(AnimatedProperty::from_byte(28), None);
         assert_eq!(AnimatedProperty::from_byte(99), None);
     }
 
@@ -418,7 +498,15 @@ mod tests {
             assert!(!AnimatedProperty::from_byte(b).unwrap().is_style());
         }
         for b in 7..=16u8 {
-            assert!(AnimatedProperty::from_byte(b).unwrap().is_style());
+            let p = AnimatedProperty::from_byte(b).unwrap();
+            assert!(p.is_style() && !p.is_geometry() && p.needs_v3());
+        }
+        for b in 17..=27u8 {
+            let p = AnimatedProperty::from_byte(b).unwrap();
+            assert!(!p.is_style() && p.is_geometry() && p.needs_v3());
+        }
+        for b in 0..=6u8 {
+            assert!(!AnimatedProperty::from_byte(b).unwrap().needs_v3());
         }
     }
 

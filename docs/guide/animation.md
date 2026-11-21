@@ -46,8 +46,21 @@ Outside the first and last keyframe times, a track holds the nearest keyframe's 
 | `stroke_r`, `stroke_g`, `stroke_b`, `stroke_a` | 0 to 255 | | Replaces one channel of the stroke color of a shape |
 | `stroke_width` | pixels | | Replaces the stroke width, never below 0 |
 | `dash_offset` | pixels | | Replaces the dash offset |
+| `width`, `height` | pixels | | Replaces the size of a `rect`, never below 0 |
+| `rx`, `ry` | pixels | | Replaces the corner radius of a `rect` or the radius of an `ellipse`, never below 0 |
+| `r` | pixels | | Replaces the radius of a `circle`, never below 0 |
+| `x1`, `y1`, `x2`, `y2` | pixels | | Replaces an end point of a `line` |
+| `dash_array_0`, `dash_array_1` | pixels | | Replaces the first or second entry of the dash array, which becomes two entries long |
 
 A property that has no track keeps its identity value. `z_index` is different from the others. It replaces the layer's own value and does not combine with it, because a sort key has to stay distinguishable from an untouched one.
+
+## Geometry channels
+
+The last eleven properties are geometry channels. They replace a value of the shape the way the style channels do, and each one works on the shapes that have the value: `width` and `height` on a `rect`, `rx` and `ry` on a `rect` or an `ellipse`, `r` on a `circle`, and `x1` to `y2` on a `line`. On any other shape the track changes nothing. Sizes and radii never go below 0, so a shape can grow from nothing.
+
+The two dash array channels write a two entry array, a dash and a gap, which is how a spinner animates `stroke-dasharray`. An entry that has no track keeps the value of the shape, or the other entry when the shape has no array, or 0.
+
+A track on a geometry channel makes the file [binary version 3](binary-format.md#versions). The `anim_bars`, `anim_dots_syncbase` and `anim_ring_dash` examples use them.
 
 ## Style channels
 

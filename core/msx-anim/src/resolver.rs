@@ -68,21 +68,25 @@ fn apply_delta(element: &mut Element, delta: AnimatedDelta) {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
             apply_style(&mut e.style, &delta);
+            apply_geometry_rect(e, &delta);
         }
         Element::Circle(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
             apply_style(&mut e.style, &delta);
+            apply_geometry_circle(e, &delta);
         }
         Element::Ellipse(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
             apply_style(&mut e.style, &delta);
+            apply_geometry_ellipse(e, &delta);
         }
         Element::Line(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
             apply_opacity(&mut e.style, delta.opacity);
             apply_style(&mut e.style, &delta);
+            apply_geometry_line(e, &delta);
         }
         Element::Polyline(e) | Element::Polygon(e) => {
             e.transform = Some(delta.compose_transform(e.transform.as_ref()));
@@ -152,6 +156,46 @@ fn apply_opacity(style: &mut Style, opacity_delta: f64) {
 /// (none, a gradient or pattern reference, `currentColor`, or unset), so the
 /// first color track on such a paint turns it into a plain color. Group style
 /// is not read by the CPU and GPU renderers, so groups are left alone.
+/// The geometry channels, one function per shape. A size or radius never goes
+/// below 0, and a channel with no track leaves the value as it is.
+fn apply_geometry_rect(e: &mut msx_ast::Rect, d: &AnimatedDelta) {
+    if let Some(v) = d.width {
+        e.width = v.max(0.0);
+    }
+    if let Some(v) = d.height {
+        e.height = v.max(0.0);
+    }
+    if let Some(v) = d.rx {
+        e.rx = Some(v.max(0.0));
+    }
+    if let Some(v) = d.ry {
+        e.ry = Some(v.max(0.0));
+    }
+}
+
+fn apply_geometry_circle(e: &mut msx_ast::Circle, d: &AnimatedDelta) {
+    if let Some(v) = d.r {
+        e.r = v.max(0.0);
+    }
+}
+
+fn apply_geometry_ellipse(e: &mut msx_ast::Ellipse, d: &AnimatedDelta) {
+    if let Some(v) = d.rx {
+        e.rx = v.max(0.0);
+    }
+    if let Some(v) = d.ry {
+        e.ry = v.max(0.0);
+    }
+}
+
+fn apply_geometry_line(e: &mut msx_ast::Line, d: &AnimatedDelta) {
+    for (slot, v) in [(&mut e.x1, d.x1), (&mut e.y1, d.y1), (&mut e.x2, d.x2), (&mut e.y2, d.y2)] {
+        if let Some(v) = v {
+            *slot = v;
+        }
+    }
+}
+
 fn apply_style(style: &mut Style, delta: &AnimatedDelta) {
     if delta.fill.iter().any(Option::is_some) {
         style.fill = Some(Paint::Color(animated_color(style.fill.as_ref(), &delta.fill)));
@@ -164,6 +208,17 @@ fn apply_style(style: &mut Style, delta: &AnimatedDelta) {
     }
     if let Some(o) = delta.dash_offset {
         style.stroke_dashoffset = Some(o);
+    }
+    if delta.dash_array.iter().any(Option::is_some) {
+        // A one entry array is that entry twice. Entries a track leaves alone keep
+        // the value of the shape, and 0 when it has no array.
+        let base = style.stroke_dasharray.clone().unwrap_or_default();
+        let first = base.first().copied().unwrap_or(0.0);
+        let second = base.get(1).copied().unwrap_or(first);
+        style.stroke_dasharray = Some(vec![
+            delta.dash_array[0].unwrap_or(first).max(0.0),
+            delta.dash_array[1].unwrap_or(second).max(0.0),
+        ]);
     }
 }
 

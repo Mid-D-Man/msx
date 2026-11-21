@@ -44,13 +44,15 @@ SMIL animation is imported into MSX animation tracks. The written `.msx` source 
 | `animate` of `fill-opacity` on a shape that paints only its fill, or of `stroke-opacity` on a shape that paints only its stroke | An `opacity` track on a wrapper layer. Fading the layer is the same picture as fading the one paint, and a shape that paints both is refused. As in SVG the animation replaces the static value, so the shape is drawn at full alpha inside the layer, and the static value applies before the animation begins and after it ends |
 | `animate` of `r` on a circle without a stroke | `scale_x` and `scale_y` tracks about the centre. A stroke would scale with the radius, which SVG does not do, so a stroked circle is refused |
 | `animate` of `x` and `y` on `rect`, `image`, `use` and nested `svg`, and of `cx` and `cy` on `circle` and `ellipse` | A translate track that holds the difference from the attribute |
+| `animate` of `width` or `height` on a `rect`, `rx` or `ry` on a `rect` or `ellipse`, `r` on a `circle`, `x1`, `y1`, `x2` or `y2` on a `line` | A geometry channel track (`width`, `height`, `rx`, `ry`, `r`, `x1`, `y1`, `x2`, `y2`) on the shape itself. A size of 0, or no size, still builds the shape so there is something to grow. A stroked circle keeps its stroke width |
+| `animate` of `stroke-dasharray` on a shape | The two dash array channels. The values are one number (a dash and the same gap) or two. Three or more are not read |
 | `animate` or `animateColor` of `fill` or `stroke` on a shape that paints that color | Four tracks (`fill_r` to `fill_a`, or `stroke_r` to `stroke_a`) on the shape itself. See [Style animation](#style-animation) |
 | `animate` of `stroke-width` or `stroke-dashoffset` | A `stroke_width` or `dash_offset` track on the shape itself |
 | `set` of `opacity`, `fill-opacity`, `stroke-opacity`, `fill`, `stroke`, `stroke-width`, `stroke-dashoffset`, `r`, `x`, `y`, `cx` or `cy` | The track `animate` of that attribute gets, with one constant value |
 | `set` or `animate` of `visibility` or `display` | An `opacity` track on a wrapper layer that is 1 while the element shows and 0 while it is hidden. The values of these properties cannot be blended, so `animate` switches between them as `calcMode="discrete"` does, and the opacity of the element itself stays inside the layer |
 | `animateMotion` with `path`, `mpath` or `values` (or `from`, `to` and `by`), and `rotate` | `translate_x` and `translate_y` tracks, and a `rotate` track for `rotate="auto"`, `"auto-reverse"` or an angle. See [Motion paths](#motion-paths) |
 
-Timing is read from `begin` (a clock value, or a list of them, of which the earliest counts), `dur`, `repeatCount`, `repeatDur`, `end` and `fill="freeze"`. Values come from `values`, from `from`, `to` and `by`, or from `to` and `by` alone, which start at the value the element has without the animation. `keyTimes`, `calcMode` (`linear`, `discrete`, `paced` and `spline`) and `keySplines` are honored. An animation element can be a child of its target or name the target with `href`.
+Timing is read from `begin` (a clock value, or a list of them, of which the earliest counts, or a [start that names another animation](#begin-that-names-another-animation)), `dur`, `repeatCount`, `repeatDur`, `end` and `fill="freeze"`. Values come from `values`, from `from`, `to` and `by`, or from `to` and `by` alone, which start at the value the element has without the animation. `keyTimes`, `calcMode` (`linear`, `discrete`, `paced` and `spline`) and `keySplines` are honored. An animation element can be a child of its target or name the target with `href`.
 
 A `set` mostly has no `dur`. Without one the value holds from `begin` to the end of the scene, so a scene whose only animation is a `set` plays once and lasts a few milliseconds past `begin`, and in a looping scene the value holds until the end of the loop, which then starts again from the static value. With a `dur`, `repeatCount`, `repeatDur` or `end` the value holds for the active time and goes back afterwards, unless `fill="freeze"`. A constant does not change when it repeats, so a repeated `set` is one hold.
 
@@ -83,6 +85,17 @@ Wrapper ids are named `anim1`, `anim2` and so on, and skip any id that the SVG a
 - `rotate="auto"` turns the element to the heading of the path, `auto-reverse` to the opposite one, and a number to that angle. The heading is a function of the position on the path, whichever way the element moves. At a corner, and where a path jumps to a new subpath, the heading changes in a ramp of one millisecond. The heading never jumps by a whole turn, so a closed path turns the element 360 degrees per lap, and a loop closes with a ramp of one millisecond back to the start.
 - The motion goes inside the `animateTransform` of the element and outside its `x`, `y`, `cx` and `cy`, and the element's own `transform` goes outside it.
 - Before `begin`, and after the end without `fill="freeze"`, the element is at its own position and unturned.
+
+### Begin that names another animation
+
+A `begin` such as `a.begin+0.2s`, `a.end` or `0;c.end+0.25s` cannot wait for anything here, so the importer solves it. It takes every animation of the document together and finds the moments each one starts: the start of `a` plus an offset, or every moment `a` ends. Animations that start each other in a ring, such as the dots of a spinner where the last one starts the first again, have starts that never run out. The search keeps 48 starts for each and reads a list that keeps its spacing as an even repeat.
+
+- One start is a plain `begin`. A start that is a repeat gives the animation a period. The animation runs for its `dur`, and in the rest of the period it holds its last value with `fill="freeze"` and is back at the value without it otherwise. All the animations of a ring share the period, which is the length of the loop.
+- A start that depends on an animation that never starts, a list of starts that is not even, an animation that repeats inside each start, and one that is started again before it ends are reported and the static frame is drawn. An event (`click`), `id.repeat(2)` and `indefinite` still wait for something this scene does not have.
+- A list of plain times (`0;1s;3s`) is not touched and its earliest time counts, as before.
+- A `dur` below 4 ms is held to 4 ms, because the timeline cannot hold a change faster. Spinners write the jump back to the start as 1 ms.
+- An `animateTransform` that replaces the `transform` attribute (no `additive="sum"`) drops the static transform when it repeats forever, and keeps it with a note otherwise.
+- `fill-opacity` and `stroke-opacity` on a shape that paints both fill and stroke become the alpha channel of that color, as long as it is a plain color.
 
 ### Style animation
 
@@ -118,7 +131,7 @@ What is reported, with the static frame drawn:
 | `animateTransform` of type `skewX` or `skewY` | No channel |
 | `animateMotion` with `calcMode="discrete"` or `"spline"`, with a path that has no length, with an `mpath` that points at anything but a `path` | Not mapped. A `transform` on the path of an `mpath` and `accumulate="sum"` are ignored, with a note |
 | `set` or `animate` of `visibility` or `display` with the value `inherit`, and of any attribute that has no channel | Not mapped |
-| `begin` that waits for an event (`click`), for another animation (`id.end`) or never (`indefinite`), and an animation without a finite `dur` | A scene has no input to wait for |
+| `begin` that waits for an event (`click`), `id.repeat(2)`, a start that never comes, uneven starts, and an animation without a finite `dur` | A scene has no input to wait for, or no even repeat to bake |
 | An animation inside a `mask` or a `marker` | The resolver does not reach those elements |
 | `additive="replace"` on an element that has a static `transform` | SMIL would drop the static transform. The importer adds the animation to it and says so |
 | CSS `animation` with `paused`, a zero duration, skews, matrices, percentages in `translate`, keyframes whose `transform` lists use different functions, and keyframe properties other than `transform`, `opacity`, `fill-opacity`, `stroke-opacity`, `fill`, `stroke`, `stroke-width` and `stroke-dashoffset` | No channel, or it would need matrix interpolation |

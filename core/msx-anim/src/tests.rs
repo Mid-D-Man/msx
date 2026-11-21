@@ -606,3 +606,100 @@ fn a_delta_with_only_a_style_channel_is_not_the_identity() {
     assert!(!delta.is_identity(), "a dash offset of 0 is still an override");
     assert!(AnimatedDelta::default().is_identity());
 }
+
+// ── Geometry channels ────────────────────────────────────────────────────────
+
+fn one_track_scene(element: Element, id: &str, property: AnimatedProperty, from: f64, to: f64) -> Scene {
+    let mut scene = blank_scene();
+    scene.elements.push(element);
+    scene.duration = 1.0;
+    scene.animations.push(track(id, property, vec![Keyframe::linear(0.0, from), Keyframe::linear(1.0, to)]));
+    scene
+}
+
+#[test]
+fn rect_width_height_and_corner_radii_replace_the_shape_values() {
+    let mut r = Rect::new(2.0, 3.0, 10.0, 20.0, Style::default());
+    r.id = Some("box".into());
+    let mut scene = blank_scene();
+    scene.elements.push(Element::Rect(r));
+    scene.duration = 1.0;
+    for (p, from, to) in [(AnimatedProperty::Width, 10.0, 50.0), (AnimatedProperty::Height, 20.0, 0.0), (AnimatedProperty::Rx, 0.0, 4.0), (AnimatedProperty::Ry, 0.0, 6.0)] {
+        scene.animations.push(track("box", p, vec![Keyframe::linear(0.0, from), Keyframe::linear(1.0, to)]));
+    }
+    let Element::Rect(mid) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a rect") };
+    assert!((mid.width - 30.0).abs() < 1e-9 && (mid.height - 10.0).abs() < 1e-9);
+    assert_eq!((mid.x, mid.y), (2.0, 3.0), "the position is not touched");
+    assert!((mid.rx.unwrap() - 2.0).abs() < 1e-9 && (mid.ry.unwrap() - 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn sizes_and_radii_never_go_below_zero() {
+    let mut r = Rect::new(0.0, 0.0, 10.0, 10.0, Style::default());
+    r.id = Some("box".into());
+    let scene = one_track_scene(Element::Rect(r), "box", AnimatedProperty::Width, -5.0, -5.0);
+    let Element::Rect(r) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a rect") };
+    assert_eq!(r.width, 0.0);
+    let mut c = Circle::new(5.0, 5.0, 3.0, Style::default());
+    c.id = Some("dot".into());
+    let scene = one_track_scene(Element::Circle(c), "dot", AnimatedProperty::R, -1.0, -1.0);
+    let Element::Circle(c) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a circle") };
+    assert_eq!(c.r, 0.0);
+}
+
+#[test]
+fn circle_radius_ellipse_radii_and_line_ends() {
+    let mut c = Circle::new(5.0, 5.0, 0.0, Style::default());
+    c.id = Some("dot".into());
+    let scene = one_track_scene(Element::Circle(c), "dot", AnimatedProperty::R, 0.0, 8.0);
+    let Element::Circle(c) = &resolve_at_time(&scene, 0.25).elements[0] else { panic!("a circle") };
+    assert!((c.r - 2.0).abs() < 1e-9 && (c.cx, c.cy) == (5.0, 5.0));
+
+    let mut e = msx_ast::Ellipse::new(5.0, 5.0, 4.0, 2.0, Style::default());
+    e.id = Some("oval".into());
+    let mut scene = one_track_scene(Element::Ellipse(e), "oval", AnimatedProperty::Rx, 4.0, 8.0);
+    scene.animations.push(track("oval", AnimatedProperty::Ry, vec![Keyframe::linear(0.0, 2.0), Keyframe::linear(1.0, 6.0)]));
+    let Element::Ellipse(e) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("an ellipse") };
+    assert!((e.rx - 6.0).abs() < 1e-9 && (e.ry - 4.0).abs() < 1e-9);
+
+    let mut l = msx_ast::Line::new(0.0, 0.0, 10.0, 10.0, Style::default());
+    l.id = Some("ln".into());
+    let mut scene = one_track_scene(Element::Line(l), "ln", AnimatedProperty::X2, 10.0, 20.0);
+    scene.animations.push(track("ln", AnimatedProperty::Y1, vec![Keyframe::linear(0.0, 0.0), Keyframe::linear(1.0, 4.0)]));
+    let Element::Line(l) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a line") };
+    assert!((l.x2 - 15.0).abs() < 1e-9 && (l.y1 - 2.0).abs() < 1e-9 && (l.x1, l.y2) == (0.0, 10.0));
+}
+
+#[test]
+fn a_geometry_channel_on_a_shape_that_does_not_have_it_changes_nothing() {
+    let mut c = Circle::new(5.0, 5.0, 3.0, Style::default());
+    c.id = Some("dot".into());
+    let scene = one_track_scene(Element::Circle(c), "dot", AnimatedProperty::Width, 50.0, 50.0);
+    let Element::Circle(c) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a circle") };
+    assert_eq!(c.r, 3.0);
+}
+
+#[test]
+fn the_dash_array_channels_make_a_two_entry_array_and_keep_the_other_entry() {
+    let style = Style { stroke_dasharray: Some(vec![4.0, 9.0]), ..Style::default() };
+    let mut r = Rect::new(0.0, 0.0, 10.0, 10.0, style);
+    r.id = Some("box".into());
+    let scene = one_track_scene(Element::Rect(r), "box", AnimatedProperty::DashArray0, 0.0, 10.0);
+    let Element::Rect(r) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a rect") };
+    assert_eq!(r.style.stroke_dasharray, Some(vec![5.0, 9.0]));
+    // With no array and one entry set, the other entry follows the first.
+    let mut bare = Rect::new(0.0, 0.0, 10.0, 10.0, Style::default());
+    bare.id = Some("b".into());
+    let scene = one_track_scene(Element::Rect(bare), "b", AnimatedProperty::DashArray1, 6.0, 6.0);
+    let Element::Rect(r) = &resolve_at_time(&scene, 0.5).elements[0] else { panic!("a rect") };
+    assert_eq!(r.style.stroke_dasharray, Some(vec![0.0, 6.0]));
+}
+
+#[test]
+fn a_delta_with_only_a_geometry_channel_is_not_the_identity() {
+    use crate::delta::AnimatedDelta;
+    let t = track("x", AnimatedProperty::Height, vec![Keyframe::linear(0.0, 0.0)]);
+    let delta = AnimatedDelta::from_tracks(&[&t], 0.0);
+    assert!(delta.has_geometry() && !delta.has_style());
+    assert!(!delta.is_identity());
+}

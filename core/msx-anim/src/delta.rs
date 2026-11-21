@@ -36,6 +36,21 @@ pub struct AnimatedDelta {
     pub stroke:       [Option<f64>; 4],
     pub stroke_width: Option<f64>,
     pub dash_offset:  Option<f64>,
+    /// The geometry channels. Each replaces the value on the shape, and each
+    /// applies only to the shapes that have it (`width` and `height` to a
+    /// rect, `r` to a circle, `x1` to `y2` to a line, `rx` and `ry` to a rect
+    /// or an ellipse).
+    pub width:        Option<f64>,
+    pub height:       Option<f64>,
+    pub rx:           Option<f64>,
+    pub ry:           Option<f64>,
+    pub r:            Option<f64>,
+    pub x1:           Option<f64>,
+    pub y1:           Option<f64>,
+    pub x2:           Option<f64>,
+    pub y2:           Option<f64>,
+    /// The first two entries of the dash array.
+    pub dash_array:   [Option<f64>; 2],
 }
 
 impl Default for AnimatedDelta {
@@ -57,6 +72,16 @@ impl Default for AnimatedDelta {
             stroke:       [None; 4],
             stroke_width: None,
             dash_offset:  None,
+            width:        None,
+            height:       None,
+            rx:           None,
+            ry:           None,
+            r:            None,
+            x1:           None,
+            y1:           None,
+            x2:           None,
+            y2:           None,
+            dash_array:   [None; 2],
         }
     }
 }
@@ -94,6 +119,17 @@ impl AnimatedDelta {
             AnimatedProperty::StrokeA     => self.stroke[3] = Some(value),
             AnimatedProperty::StrokeWidth => self.stroke_width = Some(value),
             AnimatedProperty::DashOffset  => self.dash_offset = Some(value),
+            AnimatedProperty::Width       => self.width = Some(value),
+            AnimatedProperty::Height      => self.height = Some(value),
+            AnimatedProperty::Rx          => self.rx = Some(value),
+            AnimatedProperty::Ry          => self.ry = Some(value),
+            AnimatedProperty::R           => self.r = Some(value),
+            AnimatedProperty::X1          => self.x1 = Some(value),
+            AnimatedProperty::Y1          => self.y1 = Some(value),
+            AnimatedProperty::X2          => self.x2 = Some(value),
+            AnimatedProperty::Y2          => self.y2 = Some(value),
+            AnimatedProperty::DashArray0  => self.dash_array[0] = Some(value),
+            AnimatedProperty::DashArray1  => self.dash_array[1] = Some(value),
         }
     }
 
@@ -108,6 +144,13 @@ impl AnimatedDelta {
             && (self.opacity - 1.0).abs() < EPSILON
             && self.z_index.is_none()
             && !self.has_style()
+            && !self.has_geometry()
+    }
+
+    /// True when a track targets any of the eleven geometry channels.
+    pub fn has_geometry(&self) -> bool {
+        [self.width, self.height, self.rx, self.ry, self.r, self.x1, self.y1, self.x2, self.y2].iter().any(Option::is_some)
+            || self.dash_array.iter().any(Option::is_some)
     }
 
     /// True when a track targets any of the ten style channels.

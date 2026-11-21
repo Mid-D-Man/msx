@@ -1,0 +1,90 @@
+// examples/anim_bars.msx
+// Equalizer bars. The height of each bar and its top edge (y) move together, and each
+// bar starts a fixed time after the first (b1.begin+0.15s). The height is a geometry
+// channel (height), which makes the file wire version 3. Made from
+// examples/svg/bars_equalizer.svg with `msx import`.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 120, height = 64, background = "#00000000" }
+  duration = 1.0
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 120, height = 64, style = { fill = #0f1220 } }
+    { type = "group", id = "anim2",
+      elements = [
+        { type = "rect", x = 14, y = 52, width = 14, height = 4, rx = 3, ry = 2, id = "anim1", style = { fill = #ff5a5f } }
+      ] }
+    { type = "group", id = "anim4",
+      elements = [
+        { type = "rect", x = 38, y = 52, width = 14, height = 4, rx = 3, ry = 2, id = "anim3", style = { fill = #ffb84a } }
+      ] }
+    { type = "group", id = "anim6",
+      elements = [
+        { type = "rect", x = 62, y = 52, width = 14, height = 4, rx = 3, ry = 2, id = "anim5", style = { fill = #2ecc71 } }
+      ] }
+    { type = "group", id = "anim8",
+      elements = [
+        { type = "rect", x = 86, y = 52, width = 14, height = 4, rx = 3, ry = 2, id = "anim7", style = { fill = #4a9eff } }
+      ] }
+  animations::
+    { target_id = "anim1", property = "height",
+      keyframes = [
+        { time = 0.0, value = 4.0 },
+        { time = 0.5, value = 48.0 },
+        { time = 1.0, value = 4.0 }
+      ] }
+    { target_id = "anim2", property = "translate_y",
+      keyframes = [
+        { time = 0.0, value = 0.0 },
+        { time = 0.5, value = -44.0 },
+        { time = 1.0, value = 0.0 }
+      ] }
+    { target_id = "anim3", property = "height",
+      keyframes = [
+        { time = 0.0, value = 17.200000000000003 },
+        { time = 0.14900000000000002, value = 4.088000000000001 },
+        { time = 0.15000000000000002, value = 4.0 },
+        { time = 0.65, value = 48.0 },
+        { time = 1.0, value = 17.200000000000003 }
+      ] }
+    { target_id = "anim4", property = "translate_y",
+      keyframes = [
+        { time = 0.0, value = -13.200000000000003 },
+        { time = 0.14900000000000002, value = -0.08800000000000097 },
+        { time = 0.15000000000000002, value = 0.0 },
+        { time = 0.65, value = -44.0 },
+        { time = 1.0, value = -13.200000000000003 }
+      ] }
+    { target_id = "anim5", property = "height",
+      keyframes = [
+        { time = 0.0, value = 30.400000000000006 },
+        { time = 0.29900000000000004, value = 4.088000000000001 },
+        { time = 0.30000000000000004, value = 4.0 },
+        { time = 0.8, value = 48.0 },
+        { time = 1.0, value = 30.400000000000006 }
+      ] }
+    { target_id = "anim6", property = "translate_y",
+      keyframes = [
+        { time = 0.0, value = -26.400000000000006 },
+        { time = 0.29900000000000004, value = -0.08800000000000097 },
+        { time = 0.30000000000000004, value = 0.0 },
+        { time = 0.8, value = -44.0 },
+        { time = 1.0, value = -26.400000000000006 }
+      ] }
+    { target_id = "anim7", property = "height",
+      keyframes = [
+        { time = 0.0, value = 43.599999999999994 },
+        { time = 0.44899999999999995, value = 4.088000000000001 },
+        { time = 0.44999999999999996, value = 4.0 },
+        { time = 0.95, value = 48.0 },
+        { time = 1.0, value = 43.599999999999994 }
+      ] }
+    { target_id = "anim8", property = "translate_y",
+      keyframes = [
+        { time = 0.0, value = -39.599999999999994 },
+        { time = 0.44899999999999995, value = -0.08800000000000097 },
+        { time = 0.44999999999999996, value = 0.0 },
+        { time = 0.95, value = -44.0 },
+        { time = 1.0, value = -39.599999999999994 }
+      ] }
+)

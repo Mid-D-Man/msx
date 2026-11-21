@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="64" viewBox="0 0 120 64">
+  <rect width="120" height="64" fill="#0f1220"/>
+  <!-- Bars that change height and move their top edge together. The start of each bar
+       is an offset from the first one. -->
+  <rect x="14" y="52" width="14" height="4" rx="3" fill="#ff5a5f">
+    <animate id="b1" attributeName="height" values="4;48;4" dur="1s" begin="0s" repeatCount="indefinite"/>
+    <animate attributeName="y" values="52;8;52" dur="1s" begin="0s" repeatCount="indefinite"/>
+  </rect>
+  <rect x="38" y="52" width="14" height="4" rx="3" fill="#ffb84a">
+    <animate attributeName="height" values="4;48;4" dur="1s" begin="b1.begin+0.15s" repeatCount="indefinite"/>
+    <animate attributeName="y" values="52;8;52" dur="1s" begin="b1.begin+0.15s" repeatCount="indefinite"/>
+  </rect>
+  <rect x="62" y="52" width="14" height="4" rx="3" fill="#2ecc71">
+    <animate attributeName="height" values="4;48;4" dur="1s" begin="b1.begin+0.3s" repeatCount="indefinite"/>
+    <animate attributeName="y" values="52;8;52" dur="1s" begin="b1.begin+0.3s" repeatCount="indefinite"/>
+  </rect>
+  <rect x="86" y="52" width="14" height="4" rx="3" fill="#4a9eff">
+    <animate attributeName="height" values="4;48;4" dur="1s" begin="b1.begin+0.45s" repeatCount="indefinite"/>
+    <animate attributeName="y" values="52;8;52" dur="1s" begin="b1.begin+0.45s" repeatCount="indefinite"/>
+  </rect>
+</svg>

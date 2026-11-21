@@ -24,6 +24,7 @@ mod anim;
 mod animate;
 mod color_matrix;
 mod cssanim;
+mod syncbase;
 mod encoding;
 mod filter;
 mod geom;
@@ -165,6 +166,13 @@ pub(crate) struct Importer<'a, 'i> {
     /// True while the children of a `clipPath` are walked: only geometry and
     /// `clip-rule` matter, so paint is not resolved and effects are ignored.
     clip_mode: bool,
+    /// True while a shape whose size is animated is built: a size of 0 still
+    /// builds the shape, so the tracks have something to grow.
+    pub(crate) keep_degenerate: bool,
+    /// Every animation element of the document, for the `begin` values that
+    /// name another animation, and the start times found for them.
+    pub(crate) sync_anims: Vec<Node<'a, 'i>>,
+    pub(crate) sync: Option<animate::SyncIndex>,
     /// Markers already built, by id. `None` is a marker that cannot be used.
     marker_cache: HashMap<String, Option<std::rc::Rc<MarkerDef>>>,
     /// Ids of the markers being built right now, to stop cycles.
@@ -664,6 +672,10 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
         }
         let anim_by_href = Self::index_animations(doc, &ids);
+        let sync_anims: Vec<Node<'a, 'i>> = doc
+            .descendants()
+            .filter(|n| n.is_element() && matches!(n.tag_name().name(), "animate" | "animateTransform" | "animateMotion" | "animateColor" | "set"))
+            .collect();
         let mut imp = Importer {
             ids,
             sheet,
@@ -686,6 +698,9 @@ impl<'a, 'i> Importer<'a, 'i> {
             anim_by_href,
             pending: Vec::new(),
             next_anim: 0,
+            keep_degenerate: false,
+            sync_anims,
+            sync: None,
             skip_transform: None,
             force_visible: None,
             skip_opacity: None,
@@ -1696,9 +1711,10 @@ impl<'a, 'i> Importer<'a, 'i> {
             "rect" => {
                 let (x, y) = (num(self, "x", wx), num(self, "y", wy));
                 let (w, h) = (num(self, "width", wx), num(self, "height", wy));
-                if w <= 0.0 || h <= 0.0 {
+                if (w <= 0.0 || h <= 0.0) && !self.keep_degenerate {
                     return;
                 }
+                let (w, h) = (w.max(0.0), h.max(0.0));
                 let radius = |s: &Self, name: &str, base: f64| s.length(node, name, fs, base).filter(|v| *v >= 0.0);
                 let (rx, ry) = match (radius(self, "rx", wx), radius(self, "ry", wy)) {
                     (None, None) => (None, None),
@@ -1712,9 +1728,10 @@ impl<'a, 'i> Importer<'a, 'i> {
             }
             "circle" => {
                 let (cx, cy, r) = (num(self, "cx", wx), num(self, "cy", wy), num(self, "r", diag));
-                if r <= 0.0 {
+                if r <= 0.0 && !self.keep_degenerate {
                     return;
                 }
+                let r = r.max(0.0);
                 (Shape::Circle { cx, cy, r }, Some(BBox { x: cx - r, y: cy - r, w: 2.0 * r, h: 2.0 * r }), Kind::Shape)
             }
             "ellipse" => {
@@ -1725,6 +1742,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                     (Some(a), Some(b)) => (a, b),
                     (Some(a), None) => (a, a),
                     (None, Some(b)) => (b, b),
+                    (None, None) if self.keep_degenerate => (0.0, 0.0),
                     (None, None) => return,
                 };
                 (Shape::Ellipse { cx, cy, rx, ry }, Some(BBox { x: cx - rx, y: cy - ry, w: 2.0 * rx, h: 2.0 * ry }), Kind::Shape)

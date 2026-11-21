@@ -240,7 +240,7 @@ fn encode_animations(scene: &Scene, out: &mut Vec<u8>, pool: &mut Vec<String>) {
         let target_idx = intern_string(pool, &track.target_id);
         write_u16(out, target_idx);
         write_u8(out, track.property.to_byte());
-        if track.property.is_style() {
+        if track.property.needs_v3() {
             crate::version::require(3);
         }
         write_u16(out, track.keyframes.len() as u16);

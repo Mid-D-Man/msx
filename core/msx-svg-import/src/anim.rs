@@ -95,6 +95,12 @@ pub(crate) struct Timing {
     /// CSS `animation-fill-mode: backwards`: hold the first value during the
     /// delay instead of the value without the animation.
     pub fill_before: bool,
+    /// Idle seconds after each iteration before the next one starts. It is 0
+    /// except for an animation that starts again on a schedule, such as a
+    /// `begin` that follows the end of another animation. In the gap the value
+    /// is the last one for a `fill="freeze"` and the value without the
+    /// animation otherwise.
+    pub gap: f64,
 }
 
 /// Cuts the active time at `end`. An `end` that waits for an event is ignored.
@@ -119,9 +125,13 @@ impl Timing {
             None | Some("indefinite") | Some("media") => return Err("it has no finite dur".into()),
             Some(v) => parse_clock(v).filter(|d| *d > 0.0).ok_or_else(|| format!("dur=\"{v}\" is not a positive time"))?,
         };
-        if dur < EPS * 4.0 {
+        // The timeline cannot hold a change faster than 4 ms, so a jump written as a
+        // dur of 1 ms (spinners use it for the step back to the start) takes 4 ms.
+        // Anything below half a millisecond is not a step anyone wrote.
+        if dur < EPS * 0.5 {
             return Err(format!("dur=\"{dur}s\" is too short"));
         }
+        let dur = dur.max(EPS * 4.0);
         // None: not given. Some(None): forever. Some(Some(x)): x seconds.
         let by_count = match get("repeatCount").map(str::trim) {
             None => None,
@@ -144,7 +154,7 @@ impl Timing {
             },
         };
         active = clamp_to_end(&get, begin, active, notes)?;
-        Ok(Timing { begin, dur, active, freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false })
+        Ok(Timing { begin, dur, active, freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false, gap: 0.0 })
     }
 
     /// Reads the timing of a `set`. Without a `dur` the value holds from `begin`
@@ -181,14 +191,19 @@ impl Timing {
         active = clamp_to_end(&get, begin, active, notes)?;
         match active {
             Some(a) if a < EPS * 4.0 => Err(format!("its active time of {a}s is too short")),
-            Some(a) => Ok(Timing { begin, dur: a, active: Some(a), freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false }),
-            None => Ok(Timing { begin, dur: EPS * 4.0, active: Some(EPS * 4.0), freeze: true, fill_before: false }),
+            Some(a) => Ok(Timing { begin, dur: a, active: Some(a), freeze: get("fill").is_some_and(|f| f.trim() == "freeze"), fill_before: false, gap: 0.0 }),
+            None => Ok(Timing { begin, dur: EPS * 4.0, active: Some(EPS * 4.0), freeze: true, fill_before: false, gap: 0.0 }),
         }
     }
 
     /// Where the animation stops on the scene timeline: infinite when it repeats forever.
     pub(crate) fn end(&self) -> f64 {
         self.active.map_or(f64::INFINITY, |a| self.begin + a)
+    }
+
+    /// Seconds from the start of one iteration to the start of the next.
+    pub(crate) fn period(&self) -> f64 {
+        self.dur + self.gap
     }
 }
 
@@ -489,15 +504,22 @@ fn eval(poly: &[(f64, Vec<f64>)], u: f64) -> Vec<f64> {
 /// the loop closes without a seam.
 pub(crate) fn bake(curve: &Curve, timing: &Timing, base: &[f64], total: f64) -> Result<Vec<(f64, Vec<f64>)>, String> {
     let dur = timing.dur;
+    let period = timing.period();
+    let contiguous = timing.gap <= 1e-12;
     let poly = curve.polyline(dur);
     let periodic = timing.active.is_none();
-    let first = if periodic { timing.begin.rem_euclid(dur) - dur } else { timing.begin };
+    let first = if periodic { timing.begin.rem_euclid(period) - period } else { timing.begin };
     let stop = timing.end().min(total);
 
-    let iterations = ((stop - first.max(0.0)) / dur).ceil().max(0.0);
+    let iterations = ((stop - first.max(0.0)) / period).ceil().max(0.0);
     if iterations * poly.len() as f64 > MAX_POINTS as f64 {
         return Err(format!("it needs more than {MAX_POINTS} keyframes on a {total}s timeline"));
     }
+
+    // The value in the idle time after an iteration: the last one when it
+    // freezes, the value without the animation otherwise.
+    let end_value = eval(&poly, 1.0);
+    let held = if timing.freeze { end_value } else { base.to_vec() };
 
     let mut pts: Vec<(f64, Vec<f64>)> = Vec::new();
     if !periodic && first > EPS {
@@ -508,12 +530,18 @@ pub(crate) fn bake(curve: &Curve, timing: &Timing, base: &[f64], total: f64) -> 
     let mut a = first;
     while a < stop - 1e-12 {
         let b = a + dur;
+        let next = a + period;
         let (lo, hi) = (a.max(0.0), b.min(stop));
         if hi > lo + 1e-12 {
+            // The first iteration starts after 0: the time before it is idle too.
+            if !contiguous && pts.is_empty() && lo > EPS {
+                pts.push((0.0, held.clone()));
+                pts.push((lo - EPS, held.clone()));
+            }
             let (ulo, uhi) = ((lo - a) / dur, (hi - a) / dur);
-            // Another iteration follows: end this one a hair early so the next
-            // starts at exactly `b` and the jump back is a short ramp.
-            let continues = b < stop - 1e-9;
+            // Another iteration follows right away: end this one a hair early so
+            // the next starts at exactly `b` and the jump back is a short ramp.
+            let continues = contiguous && b < stop - 1e-9;
             // The early end carries the value the animation has at that moment, so
             // the stretch stays on its line.
             let uend = if continues { uhi - EPS / dur } else { uhi };
@@ -524,8 +552,23 @@ pub(crate) fn bake(curve: &Curve, timing: &Timing, base: &[f64], total: f64) -> 
                 }
             }
             pts.push((if continues { hi - EPS } else { hi }, eval(&poly, uend)));
+            // The idle time up to the next iteration, or up to the end of the timeline.
+            if !contiguous && b < stop - 1e-9 {
+                let until = next.min(stop);
+                if !timing.freeze {
+                    pts.push((b + EPS, held.clone()));
+                }
+                let hold_to = if until >= stop - 1e-9 { stop } else { until - EPS };
+                if hold_to > b + 2.0 * EPS {
+                    pts.push((hold_to, held.clone()));
+                }
+            }
+        } else if !contiguous && b <= 0.0 && next > 2.0 * EPS && next < stop && pts.is_empty() {
+            // The whole iteration lies before 0 and the idle time runs into the scene.
+            pts.push((0.0, held.clone()));
+            pts.push((next - EPS, held.clone()));
         }
-        a = b;
+        a = next;
     }
     if !periodic && !timing.freeze && timing.end() + EPS <= total + 1e-9 && !pts.is_empty() {
         pts.push((timing.end() + EPS, base.to_vec()));
@@ -688,10 +731,77 @@ mod tests {
         assert!(timing(&[]).is_err());
         assert!(timing(&[("dur", "indefinite")]).is_err());
         assert!(timing(&[("dur", "0s")]).is_err());
-        assert!(timing(&[("dur", "1ms")]).is_err());
+        assert!(timing(&[("dur", "0.4ms")]).is_err());
         assert!(timing(&[("dur", "1s"), ("repeatCount", "0")]).is_err());
         assert!(timing(&[("dur", "1s"), ("begin", "click")]).is_err());
         assert!(timing(&[("dur", "1s"), ("begin", "2s"), ("end", "1s")]).is_err());
+    }
+
+    /// The value of a baked track at `t`, by linear interpolation between its points.
+    fn baked_at(pts: &[(f64, Vec<f64>)], t: f64) -> f64 {
+        if t <= pts[0].0 {
+            return pts[0].1[0];
+        }
+        for w in pts.windows(2) {
+            if t <= w[1].0 {
+                let k = (t - w[0].0) / (w[1].0 - w[0].0);
+                return w[0].1[0] + (w[1].1[0] - w[0].1[0]) * k;
+            }
+        }
+        pts[pts.len() - 1].1[0]
+    }
+
+    fn gapped(begin: f64, freeze: bool) -> Timing {
+        Timing { begin, dur: 1.0, active: None, freeze, fill_before: false, gap: 1.0 }
+    }
+
+    #[test]
+    fn an_animation_that_starts_again_on_a_schedule_reverts_in_the_gap() {
+        let pts = bake(&lin(&[0.0, 10.0]), &gapped(0.0, false), &[0.0], 6.0).unwrap();
+        assert!(close(baked_at(&pts, 0.5), 5.0) && close(baked_at(&pts, 1.0), 10.0), "the run");
+        assert!(close(baked_at(&pts, 1.5), 0.0), "the gap shows the value without the animation: {}", baked_at(&pts, 1.5));
+        assert!(close(baked_at(&pts, 2.5), 5.0), "the next run starts at the period: {}", baked_at(&pts, 2.5));
+        assert!(close(baked_at(&pts, 3.5), 0.0));
+        assert!(close(baked_at(&pts, 4.5), 5.0));
+        assert!(close(baked_at(&pts, 5.5), 0.0), "and the gap at the end of the timeline too");
+    }
+
+    #[test]
+    fn a_frozen_animation_holds_its_last_value_in_the_gap() {
+        let pts = bake(&lin(&[0.0, 10.0]), &gapped(0.0, true), &[0.0], 6.0).unwrap();
+        for t in [1.2, 1.5, 1.9, 3.5, 5.5] {
+            assert!(close(baked_at(&pts, t), 10.0), "t={t}: {}", baked_at(&pts, t));
+        }
+        assert!(close(baked_at(&pts, 2.5), 5.0), "and a new run starts over");
+    }
+
+    #[test]
+    fn a_gap_with_a_start_after_zero_idles_before_the_first_run() {
+        // Starts at 0.5 of a 2 s period: the first half second is idle, as the end of the last run.
+        let rest = bake(&lin(&[0.0, 10.0]), &gapped(0.5, false), &[0.0], 4.0).unwrap();
+        assert!(close(baked_at(&rest, 0.25), 0.0), "{}", baked_at(&rest, 0.25));
+        assert!(close(baked_at(&rest, 1.0), 5.0) && close(baked_at(&rest, 1.5), 10.0));
+        assert!(close(baked_at(&rest, 2.0), 0.0), "{}", baked_at(&rest, 2.0));
+        let frozen = bake(&lin(&[0.0, 10.0]), &gapped(0.5, true), &[0.0], 4.0).unwrap();
+        assert!(close(baked_at(&frozen, 0.25), 10.0), "frozen, the idle time before the first run holds the end of the last: {}", baked_at(&frozen, 0.25));
+    }
+
+    #[test]
+    fn no_gap_bakes_exactly_as_before() {
+        let t = Timing { begin: 0.0, dur: 1.0, active: None, freeze: false, fill_before: false, gap: 0.0 };
+        let pts = bake(&lin(&[0.0, 10.0]), &t, &[0.0], 3.0).unwrap();
+        assert!(close(baked_at(&pts, 0.5), 5.0) && close(baked_at(&pts, 1.5), 5.0) && close(baked_at(&pts, 2.5), 5.0));
+        assert_eq!(t.period(), 1.0);
+        assert_eq!(gapped(0.0, false).period(), 2.0);
+    }
+
+    #[test]
+    fn a_dur_below_four_milliseconds_is_held_to_four() {
+        // Spinners write the jump back to the start as a dur of 1 ms.
+        let t = timing(&[("dur", "0.001s"), ("fill", "freeze")]).unwrap();
+        assert!((t.dur - 0.004).abs() < 1e-12 && t.freeze);
+        assert!((timing(&[("dur", "3ms")]).unwrap().dur - 0.004).abs() < 1e-12);
+        assert!((timing(&[("dur", "5ms")]).unwrap().dur - 0.005).abs() < 1e-12, "longer ones are kept");
     }
 
     #[test]

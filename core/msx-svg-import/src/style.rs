@@ -191,7 +191,7 @@ pub fn diagonal(vp: (f64, f64)) -> f64 {
     ((vp.0 * vp.0 + vp.1 * vp.1) / 2.0).sqrt()
 }
 
-fn parse_dasharray(v: &str, font_size: f64, vp: (f64, f64)) -> Option<Vec<f64>> {
+pub(crate) fn parse_dasharray(v: &str, font_size: f64, vp: (f64, f64)) -> Option<Vec<f64>> {
     let t = v.trim();
     if t.eq_ignore_ascii_case("none") {
         return Some(Vec::new());

@@ -5,6 +5,15 @@
 //! (see `target.rs`); a window-backed `Surface` is `apps/msx-viewer`'s
 //! concern.
 
+use std::sync::Mutex;
+
+/// Held while an instance, adapter and device are created. Mesa's software
+/// drivers (lavapipe, llvmpipe) and the EGL path of the GL backend start up
+/// global state, and a test runner that builds many renderers on several
+/// threads at once has made the process die on a hosted runner. Creation is
+/// rare and quick, so one at a time costs nothing.
+static CREATE_LOCK: Mutex<()> = Mutex::new(());
+
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -15,17 +24,29 @@ impl GpuContext {
     /// `pollster` — wgpu's setup calls are async because browsers need
     /// that; a CLI/offscreen renderer just wants the result synchronously.
     pub fn new() -> Result<Self, String> {
+        let _guard = CREATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pollster::block_on(Self::new_async())
     }
 
+    /// The native APIs first (Vulkan, Metal, DX12), and the GL backend only
+    /// when none of them gives an adapter. Asking for every backend at once
+    /// also starts EGL on machines that have it, which a software Vulkan
+    /// driver does not need and which is the less settled of the two paths.
     async fn new_async() -> Result<Self, String> {
+        match Self::with_backends(wgpu::Backends::PRIMARY).await {
+            Ok(context) => Ok(context),
+            Err(primary) => Self::with_backends(wgpu::Backends::SECONDARY).await.map_err(|_| primary),
+        }
+    }
+
+    async fn with_backends(backends: wgpu::Backends) -> Result<Self, String> {
         // NOTE: verified directly against wgpu 26.0.1's source
         // (wgpu-types/src/instance.rs) — `InstanceDescriptor` has exactly
         // `backends` / `flags` / `memory_budget_thresholds` /
         // `backend_options`, no `display` field, and `Instance::new` takes
         // `&InstanceDescriptor`, not an owned one.
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             flags: Default::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
@@ -103,5 +124,24 @@ impl GpuContext {
                      of a stripped-down VM/container image."
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Many threads asking for a context at once get one each, or all get the same error
+    /// when the machine has no adapter, and the process stays up.
+    #[test]
+    fn contexts_can_be_requested_from_many_threads_at_once() {
+        if GpuContext::new().is_err() {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        }
+        let handles: Vec<_> = (0..8).map(|_| std::thread::spawn(|| GpuContext::new().is_ok())).collect();
+        for h in handles {
+            assert!(h.join().expect("a thread that asks for a context does not panic"));
+        }
     }
 }

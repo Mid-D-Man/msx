@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#0f1220"/>
+  <!-- A ring whose dash grows and shrinks while the ring turns and changes color. -->
+  <circle cx="32" cy="32" r="20" fill="none" stroke="#4a9eff" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 126">
+    <animate attributeName="stroke-dasharray" values="1 126;90 37;1 126" dur="1.6s" repeatCount="indefinite"/>
+    <animate attributeName="stroke" values="#4a9eff;#2ecc71;#4a9eff" dur="1.6s" repeatCount="indefinite"/>
+    <animateTransform attributeName="transform" type="rotate" values="0 32 32;360 32 32" dur="1.6s" repeatCount="indefinite"/>
+  </circle>
+</svg>

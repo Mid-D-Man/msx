@@ -565,7 +565,7 @@ mod tests {
     fn sample(s: &Stops, dir: Direction, dur: f64, count: Option<f64>, total: f64, times: &[f64]) -> Vec<f64> {
         let (o, factor) = s.orient(dir);
         let curve = o.curve().unwrap();
-        let t = Timing { begin: 0.0, dur: dur * factor, active: count.map(|c| c * dur), freeze: true, fill_before: false };
+        let t = Timing { begin: 0.0, dur: dur * factor, active: count.map(|c| c * dur), freeze: true, fill_before: false, gap: 0.0 };
         let pts = bake(&curve, &t, &[0.0], total).unwrap();
         times
             .iter()

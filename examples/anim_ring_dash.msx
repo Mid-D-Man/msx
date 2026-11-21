@@ -1,0 +1,59 @@
+// examples/anim_ring_dash.msx
+// A ring whose dash grows and shrinks (the dash array channels), whose color changes
+// (stroke_r/g/b) and that turns (rotate). The dash array is two channels, dash_array_0 and
+// dash_array_1, which makes the file wire version 3. Made from examples/svg/spinner_ring.svg
+// with `msx import`.
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 64, height = 64, background = "#00000000" }
+  duration = 1.6
+  loop_mode = "loop"
+  elements::
+    { type = "rect", x = 0, y = 0, width = 64, height = 64, style = { fill = #0f1220 } }
+    { type = "group", transform = "translate(32 32)",
+      elements = [
+        { type = "group", id = "anim2",
+          elements = [
+            { type = "group", transform = "translate(-32 -32)",
+              elements = [
+                { type = "circle", cx = 32, cy = 32, r = 20, id = "anim1", style = { fill = "none", stroke = #4a9eff, stroke_width = 6, stroke_linecap = "round", stroke_dasharray = [1.0, 126.0] } }
+              ] }
+          ] }
+      ] }
+  animations::
+    { target_id = "anim1", property = "dash_array_0",
+      keyframes = [
+        { time = 0.0, value = 1.0 },
+        { time = 0.8, value = 90.0 },
+        { time = 1.6, value = 1.0 }
+      ] }
+    { target_id = "anim1", property = "dash_array_1",
+      keyframes = [
+        { time = 0.0, value = 126.0 },
+        { time = 0.8, value = 37.0 },
+        { time = 1.6, value = 126.0 }
+      ] }
+    { target_id = "anim1", property = "stroke_r",
+      keyframes = [
+        { time = 0.0, value = 74.0 },
+        { time = 0.8, value = 46.0 },
+        { time = 1.6, value = 74.0 }
+      ] }
+    { target_id = "anim1", property = "stroke_g",
+      keyframes = [
+        { time = 0.0, value = 158.0 },
+        { time = 0.8, value = 204.0 },
+        { time = 1.6, value = 158.0 }
+      ] }
+    { target_id = "anim1", property = "stroke_b",
+      keyframes = [
+        { time = 0.0, value = 255.0 },
+        { time = 0.8, value = 113.0 },
+        { time = 1.6, value = 255.0 }
+      ] }
+    { target_id = "anim2", property = "rotate",
+      keyframes = [
+        { time = 0.0, value = 0.0 },
+        { time = 1.6, value = 360.0 }
+      ] }
+)

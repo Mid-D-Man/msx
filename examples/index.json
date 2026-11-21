@@ -192,6 +192,24 @@
       "description": "A ring and a rectangle that draw their outline with a dash offset while the stroke color changes. Needs wire version 3."
     },
     {
+      "file": "anim_dots_syncbase.msx",
+      "title": "Dots in a ring",
+      "category": "anim",
+      "description": "Three dots that start each other with begin values that name other animations, repeating on a 1.55 s ring. Needs wire version 3."
+    },
+    {
+      "file": "anim_bars.msx",
+      "title": "Equalizer bars",
+      "category": "anim",
+      "description": "Bars whose height and top edge animate together, each starting a fixed time after the first. Needs wire version 3."
+    },
+    {
+      "file": "anim_ring_dash.msx",
+      "title": "Ring with a moving dash",
+      "category": "anim",
+      "description": "A ring with an animated dash array, a color that changes and a rotation. Needs wire version 3."
+    },
+    {
       "file": "sdf_shapes.msx",
       "title": "SDF shapes",
       "category": "sdf",

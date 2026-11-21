@@ -533,7 +533,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -746,8 +746,13 @@ The `property` byte is the `AnimatedProperty` discriminant:
 | 11 to 14 | `stroke_r`, `stroke_g`, `stroke_b`, `stroke_a` | 0 to 255 | 3 |
 | 15 | `stroke_width` | user units, 0 or more | 3 |
 | 16 | `dash_offset` | user units | 3 |
+| 17, 18 | `width`, `height` | user units, 0 or more | 3 |
+| 19, 20 | `rx`, `ry` | user units, 0 or more | 3 |
+| 21 | `r` | user units, 0 or more | 3 |
+| 22 to 25 | `x1`, `y1`, `x2`, `y2` | user units | 3 |
+| 26, 27 | `dash_array_0`, `dash_array_1` | user units, 0 or more | 3 |
 
-The track layout does not change for the style channels. A scene with a track on one of bytes 7 to 16 is written as version 3, and a version 2 reader refuses it at the header. A scene whose tracks all use bytes 0 to 6 stays version 2. The style channels replace the value on the shape and do not combine with it, the Style channels section of the Keyframe animation guide explains the rules.
+The track layout does not change for the style channels. A scene with a track on one of bytes 7 to 27 is written as version 3, and a version 2 reader refuses it at the header. A scene whose tracks all use bytes 0 to 6 stays version 2. The style channels replace the value on the shape and do not combine with it, the Style channels section of the Keyframe animation guide explains the rules.
 
 `target_id` goes through the shared string pool rather than being inlined — several properties on the same element each get their own track, so the same id repeats often enough that pool dedup is worth it, same reasoning as `MediaSource::FileRef` paths.
 
