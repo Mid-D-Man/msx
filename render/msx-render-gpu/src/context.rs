@@ -14,6 +14,11 @@ use std::sync::Mutex;
 /// rare and quick, so one at a time costs nothing.
 static CREATE_LOCK: Mutex<()> = Mutex::new(());
 
+/// The device shared by every test in this process. A static is never
+/// dropped, so the driver is not torn down at exit either.
+#[cfg(test)]
+static TEST_DEVICE: std::sync::OnceLock<Result<(wgpu::Device, wgpu::Queue), String>> = std::sync::OnceLock::new();
+
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -23,7 +28,23 @@ impl GpuContext {
     /// Blocks on the async instance → adapter → device handshake via
     /// `pollster` — wgpu's setup calls are async because browsers need
     /// that; a CLI/offscreen renderer just wants the result synchronously.
+    #[cfg(not(test))]
     pub fn new() -> Result<Self, String> {
+        Self::create()
+    }
+
+    /// Test builds hand every caller a handle to one device for the whole
+    /// process, so no test builds or drops a driver while another uses it.
+    #[cfg(test)]
+    pub fn new() -> Result<Self, String> {
+        match TEST_DEVICE.get_or_init(|| Self::create().map(|c| (c.device, c.queue))) {
+            Ok((device, queue)) => Ok(GpuContext { device: device.clone(), queue: queue.clone() }),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Builds a fresh instance, adapter and device under the creation lock.
+    pub(crate) fn create() -> Result<Self, String> {
         let _guard = CREATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pollster::block_on(Self::new_async())
     }
@@ -131,6 +152,10 @@ impl GpuContext {
 mod tests {
     use super::*;
 
+    /// Contexts made by the thread test, kept until the process exits so that
+    /// none is dropped while other tests run.
+    static PARKED: Mutex<Vec<GpuContext>> = Mutex::new(Vec::new());
+
     /// Many threads asking for a context at once get one each, or all get the same error
     /// when the machine has no adapter, and the process stays up.
     #[test]
@@ -139,9 +164,23 @@ mod tests {
             eprintln!("skipping: no GPU adapter available in this environment");
             return;
         }
-        let handles: Vec<_> = (0..8).map(|_| std::thread::spawn(|| GpuContext::new().is_ok())).collect();
+        let handles: Vec<_> = (0..8).map(|_| std::thread::spawn(GpuContext::create)).collect();
         for h in handles {
-            assert!(h.join().expect("a thread that asks for a context does not panic"));
+            let context = h
+                .join()
+                .expect("a thread that asks for a context does not panic")
+                .expect("a context is created");
+            PARKED.lock().unwrap_or_else(|e| e.into_inner()).push(context);
         }
+    }
+
+    /// Two calls in a test build give handles to the same device.
+    #[test]
+    fn test_builds_share_one_device() {
+        let (Ok(a), Ok(b)) = (GpuContext::new(), GpuContext::new()) else {
+            eprintln!("skipping: no GPU adapter available in this environment");
+            return;
+        };
+        assert!(a.device == b.device);
     }
 }
