@@ -78,8 +78,16 @@ jobs:
       - name: Build workspace (debug, all targets)
         run: cargo build --workspace --all-targets
 
+      # msx-render-gpu runs first and alone with one test thread. The software
+      # GPU drivers on a hosted runner have crashed the test binary when
+      # several tests build and use devices at once. Every other crate keeps
+      # the parallel run, and runs last so its summary line stays the last one.
       - name: Test workspace (debug)
-        run: cargo test --workspace
+        run: |
+          cargo test -p msx-render-gpu -- --test-threads=1
+          cargo test --workspace --exclude msx-render-gpu
 
       - name: Test workspace (release)
-        run: cargo test --workspace --release
+        run: |
+          cargo test -p msx-render-gpu --release -- --test-threads=1
+          cargo test --workspace --exclude msx-render-gpu --release

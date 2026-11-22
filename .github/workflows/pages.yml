@@ -95,12 +95,20 @@ jobs:
       - name: Create results dir
         run: mkdir -p results
 
+      # msx-render-gpu runs first and alone with one test thread. The software
+      # GPU drivers on a hosted runner have crashed the test binary when
+      # several tests build and use devices at once. Every other crate keeps
+      # the parallel run, and runs last so its summary line stays the last one.
       - name: Run tests (debug)
-        run: cargo test --workspace 2>&1 | tee results/test_debug.txt
+        run: |
+          cargo test -p msx-render-gpu -- --test-threads=1 2>&1 | tee results/test_debug.txt
+          cargo test --workspace --exclude msx-render-gpu 2>&1 | tee -a results/test_debug.txt
         shell: bash --noprofile --norc -eo pipefail {0}
 
       - name: Run tests (release)
-        run: cargo test --workspace --release 2>&1 | tee results/test_release.txt
+        run: |
+          cargo test -p msx-render-gpu --release -- --test-threads=1 2>&1 | tee results/test_release.txt
+          cargo test --workspace --exclude msx-render-gpu --release 2>&1 | tee -a results/test_release.txt
         shell: bash --noprofile --norc -eo pipefail {0}
 
       # ── Build ─────────────────────────────────────────────────────────────────
