@@ -1,15 +1,48 @@
 #!/usr/bin/env python3
 """
 generate_report.py
-Parses MSX CI output and generates a self-contained HTML report.
+Parses MSX CI output and generates the HTML report.
+
+The page holds text, tables and inline SVG only. The rendered example images
+are written once each to an img/ folder beside the page and linked by relative
+URL, so the page stays far under the 25 MiB file limit of Cloudflare Pages
+however many examples there are.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
 from datetime import datetime, timezone
 from typing import Optional
+
+# A file this size or larger is refused by Cloudflare Pages (25 MiB).
+PAGES_FILE_LIMIT = 25 * 1024 * 1024
+WARN_AT = 20 * 1024 * 1024
+
+
+class Assets:
+    """Writes the example renders next to the report and returns their URLs."""
+
+    def __init__(self, directory: str):
+        self.directory = directory
+        self.urls: dict = {}
+        self.bytes = 0
+        self.largest = 0
+
+    def url(self, name: str, kind: str, ext: str, b64: str) -> str:
+        """Saves one render, once per name and kind, and returns `img/<file>`."""
+        file = f"{re.sub(r'[^A-Za-z0-9_.-]', '_', name)}.{kind}.{ext}"
+        if file not in self.urls:
+            data = base64.b64decode(b64)
+            os.makedirs(self.directory, exist_ok=True)
+            with open(os.path.join(self.directory, file), "wb") as f:
+                f.write(data)
+            self.urls[file] = f"img/{file}"
+            self.bytes += len(data)
+            self.largest = max(self.largest, len(data))
+        return self.urls[file]
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -231,7 +264,7 @@ def svg_size_comparison_bars(corpus: list) -> str:
     return "\n".join(lines)
 
 
-def svg_gallery_html(examples: list) -> str:
+def svg_gallery_html(examples: list, assets: Assets) -> str:
     if not examples:
         return "<p class='no-data'>No example SVG data available.</p>"
 
@@ -296,20 +329,25 @@ def svg_gallery_html(examples: list) -> str:
             # else the plain static PNG. Reuses msxToggleShaderRender,
             # which just swaps img.src between two data URIs regardless of
             # whether they're a GIF or a PNG underneath.
-            cpu_side = anim_gif_base64 or png_base64
-            cpu_mime = "gif" if anim_gif_base64 else "png"
+            gpu_gif_url = assets.url(name, "gpu-anim", "gif", gpu_gif_base64)
             compare_html = ""
-            if cpu_side:
+            if anim_gif_base64:
+                cpu_url = assets.url(name, "anim", "gif", anim_gif_base64)
+            elif png_base64:
+                cpu_url = assets.url(name, "static", "png", png_base64)
+            else:
+                cpu_url = ""
+            if cpu_url:
                 compare_html = (
                     f'<button type="button" class="compare-toggle" '
-                    f'data-cpu="data:image/{cpu_mime};base64,{cpu_side}" '
-                    f'data-gpu="data:image/gif;base64,{gpu_gif_base64}" '
+                    f'data-cpu="{cpu_url}" '
+                    f'data-gpu="{gpu_gif_url}" '
                     f'data-target="{img_id}" onclick="msxToggleShaderRender(this)">'
                     f'compare CPU fallback</button>'
                 )
             rendered_visual = (
                 f'<img id="{img_id}" class="native-render native-render--gpu native-render--anim" '
-                f'src="data:image/gif;base64,{gpu_gif_base64}" '
+                f'src="{gpu_gif_url}" '
                 f'alt="{name} — animated, real WGSL-executed render (msx-render-gpu)">'
                 f'{compare_html}'
             )
@@ -321,42 +359,44 @@ def svg_gallery_html(examples: list) -> str:
             # so this is the fast way to tell "the render is actually
             # wrong" apart from "GIF compression is just muddying a fine
             # render" for anything that looks off in the animated version.
+            gif_url = assets.url(name, "anim", "gif", anim_gif_base64)
             compare_html = ""
             if png_base64:
                 compare_html = (
                     f'<button type="button" class="compare-toggle" '
-                    f'data-gif="data:image/gif;base64,{anim_gif_base64}" '
-                    f'data-png="data:image/png;base64,{png_base64}" '
+                    f'data-gif="{gif_url}" '
+                    f'data-png="{assets.url(name, "static", "png", png_base64)}" '
                     f'data-target="{img_id}" onclick="msxToggleRender(this)">'
                     f'compare static frame</button>'
                 )
             rendered_visual = (
                 f'<img id="{img_id}" class="native-render native-render--anim" '
-                f'src="data:image/gif;base64,{anim_gif_base64}" '
+                f'src="{gif_url}" '
                 f'alt="{name} — animated native MSX render (msx-anim + msx-render-cpu)">'
                 f'{compare_html}'
             )
         elif uses_shader and gpu_png_base64:
             img_id = f"render-{name}"
+            gpu_png_url = assets.url(name, "gpu", "png", gpu_png_base64)
             compare_html = ""
             if png_base64:
                 compare_html = (
                     f'<button type="button" class="compare-toggle" '
-                    f'data-cpu="data:image/png;base64,{png_base64}" '
-                    f'data-gpu="data:image/png;base64,{gpu_png_base64}" '
+                    f'data-cpu="{assets.url(name, "static", "png", png_base64)}" '
+                    f'data-gpu="{gpu_png_url}" '
                     f'data-target="{img_id}" onclick="msxToggleShaderRender(this)">'
                     f'compare CPU fallback</button>'
                 )
             rendered_visual = (
                 f'<img id="{img_id}" class="native-render native-render--gpu" '
-                f'src="data:image/png;base64,{gpu_png_base64}" '
+                f'src="{gpu_png_url}" '
                 f'alt="{name} — real WGSL-executed render (msx-render-gpu)">'
                 f'{compare_html}'
             )
         elif png_base64:
             rendered_visual = (
                 f'<img class="native-render" '
-                f'src="data:image/png;base64,{png_base64}" '
+                f'src="{assets.url(name, "static", "png", png_base64)}" '
                 f'alt="{name} — native MSX render (msx-render-cpu)">'
             )
         elif svg_content:
@@ -881,15 +921,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 function msxToggleRender(btn) {{
   const img = document.getElementById(btn.dataset.target);
-  const showingGif = img.src.startsWith("data:image/gif");
+  const showingGif = btn.dataset.showing !== "png";
   img.src = showingGif ? btn.dataset.png : btn.dataset.gif;
+  btn.dataset.showing = showingGif ? "png" : "gif";
   btn.textContent = showingGif ? "back to animated" : "compare static frame";
 }}
 
 function msxToggleShaderRender(btn) {{
   const img = document.getElementById(btn.dataset.target);
-  const showingGpu = img.src === btn.dataset.gpu;
+  const showingGpu = btn.dataset.showing !== "cpu";
   img.src = showingGpu ? btn.dataset.cpu : btn.dataset.gpu;
+  btn.dataset.showing = showingGpu ? "cpu" : "gpu";
   btn.textContent = showingGpu ? "back to GPU render" : "compare CPU fallback";
 }}
 </script>
@@ -911,6 +953,7 @@ def main():
     examples = parse_examples(args.examples)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    assets = Assets(os.path.join(os.path.dirname(os.path.abspath(args.out)), "img"))
 
     html = HTML_TEMPLATE.format(
         build     = args.build,
@@ -930,14 +973,18 @@ def main():
 
         throughput_chart = svg_throughput_bars(bench),
         size_chart       = svg_size_comparison_bars(corpus),
-        example_gallery  = svg_gallery_html(examples),
+        example_gallery  = svg_gallery_html(examples, assets),
     )
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"Report written to {args.out}")
+    print(f"Report written to {args.out} ({len(html.encode('utf-8')) / 1048576:.2f} MiB)")
+    print(f"  Images:          {len(assets.urls)} files, {assets.bytes / 1048576:.2f} MiB, largest {assets.largest / 1048576:.2f} MiB")
+    # Cloudflare Pages refuses a file of 25 MiB or more, and says so only at deploy time.
+    if len(html.encode("utf-8")) >= WARN_AT or assets.largest >= WARN_AT:
+        print(f"::warning::the report page or one of its images is close to the {PAGES_FILE_LIMIT // 1048576} MiB limit of Cloudflare Pages")
     print(f"  Tests (debug):   {tests_d['passed']} passed / {tests_d['failed']} failed  ({len(tests_d['tests'])} lines)")
     print(f"  Tests (release): {tests_r['passed']} passed / {tests_r['failed']} failed  ({len(tests_r['tests'])} lines)")
     print(f"  Bench entries:   {len(bench)}")
