@@ -5,7 +5,8 @@ pub const MAGIC: [u8; 4] = [0x4D, 0x53, 0x58, 0x00]; // "MSX\0"
 /// that needs nothing newer. v2 added the Sdf/Splat/Layer/ConicGradient tags.
 pub const MIN_VERSION: u8 = 2;
 /// The newest wire version this crate reads. v3 adds the style extension block
-/// (`fill_opacity`, `stroke_opacity`, `dominant_baseline`). A scene is written
+/// (`fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`,
+/// `text_decoration`, `font_style`). A scene is written
 /// with the lowest version that can hold it, see `version.rs`.
 pub const VERSION: u8 = 3;
 pub const HEADER_SIZE: usize = 32;

@@ -12,7 +12,29 @@
 | `x`, `y` | Anchor position. `y` is the baseline | yes |
 | `content` | The string to draw | yes |
 
-Text takes the usual `id` and `transform` fields and a `style`. The keys that shape the text are `font_size`, `font_family`, `font_weight`, `text_anchor` and `dominant_baseline`. `text_anchor` chooses which part of the string sits at `x`: `start`, `middle` or `end`. `font_weight` takes `normal`, `bold` or a number such as 600. The fill color comes from `fill`.
+Text takes the usual `id` and `transform` fields and a `style`. The keys that shape the text are `font_size`, `font_family`, `font_weight`, `font_style`, `letter_spacing`, `text_decoration`, `text_anchor` and `dominant_baseline`. `text_anchor` chooses which part of the string sits at `x`: `start`, `middle` or `end`. `font_weight` takes `normal`, `bold` or a number such as 600. The fill color comes from `fill`.
+
+## Spacing, decoration and slant
+
+```dixscript
+{ type = "text", x = 30, y = 60, content = "Spaced and underlined",
+  style = { fill = #ffffff, font_size = 22, letter_spacing = 3,
+            text_decoration = "underline", font_style = "italic" } }
+```
+
+<!-- example: text_styles -->
+
+| Key | Values | Default |
+|---|---|---|
+| `letter_spacing` | A number, the extra space after every glyph in user units. It can be negative | `0` |
+| `text_decoration` | A list of `underline`, `overline` and `line-through`, or `none` | `none` |
+| `font_style` | `normal`, `italic` or `oblique` | `normal` |
+
+- Letter spacing follows every glyph, the last one included, so it widens the text box and moves `middle` and `end` anchored text.
+- Each decoration line is a box as wide as the text box. The CPU and GPU renderers take its position and thickness from the font's own metrics. The overline sits at the ascender. A decoration takes the fill and stroke of the text.
+- `italic` and `oblique` look the same. The CPU and GPU renderers slant the upright face by a synthesized 12 degrees, because the embedded face has no italic. The text box and baseline do not change. An angle after `oblique` in the importer is read as `oblique`.
+- The SVG renderer writes all three as attributes of the `text` element, and the browser draws them with its own font.
+- A scene that sets one of the three keys is written as binary version 3 (see [Binary format](binary-format.md#versions)).
 
 ## Where text renders
 

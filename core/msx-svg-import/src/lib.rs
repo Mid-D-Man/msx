@@ -785,11 +785,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         // Text and stroke properties the renderers have no slot for. Each is
         // reported only when it differs from the initial value.
-        let ignored: [(&str, &[&str]); 6] = [
-            ("text-decoration", &["none", ""]),
-            ("letter-spacing", &["normal", "0", "0px", ""]),
+        let ignored: [(&str, &[&str]); 3] = [
             ("word-spacing", &["normal", "0", "0px", ""]),
-            ("font-style", &["normal", ""]),
             ("writing-mode", &["horizontal-tb", "lr", "lr-tb", ""]),
             ("vector-effect", &["none", ""]),
         ];
@@ -1929,6 +1926,9 @@ impl<'a, 'i> Importer<'a, 'i> {
             st.font_weight = inh.font_weight.clone();
             st.text_anchor = inh.text_anchor;
             st.dominant_baseline = inh.dominant_baseline.clone();
+            st.letter_spacing = (inh.letter_spacing != 0.0).then_some(inh.letter_spacing);
+            st.text_decoration = (!inh.text_decoration.is_none()).then_some(inh.text_decoration);
+            st.font_style = inh.font_style.filter(|f| f.is_slanted());
         }
         st
     }
@@ -1982,6 +1982,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             font_weight: inh.font_weight.clone(),
             text_anchor: inh.text_anchor,
             dominant_baseline: inh.dominant_baseline.clone(),
+            letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
             ..Style::default()
         };
         let probe = Text { x, y, content: content.to_string(), id: None, transform: None, style };
@@ -2003,7 +2004,12 @@ impl<'a, 'i> Importer<'a, 'i> {
                     runs.push(Run { x: pos.0, y: pos.1, text: t.to_string(), inh: inh.clone() });
                     *new_run = false;
                 } else if let Some(last) = runs.last_mut() {
-                    let differs = last.inh.fill != inh.fill || last.inh.font_size != inh.font_size || last.inh.font_weight != inh.font_weight;
+                    let differs = last.inh.fill != inh.fill
+                        || last.inh.font_size != inh.font_size
+                        || last.inh.font_weight != inh.font_weight
+                        || last.inh.font_style != inh.font_style
+                        || last.inh.letter_spacing != inh.letter_spacing
+                        || last.inh.text_decoration != inh.text_decoration;
                     last.text.push_str(t);
                     if differs {
                         self.warn("text with differently styled spans on one line is imported with the style of the line start".to_string());

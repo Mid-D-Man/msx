@@ -52,6 +52,12 @@
       "description": "A gradient title, bold and regular text, accents and the three text anchors."
     },
     {
+      "file": "text_styles.msx",
+      "title": "Text styles",
+      "category": "start",
+      "description": "Letter spacing, underline, overline and line-through, and italic and oblique text."
+    },
+    {
       "file": "stroke_styles.msx",
       "title": "Stroke styles",
       "category": "start",

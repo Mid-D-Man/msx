@@ -414,6 +414,9 @@ All keys are optional. Unset keys fall back to the defaults below. Style set on 
   font_size         = <float>?
   font_family       = <string>?
   font_weight       = "normal" | "bold" | <int>?
+  font_style        = "normal" | "italic" | "oblique"
+  letter_spacing    = <float>?       // user units after every glyph
+  text_decoration   = <string>?      // "underline", "overline", "line-through" in a list, or "none"
   text_anchor       = "start" | "middle" | "end"
   dominant_baseline = <string>?
   visibility        = "visible" | "hidden"
@@ -533,7 +536,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity` and `dominant_baseline`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration` and `font_style`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -791,14 +794,20 @@ The track layout does not change for the style channels. A scene with a track on
   bit 0 = fill_opacity present
   bit 1 = stroke_opacity present
   bit 2 = dominant_baseline present
+  bit 3 = letter_spacing present
+  bit 4 = text_decoration present
+  bit 5 = font_style present
 [f32 fill_opacity]          if ext_present.bit0
 [f32 stroke_opacity]        if ext_present.bit1
 [u16 dominant_baseline_str_idx]  if ext_present.bit2
+[f32 letter_spacing]        if ext_present.bit3
+[u8  text_decoration]       if ext_present.bit4   (bit0=underline bit1=overline bit2=line-through)
+[u8  font_style]            if ext_present.bit5   (0=normal 1=italic 2=oblique)
 ```
 
 One flag bit covers each group of fields, so a field that the source left unset carries its own marker inside the group. A decoder returns `None` for a marker and an explicit value otherwise. Files written before the markers existed hold the default value in those slots and decode to explicit values, which renders identically.
 
-`fill_opacity`, `stroke_opacity` and `dominant_baseline` are stored in the extension block, which exists from version 3 on. Bit 7 of `present_flags` is set when any of them is set, even when neither `hidden` nor `display_none` is, and `vis_display_flags` then carries bit 2. Files written before version 3 have no such block and decode with those three keys unset. An unset key has no presence bit and decodes to `None`. A value of `fill_opacity` or `stroke_opacity` above 1 or below 0 is held to the range 0 to 1 when drawn.
+`fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration` and `font_style` are stored in the extension block, which exists from version 3 on. Bit 7 of `present_flags` is set when any of them is set, even when neither `hidden` nor `display_none` is, and `vis_display_flags` then carries bit 2. Files written before version 3 have no such block and decode with those six keys unset. A `text_decoration` of `none` is stored as a zero byte, so it stays set. An unset key has no presence bit and decodes to `None`. A value of `fill_opacity` or `stroke_opacity` above 1 or below 0 is held to the range 0 to 1 when drawn.
 
 Note: `Sdf` and `Layer` don't have a style block at all — `Sdf` has direct `fill`/`stroke` paint fields instead (see its geometry-fields row above), and `Layer` has no fill/stroke concept at all (it's a compositing group, not a drawable shape).
 

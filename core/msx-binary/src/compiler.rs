@@ -510,7 +510,7 @@ pub fn compile_stats(scene: &Scene) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Canvas, Color, LinearGradient, Paint, Stop};
+    use msx_ast::{Canvas, Color, FontStyle, LinearGradient, Paint, Stop, TextDecoration};
 
     fn basic_scene() -> Scene {
         let mut style = Style::empty();
@@ -571,6 +571,9 @@ mod tests {
             (|s: &mut Style| s.fill_opacity = Some(0.5)) as fn(&mut Style),
             |s| s.stroke_opacity = Some(0.5),
             |s| s.dominant_baseline = Some("hanging".to_string()),
+            |s| s.letter_spacing = Some(2.5),
+            |s| s.text_decoration = Some(TextDecoration::parse("underline")),
+            |s| s.font_style = Some(FontStyle::Oblique),
         ] {
             let mut style = Style::empty();
             set(&mut style);
@@ -583,6 +586,9 @@ mod tests {
             assert_eq!(c.style.fill_opacity.is_some(), style.fill_opacity.is_some());
             assert_eq!(c.style.stroke_opacity.is_some(), style.stroke_opacity.is_some());
             assert_eq!(c.style.dominant_baseline, style.dominant_baseline);
+            assert_eq!(c.style.letter_spacing, style.letter_spacing);
+            assert_eq!(c.style.text_decoration, style.text_decoration);
+            assert_eq!(c.style.font_style, style.font_style);
         }
     }
 

@@ -205,7 +205,7 @@ What the graph cannot express is reported and the element is drawn without that 
 | Blend modes beyond the nine above | Drawn normally |
 | CSS selectors with sibling combinators (`+`, `~`), pseudo-classes other than `:first-child`, and pseudo-elements | The rule is skipped |
 | Spans with different styles on one text line | The style of the line start is used |
-| `text-decoration`, `letter-spacing`, `word-spacing`, `font-style`, `writing-mode`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
+| `word-spacing`, `writing-mode`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
 
 See [Encodings](#encodings) for files that are not UTF-8. Elements are capped at 200,000 shapes, so an exponentially nested `use` chain cannot run away. A `use` that refers back to itself is skipped.
 

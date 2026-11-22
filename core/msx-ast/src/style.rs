@@ -75,6 +75,60 @@ impl FontWeight {
     }
 }
 
+/// `font-style`. The raster renderers slant the upright face for `Italic` and
+/// `Oblique`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontStyle { Normal, Italic, Oblique }
+
+impl FontStyle {
+    pub fn to_svg(self) -> &'static str {
+        match self { FontStyle::Normal => "normal", FontStyle::Italic => "italic", FontStyle::Oblique => "oblique" }
+    }
+    /// Reads the first word, so `oblique 10deg` is `Oblique`. Unknown words are `Normal`.
+    pub fn parse(s: &str) -> Self {
+        match s.split_whitespace().next() { Some("italic") => FontStyle::Italic, Some("oblique") => FontStyle::Oblique, _ => FontStyle::Normal }
+    }
+    pub fn to_byte(self)    -> u8 { match self { FontStyle::Normal => 0, FontStyle::Italic => 1, FontStyle::Oblique => 2 } }
+    pub fn from_byte(b: u8) -> Self { match b { 1 => FontStyle::Italic, 2 => FontStyle::Oblique, _ => FontStyle::Normal } }
+    /// Whether the glyphs are drawn slanted.
+    pub fn is_slanted(self) -> bool { self != FontStyle::Normal }
+}
+
+/// The lines of `text-decoration`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextDecoration {
+    pub underline:    bool,
+    pub overline:     bool,
+    pub line_through: bool,
+}
+
+impl TextDecoration {
+    pub fn is_none(self) -> bool { !(self.underline || self.overline || self.line_through) }
+    /// Reads a list of `underline`, `overline` and `line-through`. Other words are ignored.
+    pub fn parse(s: &str) -> Self {
+        let mut d = TextDecoration::default();
+        for w in s.split_whitespace() {
+            match w {
+                "underline"    => d.underline = true,
+                "overline"     => d.overline = true,
+                "line-through" => d.line_through = true,
+                _ => {}
+            }
+        }
+        d
+    }
+    /// The SVG value, `none` when no line is set.
+    pub fn to_svg(self) -> String {
+        let mut w: Vec<&str> = Vec::new();
+        if self.underline    { w.push("underline"); }
+        if self.overline     { w.push("overline"); }
+        if self.line_through { w.push("line-through"); }
+        if w.is_empty() { "none".into() } else { w.join(" ") }
+    }
+    pub fn to_byte(self) -> u8 { (self.underline as u8) | ((self.overline as u8) << 1) | ((self.line_through as u8) << 2) }
+    pub fn from_byte(b: u8) -> Self { TextDecoration { underline: b & 1 != 0, overline: b & 2 != 0, line_through: b & 4 != 0 } }
+}
+
 /// Per-element style properties. All fields are `Option` — None means "inherit / not set".
 /// Binary encoding uses `present_flags()` to skip unset fields.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +150,10 @@ pub struct Style {
     pub font_weight:        Option<FontWeight>,
     pub text_anchor:        Option<TextAnchor>,
     pub dominant_baseline:  Option<String>,
+    /// Extra space after every glyph, in user units.
+    pub letter_spacing:     Option<f64>,
+    pub text_decoration:    Option<TextDecoration>,
+    pub font_style:         Option<FontStyle>,
     pub visibility_hidden:  bool,
     pub display_none:       bool,
 }
@@ -120,6 +178,9 @@ impl Default for Style {
             font_weight:       None,
             text_anchor:       None,
             dominant_baseline: None,
+            letter_spacing:    None,
+            text_decoration:   None,
+            font_style:        None,
             visibility_hidden: false,
             display_none:      false,
         }
@@ -135,6 +196,7 @@ impl Style {
             stroke_dasharray: None, stroke_dashoffset: None,
             font_size: None, font_family: None, font_weight: None,
             text_anchor: None, dominant_baseline: None,
+            letter_spacing: None, text_decoration: None, font_style: None,
             visibility_hidden: false, display_none: false,
         }
     }
@@ -182,15 +244,27 @@ impl Style {
             if ta != TextAnchor::Start { a.push(("text-anchor", ta.to_svg().into())); }
         }
         if let Some(ref db) = self.dominant_baseline { a.push(("dominant-baseline", db.clone())); }
+        if let Some(fs) = self.font_style {
+            // Suppress "normal", the SVG default.
+            if fs != FontStyle::Normal { a.push(("font-style", fs.to_svg().into())); }
+        }
+        if let Some(ls) = self.letter_spacing {
+            if ls != 0.0 { a.push(("letter-spacing", fmt_f64(ls))); }
+        }
+        if let Some(td) = self.text_decoration {
+            if !td.is_none() { a.push(("text-decoration", td.to_svg())); }
+        }
         if self.visibility_hidden { a.push(("visibility", "hidden".into())); }
         if self.display_none      { a.push(("display",    "none".into()));   }
         a
     }
 
     /// Whether the style sets a field that only wire version 3 can hold:
-    /// `fill_opacity`, `stroke_opacity` or `dominant_baseline`.
+    /// `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`,
+    /// `text_decoration` or `font_style`.
     pub fn has_v3_fields(&self) -> bool {
         self.fill_opacity.is_some() || self.stroke_opacity.is_some() || self.dominant_baseline.is_some()
+            || self.letter_spacing.is_some() || self.text_decoration.is_some() || self.font_style.is_some()
     }
 
     /// Bit flags indicating which fields are present (for binary encoding).
@@ -225,6 +299,35 @@ mod tests {
         assert!(s.has_v3_fields() && s.present_flags() & (1 << 7) != 0);
         let mut s = Style::empty(); s.stroke_opacity = Some(0.5); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.dominant_baseline = Some("middle".into()); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.letter_spacing = Some(2.0); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.text_decoration = Some(TextDecoration::default()); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.font_style = Some(FontStyle::Italic); assert!(s.has_v3_fields());
+    }
+    #[test] fn font_style_words_and_bytes() {
+        assert_eq!(FontStyle::parse("italic"), FontStyle::Italic);
+        assert_eq!(FontStyle::parse("oblique 10deg"), FontStyle::Oblique);
+        assert_eq!(FontStyle::parse("slanted"), FontStyle::Normal);
+        for f in [FontStyle::Normal, FontStyle::Italic, FontStyle::Oblique] { assert_eq!(FontStyle::from_byte(f.to_byte()), f); }
+        assert!(FontStyle::Oblique.is_slanted() && !FontStyle::Normal.is_slanted());
+    }
+    #[test] fn text_decoration_words_and_bytes() {
+        let d = TextDecoration::parse("underline  line-through");
+        assert!(d.underline && d.line_through && !d.overline);
+        assert_eq!(d.to_svg(), "underline line-through");
+        assert_eq!(TextDecoration::from_byte(d.to_byte()), d);
+        assert!(TextDecoration::parse("none").is_none());
+        assert_eq!(TextDecoration::default().to_svg(), "none");
+    }
+    #[test] fn text_attrs_skip_the_defaults() {
+        let mut s = Style::empty();
+        s.font_style = Some(FontStyle::Normal); s.letter_spacing = Some(0.0); s.text_decoration = Some(TextDecoration::default());
+        let a = s.to_svg_attrs();
+        assert!(!a.iter().any(|(k, _)| matches!(*k, "font-style" | "letter-spacing" | "text-decoration")));
+        s.font_style = Some(FontStyle::Italic); s.letter_spacing = Some(1.5); s.text_decoration = Some(TextDecoration::parse("underline"));
+        let a = s.to_svg_attrs();
+        assert!(a.contains(&("font-style", "italic".to_string())));
+        assert!(a.contains(&("letter-spacing", "1.5".to_string())));
+        assert!(a.contains(&("text-decoration", "underline".to_string())));
     }
     #[test] fn flags_fill_only() { let mut s = Style::empty(); s.fill = Some(Paint::Color(Color::BLACK)); assert_eq!(s.present_flags() & 1, 1); assert_eq!(s.present_flags() & 2, 0); }
     #[test] fn opacity_1_omitted() { let mut s = Style::empty(); s.opacity = Some(1.0); assert!(!s.to_svg_attrs().iter().any(|(k,_)| *k == "opacity")); }

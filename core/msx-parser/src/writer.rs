@@ -313,6 +313,15 @@ fn style_object(s: &Style) -> Option<String> {
     if let Some(b) = &s.dominant_baseline {
         f.push(format!("dominant_baseline = {}", quote(b)));
     }
+    if let Some(v) = s.letter_spacing {
+        f.push(format!("letter_spacing = {}", num(v)));
+    }
+    if let Some(d) = s.text_decoration {
+        f.push(format!("text_decoration = {}", quote(&d.to_svg())));
+    }
+    if let Some(v) = s.font_style {
+        f.push(format!("font_style = {}", quote(v.to_svg())));
+    }
     if s.visibility_hidden {
         f.push("visibility = \"hidden\"".into());
     }

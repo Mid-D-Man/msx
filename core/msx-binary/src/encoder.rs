@@ -155,6 +155,9 @@ pub const UNSET_BYTE: u8 = 0xFF;
 pub const EXT_FILL_OPACITY: u8 = 1 << 0;
 pub const EXT_STROKE_OPACITY: u8 = 1 << 1;
 pub const EXT_DOMINANT_BASELINE: u8 = 1 << 2;
+pub const EXT_LETTER_SPACING: u8 = 1 << 3;
+pub const EXT_TEXT_DECORATION: u8 = 1 << 4;
+pub const EXT_FONT_STYLE: u8 = 1 << 5;
 /// Marks an unset font size. A real size is stored as hundredths of a unit.
 pub const UNSET_U16: u16 = 0xFFFF;
 
@@ -223,6 +226,9 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
             if style.fill_opacity.is_some()      { present |= EXT_FILL_OPACITY; }
             if style.stroke_opacity.is_some()    { present |= EXT_STROKE_OPACITY; }
             if style.dominant_baseline.is_some() { present |= EXT_DOMINANT_BASELINE; }
+            if style.letter_spacing.is_some()    { present |= EXT_LETTER_SPACING; }
+            if style.text_decoration.is_some()   { present |= EXT_TEXT_DECORATION; }
+            if style.font_style.is_some()        { present |= EXT_FONT_STYLE; }
             write_u8(out, present);
             if let Some(v) = style.fill_opacity   { write_f32(out, v); }
             if let Some(v) = style.stroke_opacity { write_f32(out, v); }
@@ -230,6 +236,9 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
                 let idx = intern_string(pool, b);
                 write_u16(out, idx);
             }
+            if let Some(v) = style.letter_spacing  { write_f32(out, v); }
+            if let Some(d) = style.text_decoration { write_u8(out, d.to_byte()); }
+            if let Some(f) = style.font_style      { write_u8(out, f.to_byte()); }
         }
     }
 }

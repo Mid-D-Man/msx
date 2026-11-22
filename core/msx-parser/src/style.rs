@@ -1,6 +1,6 @@
 // core/msx-parser/src/style.rs
 use dixscript::Runtime::{DixData, dix_path};
-use msx_ast::{FillRule, FontWeight, LineCap, LineJoin, Style, TextAnchor};
+use msx_ast::{FillRule, FontStyle, FontWeight, LineCap, LineJoin, Style, TextAnchor, TextDecoration};
 
 use crate::dix_helpers::{enum_discriminant, opt, paint_from, raw};
 
@@ -34,6 +34,9 @@ pub fn parse_style(data: &DixData, element_prefix: &str) -> Result<Style, String
     if let Some(fw) = parse_font_weight(data, &prefix)?            { style.font_weight = Some(fw); }
     if let Some(ta) = parse_text_anchor(data, &prefix)?            { style.text_anchor = Some(ta); }
     if let Some(db) = opt::<String>(data, &prefix, "dominant_baseline")? { style.dominant_baseline = Some(db); }
+    if let Some(ls) = opt::<f64>(data, &prefix, "letter_spacing")?        { style.letter_spacing = Some(ls); }
+    if let Some(td) = opt::<String>(data, &prefix, "text_decoration")?    { style.text_decoration = Some(TextDecoration::parse(&td)); }
+    if let Some(fs) = opt::<String>(data, &prefix, "font_style")?         { style.font_style = Some(FontStyle::parse(&fs)); }
 
     if let Some(v) = opt::<String>(data, &prefix, "visibility")? { style.visibility_hidden = v == "hidden"; }
     if let Some(d) = opt::<String>(data, &prefix, "display")?    { style.display_none = d == "none"; }

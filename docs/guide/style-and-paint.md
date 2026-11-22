@@ -23,6 +23,9 @@ Every drawable element takes a `style` object. Style controls how an element is 
 | `font_weight` | `normal`, `bold` or a number such as 600 | unset |
 | `text_anchor` | `start`, `middle` or `end` | `start` |
 | `dominant_baseline` | string passed to SVG | unset |
+| `letter_spacing` | number | unset |
+| `text_decoration` | a list of `underline`, `overline` and `line-through`, or `none` | unset |
+| `font_style` | `normal`, `italic` or `oblique` | unset |
 | `visibility` | `"hidden"` hides the element | visible |
 | `display` | `"none"` removes the element | shown |
 
@@ -51,7 +54,7 @@ Hex values can be written without quotes as DixScript literals (`#4a9eff`), or a
 
 ## Opacity
 
-`opacity` applies to the whole element, fill and stroke together. `fill_opacity` and `stroke_opacity` scale one channel each, in the SVG output and in the CPU and GPU renderers, and they multiply with `opacity`. A value outside 0 to 1 counts as the nearest end. The compiled binary form stores both, and `dominant_baseline`, from version 3 on, so a scene that sets one is written as version 3 (see [Binary format](binary-format.md#versions)). An alpha written into the color itself (`#ff880080`) also works everywhere, and it is the choice for a binary that has to open in a version 2 reader.
+`opacity` applies to the whole element, fill and stroke together. `fill_opacity` and `stroke_opacity` scale one channel each, in the SVG output and in the CPU and GPU renderers, and they multiply with `opacity`. A value outside 0 to 1 counts as the nearest end. The compiled binary form stores both, and `dominant_baseline`, `letter_spacing`, `text_decoration` and `font_style`, from version 3 on, so a scene that sets one is written as version 3 (see [Binary format](binary-format.md#versions)). An alpha written into the color itself (`#ff880080`) also works everywhere, and it is the choice for a binary that has to open in a version 2 reader.
 
 ## Where each renderer stands
 

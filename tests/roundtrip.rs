@@ -876,6 +876,33 @@ fn roundtrip_fill_opacity_stroke_opacity_and_dominant_baseline() {
     assert!(svg.contains("dominant-baseline=\"middle\""), "{svg}");
 }
 
+const TEXT_STYLE_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 100, background = #ffffff }
+  elements::
+    { type = "text", x = 10, y = 40, content = "Spaced",
+      style = { fill = #000000, font_size = 24, letter_spacing = 3, text_decoration = "underline",
+                font_style = "italic", stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 10, y = 80, content = "Struck",
+      style = { fill = #000000, font_size = 24, text_decoration = "overline line-through",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
+"#;
+
+#[test]
+fn roundtrip_letter_spacing_text_decoration_and_font_style() {
+    check_roundtrip("text_style_v3", TEXT_STYLE_SOURCE);
+    let scene = parse_scene(TEXT_STYLE_SOURCE).unwrap();
+    let data = compile(&scene, true).unwrap();
+    assert_eq!(data[4], 3, "the text style fields need wire version 3");
+    let svg = render(&decode(&data).unwrap());
+    assert!(svg.contains("letter-spacing=\"3\""), "{svg}");
+    assert!(svg.contains("text-decoration=\"underline\""), "{svg}");
+    assert!(svg.contains("font-style=\"italic\""), "{svg}");
+    assert!(svg.contains("text-decoration=\"overline line-through\""), "{svg}");
+}
+
 #[test]
 fn a_scene_without_v3_fields_is_still_written_as_version_2() {
     let plain = parse_scene(r#"

@@ -2,8 +2,8 @@
 //! Low-level binary read helpers. All read_ functions advance a &mut usize cursor.
 
 use std::io;
-use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_STROKE_OPACITY, UNSET_BYTE, UNSET_U16};
-use msx_ast::{Color, FillRule, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, Transform};
+use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_FONT_STYLE, EXT_LETTER_SPACING, EXT_STROKE_OPACITY, EXT_TEXT_DECORATION, UNSET_BYTE, UNSET_U16};
+use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, TextDecoration, Transform};
 use msx_ast::transform::{
     Matrix2D, TRANSFORM_MATRIX, TRANSFORM_MULTIPLE, TRANSFORM_NONE, TRANSFORM_ROTATE,
     TRANSFORM_SCALE, TRANSFORM_SKEW_X, TRANSFORM_SKEW_Y, TRANSFORM_TRANSLATE,
@@ -213,6 +213,9 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
                 let idx = read_u16(data, cursor)?;
                 s.dominant_baseline = Some(lookup_string(pool, idx)?.to_string());
             }
+            if present & EXT_LETTER_SPACING  != 0 { s.letter_spacing  = Some(read_f32(data, cursor)?); }
+            if present & EXT_TEXT_DECORATION != 0 { s.text_decoration = Some(TextDecoration::from_byte(read_u8(data, cursor)?)); }
+            if present & EXT_FONT_STYLE      != 0 { s.font_style      = Some(FontStyle::from_byte(read_u8(data, cursor)?)); }
         }
     }
     Ok(s)
@@ -303,6 +306,37 @@ mod tests {
         assert_eq!(back.stroke_opacity, Some(0.25));
         assert_eq!(back.dominant_baseline.as_deref(), Some("central"));
         assert!(back.display_none && !back.visibility_hidden);
+    }
+
+    #[test]
+    fn text_style_extension_roundtrip() {
+        let mut style = Style::empty();
+        style.dominant_baseline = Some("hanging".to_string());
+        style.letter_spacing    = Some(1.5);
+        style.text_decoration   = Some(TextDecoration::parse("underline line-through"));
+        style.font_style        = Some(FontStyle::Oblique);
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+        assert_eq!(cursor, buf.len());
+        assert_eq!(back.dominant_baseline.as_deref(), Some("hanging"));
+        assert_eq!(back.letter_spacing, Some(1.5));
+        assert_eq!(back.text_decoration, style.text_decoration);
+        assert_eq!(back.font_style, Some(FontStyle::Oblique));
+    }
+
+    #[test]
+    fn a_decoration_set_to_none_is_kept_as_set() {
+        let mut style = Style::empty();
+        style.text_decoration = Some(TextDecoration::default());
+        let mut buf  = Vec::new();
+        let mut pool = Vec::new();
+        write_style(&mut buf, &style, &mut pool);
+        let mut cursor = 0;
+        let back = read_style(&buf, &mut cursor, &pool).unwrap();
+        assert_eq!(back.text_decoration, Some(TextDecoration::default()));
     }
 
     #[test]

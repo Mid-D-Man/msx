@@ -28,5 +28,5 @@ pub use path::PathCommand;
 pub use primitives::{BoundingBox, Point, ViewBox, fmt_f64};
 pub use sdf::{SdfNode, SdfTree};
 pub use splat::GaussianSplat;
-pub use style::{FillRule, FontWeight, LineCap, LineJoin, Style, TextAnchor};
+pub use style::{FillRule, FontStyle, FontWeight, LineCap, LineJoin, Style, TextAnchor, TextDecoration};
 pub use transform::{Matrix2D, Transform};

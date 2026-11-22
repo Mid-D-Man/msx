@@ -1,6 +1,6 @@
 // core/msx-svg-import/src/tests.rs
 use super::*;
-use msx_ast::{Def, FontWeight, TextAnchor};
+use msx_ast::{Def, FontStyle, FontWeight, TextAnchor, TextDecoration};
 
 fn imp(svg: &str) -> Imported {
     import_svg(svg).unwrap_or_else(|e| panic!("import failed: {e}"))
@@ -896,12 +896,54 @@ fn root_transform_origin_percentages_use_the_viewport() {
 
 #[test]
 fn ignored_text_and_stroke_properties_are_reported() {
-    let i = imp(&doc(r#"<text x="0" y="10" style="text-decoration: underline; letter-spacing: 2px" font-style="italic">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
-    for key in ["text-decoration", "letter-spacing", "font-style", "vector-effect"] {
+    let i = imp(&doc(r#"<text x="0" y="10" style="word-spacing: 4px; writing-mode: tb">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
+    for key in ["word-spacing", "writing-mode", "vector-effect"] {
         assert!(has_warning(&i, key), "no warning for {key}: {:?}", i.warnings);
     }
-    let plain = imp(&doc(r#"<text x="0" y="10" style="text-decoration: none; letter-spacing: normal" font-style="normal">hi</text>"#));
+    let plain = imp(&doc(r#"<text x="0" y="10" style="word-spacing: normal; writing-mode: horizontal-tb">hi</text>"#));
     assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
+}
+
+#[test]
+fn letter_spacing_decoration_and_font_style_are_carried_on_text() {
+    let i = imp(&doc(r#"<text x="0" y="10" font-size="10" style="text-decoration: underline line-through; letter-spacing: 0.5em" font-style="italic">hi</text>"#));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = text(&i.scene.elements[0]);
+    assert_eq!(t.style.letter_spacing, Some(5.0));
+    assert_eq!(t.style.text_decoration, Some(TextDecoration { underline: true, overline: false, line_through: true }));
+    assert_eq!(t.style.font_style, Some(FontStyle::Italic));
+    let plain = imp(&doc(r#"<text x="0" y="10" style="text-decoration: none; letter-spacing: normal" font-style="normal">hi</text>"#));
+    let p = text(&plain.scene.elements[0]);
+    assert_eq!((p.style.letter_spacing, p.style.text_decoration, p.style.font_style), (None, None, None));
+}
+
+#[test]
+fn text_properties_inherit_from_groups_and_a_none_keeps_the_ancestor_line() {
+    let i = imp(&doc(r#"<g letter-spacing="2" font-style="oblique" text-decoration="underline"><text x="0" y="10" text-decoration="none">a</text></g>"#));
+    let t = text(&i.scene.elements[0]);
+    assert_eq!(t.style.letter_spacing, Some(2.0));
+    assert_eq!(t.style.font_style, Some(FontStyle::Oblique));
+    assert_eq!(t.style.text_decoration.map(|d| d.underline), Some(true));
+}
+
+#[test]
+fn the_font_shorthand_sets_style_weight_size_and_family() {
+    let i = imp(&doc(r#"<text x="0" y="10" style="font: italic bold 20px/1.5 Georgia, serif">hi</text>"#));
+    let t = text(&i.scene.elements[0]);
+    assert_eq!(t.style.font_style, Some(FontStyle::Italic));
+    assert_eq!(t.style.font_weight, Some(FontWeight::Bold));
+    assert_eq!(t.style.font_size, Some(20.0));
+    assert_eq!(t.style.font_family.as_deref(), Some("Georgia, serif"));
+    let longhand = imp(&doc(r#"<text x="0" y="10" style="font: 12px Arial; font-size: 30px">hi</text>"#));
+    assert_eq!(text(&longhand.scene.elements[0]).style.font_size, Some(30.0));
+    let broken = imp(&doc(r#"<text x="0" y="10" font-size="14" style="font: caption">hi</text>"#));
+    assert_eq!(text(&broken.scene.elements[0]).style.font_size, Some(14.0));
+}
+
+#[test]
+fn spans_that_differ_in_decoration_or_spacing_are_reported() {
+    let i = imp(&doc(r#"<text x="0" y="10">a<tspan text-decoration="underline">b</tspan></text>"#));
+    assert!(has_warning(&i, "differently styled spans"), "{:?}", i.warnings);
 }
 
 #[test]

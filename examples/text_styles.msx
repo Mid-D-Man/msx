@@ -1,0 +1,28 @@
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 400, background = #14161f }
+  elements::
+    { type = "text", x = 320, y = 50, content = "Text Styles",
+      style = { fill = #ffffff, font_size = 40, font_weight = "bold", text_anchor = "middle" } }
+    { type = "text", x = 30, y = 110, content = "letter_spacing 0",
+      style = { fill = #4facfe, font_size = 22 } }
+    { type = "text", x = 30, y = 145, content = "letter_spacing 3",
+      style = { fill = #4facfe, font_size = 22, letter_spacing = 3 } }
+    { type = "text", x = 30, y = 180, content = "letter_spacing 8",
+      style = { fill = #4facfe, font_size = 22, letter_spacing = 8 } }
+    { type = "text", x = 360, y = 110, content = "underline",
+      style = { fill = #ffd200, font_size = 22, text_decoration = "underline" } }
+    { type = "text", x = 360, y = 145, content = "overline",
+      style = { fill = #ffd200, font_size = 22, text_decoration = "overline" } }
+    { type = "text", x = 360, y = 180, content = "line-through",
+      style = { fill = #ffd200, font_size = 22, text_decoration = "line-through" } }
+    { type = "text", x = 30, y = 250, content = "italic, oblique and bold italic",
+      style = { fill = #ffffff, font_size = 22, font_style = "italic" } }
+    { type = "text", x = 30, y = 285, content = "The slant is a synthesized 12 degrees",
+      style = { fill = #e94560, font_size = 22, font_style = "oblique" } }
+    { type = "text", x = 30, y = 320, content = "Bold and italic together",
+      style = { fill = #f7971e, font_size = 22, font_weight = "bold", font_style = "italic" } }
+    { type = "text", x = 320, y = 375, content = "all three at once",
+      style = { fill = #43e97b, font_size = 24, letter_spacing = 4, font_style = "italic",
+                text_decoration = "underline", text_anchor = "middle" } }
+)

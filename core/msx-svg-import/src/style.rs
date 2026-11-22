@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use msx_ast::{Color, FillRule, FontWeight, LineCap, LineJoin, TextAnchor};
+use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, TextAnchor, TextDecoration};
 
 use crate::parse::{parse_color, parse_length, parse_number};
 
@@ -62,6 +62,12 @@ pub struct Inh {
     pub font_weight: Option<FontWeight>,
     pub text_anchor: Option<TextAnchor>,
     pub dominant_baseline: Option<String>,
+    /// `letter-spacing` in user units, zero for `normal`.
+    pub letter_spacing: f64,
+    /// The decoration lines of the element and its ancestors. A `none` does not
+    /// remove a line an ancestor set, as in CSS.
+    pub text_decoration: TextDecoration,
+    pub font_style: Option<FontStyle>,
     pub hidden: bool,
     pub color: Color,
     /// `paint-order` puts the stroke before the fill.
@@ -95,6 +101,9 @@ impl Default for Inh {
             font_weight: None,
             text_anchor: None,
             dominant_baseline: None,
+            letter_spacing: 0.0,
+            text_decoration: TextDecoration::default(),
+            font_style: None,
             hidden: false,
             color: Color::BLACK,
             stroke_first: false,
@@ -166,6 +175,44 @@ fn parse_font_size(v: &str, parent: f64, _vp: (f64, f64)) -> Option<f64> {
     (px >= 0.0).then_some(px)
 }
 
+/// `normal`, `italic` or `oblique` with an optional angle.
+fn parse_font_style(v: &str) -> Option<FontStyle> {
+    match v.split_whitespace().next()? {
+        "normal" | "italic" | "oblique" => Some(FontStyle::parse(v)),
+        _ => None,
+    }
+}
+
+/// The `font` shorthand: style and weight words, a size, then the family. A value
+/// with no size is ignored, and the words it leaves out go back to their initial
+/// values.
+fn apply_font_shorthand(inh: &mut Inh, v: &str, vp: (f64, f64)) {
+    let words: Vec<&str> = v.split_whitespace().collect();
+    let (mut style, mut weight) = (None, None);
+    for (i, w) in words.iter().enumerate() {
+        let lw = w.to_ascii_lowercase();
+        match lw.as_str() {
+            "normal" | "small-caps" => {}
+            "italic" | "oblique" => style = Some(FontStyle::parse(&lw)),
+            "bold" | "bolder" | "lighter" => weight = parse_weight(&lw),
+            _ if lw.len() == 3 && lw.bytes().all(|b| b.is_ascii_digit()) => weight = parse_weight(&lw),
+            _ => {
+                let size = lw.split('/').next().unwrap_or("");
+                if let Some(px) = parse_font_size(size, inh.font_size, vp) {
+                    inh.font_size = px;
+                    inh.font_style = style;
+                    inh.font_weight = weight;
+                    let family = words[i + 1..].join(" ");
+                    if !family.is_empty() {
+                        inh.font_family = Some(family);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
 fn parse_weight(v: &str) -> Option<FontWeight> {
     match v.trim() {
         "normal" => Some(FontWeight::Normal),
@@ -224,6 +271,10 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
     if let Some(c) = get("color").and_then(parse_color) {
         inh.color = c;
     }
+    // The shorthand first, so a longhand on the same element wins.
+    if let Some(v) = get("font") {
+        apply_font_shorthand(inh, v, vp);
+    }
     if let Some(px) = get("font-size").and_then(|v| parse_font_size(v, inh.font_size, vp)) {
         inh.font_size = px;
     }
@@ -232,6 +283,25 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
     }
     if let Some(w) = get("font-weight").and_then(parse_weight) {
         inh.font_weight = Some(w);
+    }
+    if let Some(f) = get("font-style").and_then(parse_font_style) {
+        inh.font_style = Some(f);
+    }
+    if let Some(v) = get("letter-spacing") {
+        if v == "normal" {
+            inh.letter_spacing = 0.0;
+        } else if let Some(l) = parse_length(v) {
+            inh.letter_spacing = l.to_px(inh.font_size, 0.0);
+        }
+    }
+    if let Some(v) = get("text-decoration") {
+        let d = TextDecoration::parse(v);
+        let cur = inh.text_decoration;
+        inh.text_decoration = TextDecoration {
+            underline: cur.underline || d.underline,
+            overline: cur.overline || d.overline,
+            line_through: cur.line_through || d.line_through,
+        };
     }
     match get("text-anchor") {
         Some("start") => inh.text_anchor = Some(TextAnchor::Start),

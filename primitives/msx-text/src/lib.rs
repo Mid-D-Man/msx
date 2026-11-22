@@ -6,13 +6,17 @@
 
 use std::sync::OnceLock;
 
-use msx_ast::{FontWeight, Path, PathCommand, Point, Style, Text, TextAnchor};
+use msx_ast::{FontStyle, FontWeight, Path, PathCommand, Point, Style, Text, TextAnchor, TextDecoration};
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 static REGULAR_BYTES: &[u8] = include_bytes!("../fonts/DejaVuSans-subset.ttf");
 static BOLD_BYTES: &[u8] = include_bytes!("../fonts/DejaVuSans-Bold-subset.ttf");
 
 const DEFAULT_FONT_SIZE: f64 = 16.0;
+
+/// Horizontal shift per unit of height for `italic` and `oblique`, the tangent
+/// of a 12 degree slant.
+const SLANT: f64 = 0.2126;
 
 struct Faces {
     regular: Face<'static>,
@@ -49,7 +53,9 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     let scale = size / f64::from(face.units_per_em());
 
     let glyphs: Vec<GlyphId> = text.content.chars().map(|c| glyph_for(face, c)).collect();
-    let advance_units = total_advance(face, &glyphs);
+    // Letter spacing follows every glyph, the last one included, as in SVG.
+    let spacing = text.style.letter_spacing.unwrap_or(0.0) / scale;
+    let advance_units = total_advance(face, &glyphs) + spacing * glyphs.len() as f64;
     let width = advance_units * scale;
 
     let ascender = f64::from(face.ascender());
@@ -63,7 +69,8 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
         };
     let baseline_y = text.y + baseline_shift(face, text.style.dominant_baseline.as_deref(), scale);
 
-    let mut sink = Sink { commands: Vec::new(), ox: x0, oy: baseline_y, scale, open: false };
+    let slant = if text.style.font_style.is_some_and(FontStyle::is_slanted) { SLANT } else { 0.0 };
+    let mut sink = Sink { commands: Vec::new(), ox: x0, oy: baseline_y, scale, slant, open: false };
     let mut pen = 0.0f64;
     for (i, &gid) in glyphs.iter().enumerate() {
         sink.ox = x0 + pen * scale;
@@ -72,6 +79,13 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
         pen += f64::from(face.glyph_hor_advance(gid).unwrap_or(0));
         if let Some(&next) = glyphs.get(i + 1) {
             pen += kerning(face, gid, next);
+        }
+        pen += spacing;
+    }
+    if let Some(d) = text.style.text_decoration {
+        for (top_units, thickness_units) in decoration_bars(face, d) {
+            let (y0, y1) = (baseline_y - top_units * scale, baseline_y - (top_units - thickness_units) * scale);
+            sink.rect(x0, y0, x0 + width, y1);
         }
     }
 
@@ -151,6 +165,28 @@ fn kerning(face: &Face<'_>, left: GlyphId, right: GlyphId) -> f64 {
     total
 }
 
+/// The decoration lines as `(top, thickness)` in font units, y up from the
+/// baseline: underline, overline, then line-through. A face without the
+/// metrics gets proportions of the em.
+fn decoration_bars(face: &Face<'_>, d: TextDecoration) -> Vec<(f64, f64)> {
+    let em = f64::from(face.units_per_em());
+    let line = |m: Option<ttf_parser::LineMetrics>, fallback_top: f64| {
+        m.map(|m| (f64::from(m.position), f64::from(m.thickness).max(1.0))).unwrap_or((fallback_top, em * 0.05))
+    };
+    let under = line(face.underline_metrics(), -em * 0.1);
+    let mut bars = Vec::new();
+    if d.underline {
+        bars.push(under);
+    }
+    if d.overline {
+        bars.push((f64::from(face.ascender()), under.1));
+    }
+    if d.line_through {
+        bars.push(line(face.strikeout_metrics(), em * 0.3));
+    }
+    bars
+}
+
 /// Offset added to the text `y` so the requested baseline lands on it.
 fn baseline_shift(face: &Face<'_>, baseline: Option<&str>, scale: f64) -> f64 {
     let asc = f64::from(face.ascender());
@@ -174,12 +210,25 @@ struct Sink {
     ox: f64,
     oy: f64,
     scale: f64,
+    /// Horizontal shift per unit of glyph height, zero for upright text.
+    slant: f64,
     open: bool,
 }
 
 impl Sink {
     fn pt(&self, x: f32, y: f32) -> Point {
-        Point::new(self.ox + f64::from(x) * self.scale, self.oy - f64::from(y) * self.scale)
+        Point::new(self.ox + (f64::from(x) + f64::from(y) * self.slant) * self.scale, self.oy - f64::from(y) * self.scale)
+    }
+
+    /// A closed box in user space, wound like the outer contours of a glyph so
+    /// that it joins the glyphs under the non-zero rule.
+    fn rect(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        self.finish_contour();
+        self.commands.push(PathCommand::MoveTo(Point::new(x0, y0)));
+        self.commands.push(PathCommand::LineTo(Point::new(x1, y0)));
+        self.commands.push(PathCommand::LineTo(Point::new(x1, y1)));
+        self.commands.push(PathCommand::LineTo(Point::new(x0, y1)));
+        self.commands.push(PathCommand::ClosePath);
     }
 
     fn finish_contour(&mut self) {
@@ -379,6 +428,123 @@ mod tests {
         assert_eq!(p.style.fill_rule, Some(msx_ast::FillRule::NonZero));
         assert!(p.transform.is_some());
         assert_eq!(p.id.as_deref(), Some("t1"));
+    }
+
+    fn bars(style: Style) -> Vec<PathCommand> {
+        let base = layout(&text("H", plain())).unwrap().commands.len();
+        layout(&text("H", style)).unwrap().commands[base..].to_vec()
+    }
+
+    /// Shoelace sum of the first closed subpath made of straight lines.
+    fn signed_area(cmds: &[PathCommand]) -> f64 {
+        let mut pts: Vec<(f64, f64)> = Vec::new();
+        for c in cmds {
+            match c {
+                PathCommand::MoveTo(p) | PathCommand::LineTo(p) => pts.push((p.x, p.y)),
+                PathCommand::ClosePath => break,
+                _ => {}
+            }
+        }
+        (0..pts.len()).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); a.0 * b.1 - b.0 * a.1 }).sum::<f64>() / 2.0
+    }
+
+    #[test]
+    fn letter_spacing_follows_every_glyph() {
+        let base = layout(&text("AB", plain())).unwrap().bounds.2;
+        let mut s = plain();
+        s.letter_spacing = Some(3.0);
+        let spaced = layout(&text("AB", s)).unwrap().bounds.2;
+        assert!((spaced - (base + 6.0)).abs() < 1e-9, "{spaced} vs {base}");
+    }
+
+    #[test]
+    fn letter_spacing_moves_the_second_glyph() {
+        let right = |ls: f64| {
+            let mut s = plain();
+            s.letter_spacing = Some(ls);
+            let l = layout(&text("II", s)).unwrap();
+            let mut hi = f64::MIN;
+            for c in &l.commands {
+                if let PathCommand::MoveTo(p) | PathCommand::LineTo(p) = c { hi = hi.max(p.x); }
+            }
+            hi
+        };
+        assert!((right(5.0) - right(0.0) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn underline_adds_one_box_below_the_baseline() {
+        let mut s = plain();
+        s.text_decoration = Some(TextDecoration::parse("underline"));
+        let b = bars(s);
+        assert_eq!(b.len(), 5);
+        let (top, bottom) = y_extent(&b);
+        assert!(top > 50.0 && bottom > top, "top {top} bottom {bottom}");
+    }
+
+    #[test]
+    fn overline_and_line_through_sit_above_the_baseline() {
+        let mut s = plain();
+        s.text_decoration = Some(TextDecoration::parse("overline line-through"));
+        let b = bars(s);
+        assert_eq!(b.len(), 10);
+        let (top, bottom) = y_extent(&b);
+        assert!(bottom < 50.0, "bottom {bottom}");
+        let plain_top = y_extent(&layout(&text("H", plain())).unwrap().commands).0;
+        assert!(top < plain_top, "overline {top} should rise above the glyph {plain_top}");
+    }
+
+    #[test]
+    fn decoration_spans_the_advance_width() {
+        let mut s = plain();
+        s.text_decoration = Some(TextDecoration::parse("underline"));
+        let l = layout(&text("H", s)).unwrap();
+        let b = &l.commands[l.commands.len() - 5..];
+        let (PathCommand::MoveTo(a), PathCommand::LineTo(c)) = (&b[0], &b[1]) else { panic!("box starts with a line") };
+        assert!((a.x - l.bounds.0).abs() < 1e-9 && ((c.x - a.x) - l.bounds.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decoration_box_is_wound_like_a_glyph_outline() {
+        let outer = signed_area(&layout(&text("H", plain())).unwrap().commands);
+        let mut s = plain();
+        s.text_decoration = Some(TextDecoration::parse("underline"));
+        let bar = signed_area(&bars(s));
+        assert!(outer * bar > 0.0, "glyph {outer} bar {bar}: opposite winding would cut holes under non-zero");
+    }
+
+    #[test]
+    fn no_decoration_words_add_nothing() {
+        let mut s = plain();
+        s.text_decoration = Some(TextDecoration::default());
+        assert!(bars(s).is_empty());
+    }
+
+    #[test]
+    fn italic_slants_the_top_to_the_right() {
+        let right = |style: Option<FontStyle>| {
+            let mut s = plain();
+            s.font_style = style;
+            let l = layout(&text("H", s)).unwrap();
+            let mut hi = f64::MIN;
+            for c in &l.commands {
+                if let PathCommand::MoveTo(p) | PathCommand::LineTo(p) = c { hi = hi.max(p.x); }
+            }
+            hi
+        };
+        assert!(right(Some(FontStyle::Italic)) > right(None) + 2.0);
+        assert!((right(Some(FontStyle::Oblique)) - right(Some(FontStyle::Italic))).abs() < 1e-9);
+        assert!((right(Some(FontStyle::Normal)) - right(None)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn italic_keeps_the_baseline_and_the_box() {
+        let up = layout(&text("H", plain())).unwrap();
+        let mut s = plain();
+        s.font_style = Some(FontStyle::Italic);
+        let it = layout(&text("H", s)).unwrap();
+        assert_eq!(it.bounds, up.bounds);
+        assert!((y_extent(&it.commands).1 - 50.0).abs() < 0.01);
     }
 
     #[test]
