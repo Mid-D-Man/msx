@@ -940,10 +940,99 @@ fn the_font_shorthand_sets_style_weight_size_and_family() {
     assert_eq!(text(&broken.scene.elements[0]).style.font_size, Some(14.0));
 }
 
+/// Advance width of `s` at `size`, bold or not, as the importer measures it.
+fn width(s: &str, size: f64, bold: bool) -> f64 {
+    let font_weight = bold.then_some(FontWeight::Bold);
+    let style = msx_ast::Style { font_size: Some(size), font_weight, ..msx_ast::Style::default() };
+    msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: s.to_string(), id: None, transform: None, style })
+}
+
+fn texts(i: &Imported) -> Vec<&Text> {
+    i.scene.elements.iter().map(text).collect()
+}
+
 #[test]
-fn spans_that_differ_in_decoration_or_spacing_are_reported() {
+fn differently_styled_spans_become_pieces_placed_one_after_another() {
+    let i = imp(&doc(r#"<text x="10" y="50" font-size="20">Hello <tspan font-weight="bold">world</tspan>!</text>"#));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = texts(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["Hello", "world", "!"]);
+    let w1 = width("Hello ", 20.0, false);
+    let w2 = width("world", 20.0, true);
+    assert!((t[0].x - 10.0).abs() < 1e-9);
+    assert!((t[1].x - (10.0 + w1)).abs() < 1e-9, "{} vs {}", t[1].x, 10.0 + w1);
+    assert!((t[2].x - (10.0 + w1 + w2)).abs() < 1e-9);
+    assert_eq!(t[1].style.font_weight, Some(FontWeight::Bold));
+    assert!(t.iter().all(|t| t.y == 50.0));
+}
+
+#[test]
+fn neighbouring_spans_with_one_style_stay_one_text() {
+    let i = imp(&doc(r#"<text x="0" y="10">a<tspan>b</tspan>c</text>"#));
+    assert_eq!(texts(&i).iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["abc"]);
+}
+
+#[test]
+fn a_chunk_is_anchored_as_a_whole_and_its_pieces_start_at_their_own_x() {
+    let i = imp(&doc(r#"<text x="100" y="10" font-size="20" text-anchor="middle">ab<tspan fill="red">cd</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    let (w1, w2) = (width("ab", 20.0, false), width("cd", 20.0, false));
+    assert!((t[0].x - (100.0 - (w1 + w2) / 2.0)).abs() < 1e-9);
+    assert!((t[1].x - (t[0].x + w1)).abs() < 1e-9);
+    assert!(t.iter().all(|t| t.style.text_anchor.is_none() || t.style.text_anchor == Some(TextAnchor::Start)));
+}
+
+#[test]
+fn a_lone_piece_keeps_its_anchor() {
+    let i = imp(&doc(r#"<text x="100" y="10" text-anchor="middle">hello</text>"#));
+    let t = texts(&i);
+    assert_eq!((t.len(), t[0].x), (1, 100.0));
+    assert_eq!(t[0].style.text_anchor, Some(TextAnchor::Middle));
+}
+
+#[test]
+fn white_space_between_spans_is_one_space_and_not_more() {
+    let i = imp(&doc("<text x=\"0\" y=\"10\" font-size=\"16\">\n  <tspan>A</tspan>\n    <tspan fill=\"red\">B</tspan>\n</text>"));
+    let t = texts(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert!((t[1].x - width("A ", 16.0, false)).abs() < 1e-9, "{}", t[1].x);
+}
+
+#[test]
+fn dx_moves_the_pen_and_dy_stays_for_what_follows() {
+    let i = imp(&doc(r#"<text x="0" y="10" font-size="16">a<tspan dx="5" dy="4">b</tspan>c</text>"#));
+    let t = texts(&i);
+    // "b" and "c" share a style and the shifted baseline, so they are one text.
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["a", "bc"]);
+    assert!((t[1].x - (width("a", 16.0, false) + 5.0)).abs() < 1e-9);
+    assert_eq!((t[0].y, t[1].y), (10.0, 14.0));
+}
+
+#[test]
+fn a_tspan_with_only_y_starts_a_chunk_where_the_pen_stopped() {
+    let i = imp(&doc(r#"<text x="0" y="10" font-size="16">ab<tspan y="30">c</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    assert!((t[1].x - width("ab", 16.0, false)).abs() < 1e-9, "{}", t[1].x);
+    assert_eq!(t[1].y, 30.0);
+}
+
+#[test]
+fn a_tspan_with_x_starts_a_new_chunk_at_that_x() {
+    let i = imp(&doc(r#"<text x="0" y="10" text-anchor="end">ab<tspan x="80" y="30">cd</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!((t[1].x, t[1].y), (80.0, 30.0));
+    assert_eq!(t[1].style.text_anchor, Some(TextAnchor::End));
+}
+
+#[test]
+fn decoration_on_one_span_reaches_only_that_span() {
     let i = imp(&doc(r#"<text x="0" y="10">a<tspan text-decoration="underline">b</tspan></text>"#));
-    assert!(has_warning(&i, "differently styled spans"), "{:?}", i.warnings);
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    assert_eq!((t[0].style.text_decoration, t[1].style.text_decoration.map(|d| d.underline)), (None, Some(true)));
 }
 
 #[test]

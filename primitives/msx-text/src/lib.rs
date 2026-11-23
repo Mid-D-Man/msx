@@ -42,6 +42,19 @@ pub struct TextLayout {
     pub bounds: (f64, f64, f64, f64),
 }
 
+/// Advance width of the content in user units, white space and letter spacing
+/// included. The anchor does not move it and kerning inside the content counts.
+pub fn advance_width(text: &Text) -> f64 {
+    if text.content.is_empty() {
+        return 0.0;
+    }
+    let face = pick_face(&text.style);
+    let scale = text.style.font_size.unwrap_or(DEFAULT_FONT_SIZE) / f64::from(face.units_per_em());
+    let glyphs: Vec<GlyphId> = text.content.chars().map(|c| glyph_for(face, c)).collect();
+    let spacing = text.style.letter_spacing.unwrap_or(0.0) / scale;
+    (total_advance(face, &glyphs) + spacing * glyphs.len() as f64) * scale
+}
+
 /// Lay out a text element. Returns `None` for empty or whitespace-only text.
 pub fn layout(text: &Text) -> Option<TextLayout> {
     if text.content.trim().is_empty() {
@@ -446,6 +459,25 @@ mod tests {
             }
         }
         (0..pts.len()).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); a.0 * b.1 - b.0 * a.1 }).sum::<f64>() / 2.0
+    }
+
+    #[test]
+    fn advance_width_matches_the_layout_box() {
+        for s in ["Hi", "Hello, world", "AV"] {
+            let t = text(s, plain());
+            assert!((advance_width(&t) - layout(&t).unwrap().bounds.2).abs() < 1e-9, "{s}");
+        }
+    }
+
+    #[test]
+    fn advance_width_counts_white_space_and_spacing() {
+        assert_eq!(advance_width(&text("", plain())), 0.0);
+        let space = advance_width(&text(" ", plain()));
+        assert!(space > 1.0, "a space has an advance: {space}");
+        assert!(layout(&text(" ", plain())).is_none());
+        let mut s = plain();
+        s.letter_spacing = Some(2.0);
+        assert!((advance_width(&text("  ", s)) - (2.0 * space + 4.0)).abs() < 1e-9);
     }
 
     #[test]

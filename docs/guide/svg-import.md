@@ -30,7 +30,11 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Animation.** SMIL animation of transforms, opacity, visibility and motion paths, and CSS animation, become MSX animation tracks, so an animated SVG plays in `msx animate`, in `msx-viewer` and on the converter page. See [Animation](#animation) below.
 - **Transforms.** The `transform` attribute and the CSS `transform` property, with angle and length units, and `transform-origin`.
 - **Conditions.** `switch` draws its first child that passes, and `systemLanguage` and `requiredExtensions` apply to any element. The language is English.
-- **Text.** Whitespace collapses. A `tspan` with its own position becomes its own text element, which gives multi-line text.
+- **Text.** Whitespace collapses across the whole chunk, and the space at both ends of it goes. A chunk starts at the `text` or at a `tspan` with `x` or `y`, and `text-anchor` moves a chunk as a whole.
+  - Neighbouring spans with one style stay one text element.
+  - Spans that differ in fill, stroke, size, weight, slant, spacing or decoration become one text element each. They are measured with the embedded font and placed one after another, each anchored at its start. A lone span keeps its anchor.
+  - `dx` moves the pen and `dy` shifts the baseline for the characters that follow. A `tspan` with only `y` starts a chunk where the pen stopped.
+  - Only the first value of an `x`, `y`, `dx` or `dy` list is read, `rotate` is ignored, and kerning does not cross a span boundary.
 - **Paths.** Path data is parsed leniently and written back normalized. A path with an error draws up to the error, and a path that does not start with a moveto is not drawn, as in SVG.
 
 ## Animation

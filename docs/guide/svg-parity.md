@@ -81,7 +81,7 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 
 | SVG feature | State | Notes |
 |---|---|---|
-| `text`, `tspan` with positions, anchor, size and weight | Native | A `tspan` with its own position becomes its own text element |
+| `text`, `tspan` with positions, `dx`, `dy`, anchor, size and weight | Native | Spans of different style are separate text elements placed one after another. Lists of per-glyph values, `rotate` and kerning across spans are open |
 | `font-family` | Not read | Text uses the embedded DejaVu Sans subset |
 | `font-style`, `text-decoration`, `letter-spacing` and the `font` shorthand | Native | Kept in the binary from version 3 on. A `none` does not remove a line an ancestor set. Italic is a synthesized slant |
 | `word-spacing`, `writing-mode` | Gap | Reported |

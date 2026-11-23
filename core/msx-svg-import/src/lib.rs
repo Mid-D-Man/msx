@@ -41,7 +41,8 @@ use std::fmt;
 
 use msx_ast::path::parse_d_partial;
 use msx_ast::{
-    BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, MaskType, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, Transform,
+    BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, MaskType, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, TextAnchor,
+    Transform,
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
@@ -319,12 +320,31 @@ enum Shape {
     Path { commands: Vec<PathCommand> },
 }
 
-/// One run of text that shares a position and a style.
-struct Run {
-    x: f64,
-    y: f64,
+/// Characters of one text element that share a style, placed by the pen of
+/// their chunk.
+struct Piece {
     text: String,
     inh: Inh,
+    /// Baseline of the characters.
+    y: f64,
+    /// Shift of the pen before the characters, from `dx`.
+    dx: f64,
+}
+
+/// Pieces laid out from one anchor: the start of the `text`, or a `tspan` with
+/// `x` or `y`. `text-anchor` moves a whole chunk.
+struct Chunk {
+    /// Absolute start, or `None` to continue where the previous chunk ended.
+    x: Option<f64>,
+    pieces: Vec<Piece>,
+}
+
+/// Where the next characters go while the text is walked.
+struct Pen {
+    y: f64,
+    dx: f64,
+    /// A new chunk starts at the next characters, at this `x`.
+    start: Option<Option<f64>>,
 }
 
 /// How an element composites against what is already drawn.
@@ -1996,24 +2016,15 @@ impl<'a, 'i> Importer<'a, 'i> {
         parse_length(first).map(|l| l.to_px(font_size, base))
     }
 
-    fn collect_runs(&mut self, node: Node<'a, 'i>, inh: &Inh, pos: (f64, f64), runs: &mut Vec<Run>, new_run: &mut bool) {
+    fn collect_chunks(&mut self, node: Node<'a, 'i>, inh: &Inh, pen: &mut Pen, chunks: &mut Vec<Chunk>) {
         for child in node.children() {
             if child.is_text() {
-                let t = child.text().unwrap_or("");
-                if *new_run || runs.is_empty() {
-                    runs.push(Run { x: pos.0, y: pos.1, text: t.to_string(), inh: inh.clone() });
-                    *new_run = false;
-                } else if let Some(last) = runs.last_mut() {
-                    let differs = last.inh.fill != inh.fill
-                        || last.inh.font_size != inh.font_size
-                        || last.inh.font_weight != inh.font_weight
-                        || last.inh.font_style != inh.font_style
-                        || last.inh.letter_spacing != inh.letter_spacing
-                        || last.inh.text_decoration != inh.text_decoration;
-                    last.text.push_str(t);
-                    if differs {
-                        self.warn("text with differently styled spans on one line is imported with the style of the line start".to_string());
-                    }
+                if let Some(x) = pen.start.take() {
+                    chunks.push(Chunk { x, pieces: Vec::new() });
+                }
+                if let Some(chunk) = chunks.last_mut() {
+                    let text = child.text().unwrap_or("").to_string();
+                    chunk.pieces.push(Piece { text, inh: inh.clone(), y: pen.y, dx: std::mem::take(&mut pen.dx) });
                 }
             } else if child.is_element() && !is_foreign(&child) {
                 match child.tag_name().name() {
@@ -2028,20 +2039,28 @@ impl<'a, 'i> Importer<'a, 'i> {
                             continue;
                         }
                         let (fs, vp) = (cinh.font_size, self.vp);
-                        let positioned = child.has_attribute("x") || child.has_attribute("y");
-                        let mut cpos = pos;
-                        if let Some(x) = self.first_coord(child, "x", fs, vp.0) {
-                            cpos.0 = x;
+                        let (ax, ay) = (self.first_coord(child, "x", fs, vp.0), self.first_coord(child, "y", fs, vp.1));
+                        let dx = self.first_coord(child, "dx", fs, vp.0).unwrap_or(0.0);
+                        let dy = self.first_coord(child, "dy", fs, vp.1).unwrap_or(0.0);
+                        if ax.is_none() && ay.is_none() {
+                            pen.dx += dx;
+                        } else {
+                            if let Some(y) = ay {
+                                pen.y = y;
+                            }
+                            match ax {
+                                Some(x) => {
+                                    pen.dx = 0.0;
+                                    pen.start = Some(Some(x + dx));
+                                }
+                                None => {
+                                    pen.start = Some(None);
+                                    pen.dx += dx;
+                                }
+                            }
                         }
-                        if let Some(y) = self.first_coord(child, "y", fs, vp.1) {
-                            cpos.1 = y;
-                        }
-                        cpos.0 += self.first_coord(child, "dx", fs, vp.0).unwrap_or(0.0);
-                        cpos.1 += self.first_coord(child, "dy", fs, vp.1).unwrap_or(0.0);
-                        if positioned {
-                            *new_run = true;
-                        }
-                        self.collect_runs(child, &cinh, cpos, runs, new_run);
+                        pen.y += dy;
+                        self.collect_chunks(child, &cinh, pen, chunks);
                     }
                     "textPath" => {
                         let msg = format!("{} is not supported (text on a path); its text was skipped", Self::label(&child));
@@ -2053,6 +2072,17 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
     }
 
+    /// Advance width of characters in the style of `inh`.
+    fn piece_width(content: &str, inh: &Inh) -> f64 {
+        let style = Style {
+            font_size: Some(inh.font_size),
+            font_weight: inh.font_weight.clone(),
+            letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
+            ..Style::default()
+        };
+        msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: content.to_string(), id: None, transform: None, style })
+    }
+
     fn walk_text(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
         let Some((inh, props)) = self.begin(node, parent) else { return };
         if inh.hidden {
@@ -2062,26 +2092,125 @@ impl<'a, 'i> Importer<'a, 'i> {
         let x = self.first_coord(node, "x", fs, vp.0).unwrap_or(0.0) + self.first_coord(node, "dx", fs, vp.0).unwrap_or(0.0);
         let y = self.first_coord(node, "y", fs, vp.1).unwrap_or(0.0) + self.first_coord(node, "dy", fs, vp.1).unwrap_or(0.0);
 
-        let mut runs = Vec::new();
-        let mut new_run = true;
-        self.collect_runs(node, &inh, (x, y), &mut runs, &mut new_run);
+        let mut chunks = Vec::new();
+        let mut pen = Pen { y, dx: 0.0, start: Some(Some(x)) };
+        self.collect_chunks(node, &inh, &mut pen, &mut chunks);
 
         let transform = self.node_transform(node);
         let mut first = true;
-        for run in runs {
-            let content = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if content.is_empty() {
-                continue;
+        let mut pen_x = x;
+        for mut chunk in chunks {
+            collapse_white_space(&mut chunk);
+            merge_pieces(&mut chunk);
+            let start = chunk.x.unwrap_or(pen_x);
+            let widths: Vec<f64> = chunk.pieces.iter().map(|p| Self::piece_width(&p.text, &p.inh)).collect();
+            let total: f64 = chunk.pieces.iter().zip(&widths).map(|(p, w)| p.dx + w).sum();
+            let anchor = chunk.pieces.first().and_then(|p| p.inh.text_anchor).unwrap_or(TextAnchor::Start);
+            let shift = match anchor {
+                TextAnchor::Start => 0.0,
+                TextAnchor::Middle => -total / 2.0,
+                TextAnchor::End => -total,
+            };
+            pen_x = start + shift + total;
+            // One piece keeps its anchor. Several are placed one after another,
+            // each anchored at its start.
+            let several = chunk.pieces.len() > 1;
+            let mut offset = 0.0;
+            for (piece, width) in chunk.pieces.iter().zip(&widths) {
+                offset += piece.dx;
+                let lead = piece.text.len() - piece.text.trim_start().len();
+                let lead_width = if lead > 0 { Self::piece_width(&piece.text[..lead], &piece.inh) } else { 0.0 };
+                let (px, mut pinh) = if several { (start + shift + offset + lead_width, piece.inh.clone()) } else { (start + offset, piece.inh.clone()) };
+                if several {
+                    pinh.text_anchor = Some(TextAnchor::Start);
+                }
+                offset += width;
+                let content = piece.text.trim().to_string();
+                if content.is_empty() {
+                    continue;
+                }
+                let bbox = Self::text_bbox(px, piece.y, &content, &pinh);
+                let comp = self.composite(&node, &props, bbox);
+                let style = self.leaf_style(&pinh, &props, bbox, Kind::Text);
+                let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
+                first = false;
+                let element = Element::Text(Text { x: px, y: piece.y, content, id, transform: transform.clone(), style });
+                self.push_leaf(element, Vec::new(), &pinh, comp, out);
             }
-            let bbox = Self::text_bbox(run.x, run.y, &content, &run.inh);
-            let comp = self.composite(&node, &props, bbox);
-            let style = self.leaf_style(&run.inh, &props, bbox, Kind::Text);
-            let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
-            first = false;
-            let element = Element::Text(Text { x: run.x, y: run.y, content, id, transform: transform.clone(), style });
-            self.push_leaf(element, Vec::new(), &run.inh, comp, out);
         }
     }
+}
+
+/// Collapses runs of white space across the pieces of a chunk and drops the
+/// space at both ends of it, as the default `xml:space` does. A piece left
+/// empty hands its `dx` to the next one.
+fn collapse_white_space(chunk: &mut Chunk) {
+    let mut after_space = true;
+    for p in &mut chunk.pieces {
+        let mut out = String::with_capacity(p.text.len());
+        for c in p.text.chars() {
+            if c.is_whitespace() {
+                if !after_space {
+                    out.push(' ');
+                    after_space = true;
+                }
+            } else {
+                out.push(c);
+                after_space = false;
+            }
+        }
+        p.text = out;
+    }
+    if let Some(last) = chunk.pieces.iter_mut().rev().find(|p| !p.text.is_empty()) {
+        if last.text.ends_with(' ') {
+            last.text.pop();
+        }
+    }
+    let mut carry = 0.0;
+    let mut kept = Vec::with_capacity(chunk.pieces.len());
+    for mut p in chunk.pieces.drain(..) {
+        if p.text.is_empty() {
+            carry += p.dx;
+            continue;
+        }
+        p.dx += carry;
+        carry = 0.0;
+        kept.push(p);
+    }
+    chunk.pieces = kept;
+}
+
+/// Joins neighbouring pieces that share a style and a baseline.
+fn merge_pieces(chunk: &mut Chunk) {
+    let mut merged: Vec<Piece> = Vec::with_capacity(chunk.pieces.len());
+    for p in chunk.pieces.drain(..) {
+        match merged.last_mut() {
+            Some(last) if p.dx == 0.0 && last.y == p.y && same_text_style(&last.inh, &p.inh) => last.text.push_str(&p.text),
+            _ => merged.push(p),
+        }
+    }
+    chunk.pieces = merged;
+}
+
+/// Whether two stretches of text are drawn with the same style.
+fn same_text_style(a: &Inh, b: &Inh) -> bool {
+    a.fill == b.fill
+        && a.fill_opacity == b.fill_opacity
+        && a.stroke == b.stroke
+        && a.stroke_opacity == b.stroke_opacity
+        && a.stroke_width == b.stroke_width
+        && a.linecap == b.linecap
+        && a.linejoin == b.linejoin
+        && a.dasharray == b.dasharray
+        && a.stroke_first == b.stroke_first
+        && a.color == b.color
+        && a.font_size == b.font_size
+        && a.font_family == b.font_family
+        && a.font_weight == b.font_weight
+        && a.font_style == b.font_style
+        && a.letter_spacing == b.letter_spacing
+        && a.text_decoration == b.text_decoration
+        && a.dominant_baseline == b.dominant_baseline
 }
 
 #[cfg(test)]
