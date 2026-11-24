@@ -84,7 +84,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `text`, `tspan` with positions, `dx`, `dy`, anchor, size and weight | Native | Spans of different style are separate text elements placed one after another. Lists of per-glyph values, `rotate` and kerning across spans are open |
 | `font-family` | Not read | Text uses the embedded DejaVu Sans subset |
 | `font-style`, `text-decoration`, `letter-spacing` and the `font` shorthand | Native | Kept in the binary from version 3 on. A `none` does not remove a line an ancestor set. Italic is a synthesized slant |
-| `word-spacing`, `writing-mode` | Gap | Reported |
+| `writing-mode` | Native | Vertical text turns Latin glyphs a quarter turn clockwise. Upright CJK glyphs and `text-orientation` are open |
+| `word-spacing` | Gap | Reported |
 | Different styles inside one line | Gap | The style of the line start is used |
 | `textPath` | Gap | |
 | `dominant-baseline` | Native | Kept in the binary from version 3 on |

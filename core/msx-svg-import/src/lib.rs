@@ -42,7 +42,7 @@ use std::fmt;
 use msx_ast::path::parse_d_partial;
 use msx_ast::{
     BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, MaskType, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, TextAnchor,
-    Transform,
+    Transform, WritingMode,
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
@@ -321,29 +321,34 @@ enum Shape {
 }
 
 /// Characters of one text element that share a style, placed by the pen of
-/// their chunk.
+/// their chunk. Positions are in the text's own axes: `along` is the direction
+/// the text runs in (x for horizontal text, y for vertical) and `cross` is the
+/// other one (the baseline for horizontal text, the column for vertical).
 struct Piece {
     text: String,
     inh: Inh,
-    /// Baseline of the characters.
-    y: f64,
-    /// Shift of the pen before the characters, from `dx`.
-    dx: f64,
+    /// The baseline, or the column, of the characters.
+    cross: f64,
+    /// Shift of the pen along the text before the characters (`dx`, or `dy` in
+    /// vertical text).
+    shift: f64,
 }
 
 /// Pieces laid out from one anchor: the start of the `text`, or a `tspan` with
 /// `x` or `y`. `text-anchor` moves a whole chunk.
 struct Chunk {
-    /// Absolute start, or `None` to continue where the previous chunk ended.
-    x: Option<f64>,
+    /// Absolute start along the text, or `None` to continue where the previous
+    /// chunk ended.
+    start: Option<f64>,
     pieces: Vec<Piece>,
 }
 
 /// Where the next characters go while the text is walked.
 struct Pen {
-    y: f64,
-    dx: f64,
-    /// A new chunk starts at the next characters, at this `x`.
+    vertical: bool,
+    cross: f64,
+    shift: f64,
+    /// A new chunk starts at the next characters, at this position along.
     start: Option<Option<f64>>,
 }
 
@@ -805,9 +810,8 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         // Text and stroke properties the renderers have no slot for. Each is
         // reported only when it differs from the initial value.
-        let ignored: [(&str, &[&str]); 3] = [
+        let ignored: [(&str, &[&str]); 2] = [
             ("word-spacing", &["normal", "0", "0px", ""]),
-            ("writing-mode", &["horizontal-tb", "lr", "lr-tb", ""]),
             ("vector-effect", &["none", ""]),
         ];
         for (key, initial) in ignored {
@@ -1949,6 +1953,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             st.letter_spacing = (inh.letter_spacing != 0.0).then_some(inh.letter_spacing);
             st.text_decoration = (!inh.text_decoration.is_none()).then_some(inh.text_decoration);
             st.font_style = inh.font_style.filter(|f| f.is_slanted());
+            st.writing_mode = inh.writing_mode.filter(|m| *m == WritingMode::Vertical);
         }
         st
     }
@@ -2003,6 +2008,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             text_anchor: inh.text_anchor,
             dominant_baseline: inh.dominant_baseline.clone(),
             letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
+            writing_mode: inh.writing_mode.filter(|m| *m == WritingMode::Vertical),
             ..Style::default()
         };
         let probe = Text { x, y, content: content.to_string(), id: None, transform: None, style };
@@ -2019,12 +2025,12 @@ impl<'a, 'i> Importer<'a, 'i> {
     fn collect_chunks(&mut self, node: Node<'a, 'i>, inh: &Inh, pen: &mut Pen, chunks: &mut Vec<Chunk>) {
         for child in node.children() {
             if child.is_text() {
-                if let Some(x) = pen.start.take() {
-                    chunks.push(Chunk { x, pieces: Vec::new() });
+                if let Some(start) = pen.start.take() {
+                    chunks.push(Chunk { start, pieces: Vec::new() });
                 }
                 if let Some(chunk) = chunks.last_mut() {
                     let text = child.text().unwrap_or("").to_string();
-                    chunk.pieces.push(Piece { text, inh: inh.clone(), y: pen.y, dx: std::mem::take(&mut pen.dx) });
+                    chunk.pieces.push(Piece { text, inh: inh.clone(), cross: pen.cross, shift: std::mem::take(&mut pen.shift) });
                 }
             } else if child.is_element() && !is_foreign(&child) {
                 match child.tag_name().name() {
@@ -2035,31 +2041,36 @@ impl<'a, 'i> Importer<'a, 'i> {
                         }
                         let mut cinh = inh.clone();
                         apply(&mut cinh, &props, self.vp);
+                        // The writing mode belongs to the `text` element alone.
+                        cinh.writing_mode = inh.writing_mode;
                         if cinh.hidden {
                             continue;
                         }
-                        let (fs, vp) = (cinh.font_size, self.vp);
-                        let (ax, ay) = (self.first_coord(child, "x", fs, vp.0), self.first_coord(child, "y", fs, vp.1));
-                        let dx = self.first_coord(child, "dx", fs, vp.0).unwrap_or(0.0);
-                        let dy = self.first_coord(child, "dy", fs, vp.1).unwrap_or(0.0);
-                        if ax.is_none() && ay.is_none() {
-                            pen.dx += dx;
+                        let fs = cinh.font_size;
+                        let (along_axis, cross_axis, d_along, d_cross) = if pen.vertical { ("y", "x", "dy", "dx") } else { ("x", "y", "dx", "dy") };
+                        let (a_base, c_base) = if pen.vertical { (self.vp.1, self.vp.0) } else { (self.vp.0, self.vp.1) };
+                        let along = self.first_coord(child, along_axis, fs, a_base);
+                        let cross = self.first_coord(child, cross_axis, fs, c_base);
+                        let d_along = self.first_coord(child, d_along, fs, a_base).unwrap_or(0.0);
+                        let d_cross = self.first_coord(child, d_cross, fs, c_base).unwrap_or(0.0);
+                        if along.is_none() && cross.is_none() {
+                            pen.shift += d_along;
                         } else {
-                            if let Some(y) = ay {
-                                pen.y = y;
+                            if let Some(c) = cross {
+                                pen.cross = c;
                             }
-                            match ax {
-                                Some(x) => {
-                                    pen.dx = 0.0;
-                                    pen.start = Some(Some(x + dx));
+                            match along {
+                                Some(a) => {
+                                    pen.shift = 0.0;
+                                    pen.start = Some(Some(a + d_along));
                                 }
                                 None => {
                                     pen.start = Some(None);
-                                    pen.dx += dx;
+                                    pen.shift += d_along;
                                 }
                             }
                         }
-                        pen.y += dy;
+                        pen.cross += d_cross;
                         self.collect_chunks(child, &cinh, pen, chunks);
                     }
                     "textPath" => {
@@ -2089,38 +2100,40 @@ impl<'a, 'i> Importer<'a, 'i> {
             return;
         }
         let (fs, vp) = (inh.font_size, self.vp);
+        let vertical = inh.writing_mode == Some(WritingMode::Vertical);
         let x = self.first_coord(node, "x", fs, vp.0).unwrap_or(0.0) + self.first_coord(node, "dx", fs, vp.0).unwrap_or(0.0);
         let y = self.first_coord(node, "y", fs, vp.1).unwrap_or(0.0) + self.first_coord(node, "dy", fs, vp.1).unwrap_or(0.0);
+        let (along, cross) = if vertical { (y, x) } else { (x, y) };
 
         let mut chunks = Vec::new();
-        let mut pen = Pen { y, dx: 0.0, start: Some(Some(x)) };
+        let mut pen = Pen { vertical, cross, shift: 0.0, start: Some(Some(along)) };
         self.collect_chunks(node, &inh, &mut pen, &mut chunks);
 
         let transform = self.node_transform(node);
         let mut first = true;
-        let mut pen_x = x;
+        let mut pen_end = along;
         for mut chunk in chunks {
             collapse_white_space(&mut chunk);
             merge_pieces(&mut chunk);
-            let start = chunk.x.unwrap_or(pen_x);
+            let start = chunk.start.unwrap_or(pen_end);
             let widths: Vec<f64> = chunk.pieces.iter().map(|p| Self::piece_width(&p.text, &p.inh)).collect();
-            let total: f64 = chunk.pieces.iter().zip(&widths).map(|(p, w)| p.dx + w).sum();
+            let total: f64 = chunk.pieces.iter().zip(&widths).map(|(p, w)| p.shift + w).sum();
             let anchor = chunk.pieces.first().and_then(|p| p.inh.text_anchor).unwrap_or(TextAnchor::Start);
             let shift = match anchor {
                 TextAnchor::Start => 0.0,
                 TextAnchor::Middle => -total / 2.0,
                 TextAnchor::End => -total,
             };
-            pen_x = start + shift + total;
+            pen_end = start + shift + total;
             // One piece keeps its anchor. Several are placed one after another,
             // each anchored at its start.
             let several = chunk.pieces.len() > 1;
             let mut offset = 0.0;
             for (piece, width) in chunk.pieces.iter().zip(&widths) {
-                offset += piece.dx;
+                offset += piece.shift;
                 let lead = piece.text.len() - piece.text.trim_start().len();
                 let lead_width = if lead > 0 { Self::piece_width(&piece.text[..lead], &piece.inh) } else { 0.0 };
-                let (px, mut pinh) = if several { (start + shift + offset + lead_width, piece.inh.clone()) } else { (start + offset, piece.inh.clone()) };
+                let (at, mut pinh) = if several { (start + shift + offset + lead_width, piece.inh.clone()) } else { (start + offset, piece.inh.clone()) };
                 if several {
                     pinh.text_anchor = Some(TextAnchor::Start);
                 }
@@ -2129,12 +2142,13 @@ impl<'a, 'i> Importer<'a, 'i> {
                 if content.is_empty() {
                     continue;
                 }
-                let bbox = Self::text_bbox(px, piece.y, &content, &pinh);
+                let (px, py) = if vertical { (piece.cross, at) } else { (at, piece.cross) };
+                let bbox = Self::text_bbox(px, py, &content, &pinh);
                 let comp = self.composite(&node, &props, bbox);
                 let style = self.leaf_style(&pinh, &props, bbox, Kind::Text);
                 let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
                 first = false;
-                let element = Element::Text(Text { x: px, y: piece.y, content, id, transform: transform.clone(), style });
+                let element = Element::Text(Text { x: px, y: py, content, id, transform: transform.clone(), style });
                 self.push_leaf(element, Vec::new(), &pinh, comp, out);
             }
         }
@@ -2170,10 +2184,10 @@ fn collapse_white_space(chunk: &mut Chunk) {
     let mut kept = Vec::with_capacity(chunk.pieces.len());
     for mut p in chunk.pieces.drain(..) {
         if p.text.is_empty() {
-            carry += p.dx;
+            carry += p.shift;
             continue;
         }
-        p.dx += carry;
+        p.shift += carry;
         carry = 0.0;
         kept.push(p);
     }
@@ -2185,7 +2199,7 @@ fn merge_pieces(chunk: &mut Chunk) {
     let mut merged: Vec<Piece> = Vec::with_capacity(chunk.pieces.len());
     for p in chunk.pieces.drain(..) {
         match merged.last_mut() {
-            Some(last) if p.dx == 0.0 && last.y == p.y && same_text_style(&last.inh, &p.inh) => last.text.push_str(&p.text),
+            Some(last) if p.shift == 0.0 && last.cross == p.cross && same_text_style(&last.inh, &p.inh) => last.text.push_str(&p.text),
             _ => merged.push(p),
         }
     }

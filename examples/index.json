@@ -55,7 +55,7 @@
       "file": "text_styles.msx",
       "title": "Text styles",
       "category": "start",
-      "description": "Letter spacing, underline, overline and line-through, and italic and oblique text."
+      "description": "Letter spacing, underline, overline and line-through, italic and oblique text, and vertical text."
     },
     {
       "file": "stroke_styles.msx",

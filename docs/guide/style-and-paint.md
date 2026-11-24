@@ -26,6 +26,7 @@ Every drawable element takes a `style` object. Style controls how an element is 
 | `letter_spacing` | number | unset |
 | `text_decoration` | a list of `underline`, `overline` and `line-through`, or `none` | unset |
 | `font_style` | `normal`, `italic` or `oblique` | unset |
+| `writing_mode` | `horizontal-tb` or `vertical-rl` | unset |
 | `visibility` | `"hidden"` hides the element | visible |
 | `display` | `"none"` removes the element | shown |
 

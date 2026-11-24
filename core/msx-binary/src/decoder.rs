@@ -2,8 +2,8 @@
 //! Low-level binary read helpers. All read_ functions advance a &mut usize cursor.
 
 use std::io;
-use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_FONT_STYLE, EXT_LETTER_SPACING, EXT_STROKE_OPACITY, EXT_TEXT_DECORATION, UNSET_BYTE, UNSET_U16};
-use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, TextDecoration, Transform};
+use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_FONT_STYLE, EXT_LETTER_SPACING, EXT_STROKE_OPACITY, EXT_TEXT_DECORATION, EXT_WRITING_MODE, UNSET_BYTE, UNSET_U16};
+use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, TextDecoration, Transform, WritingMode};
 use msx_ast::transform::{
     Matrix2D, TRANSFORM_MATRIX, TRANSFORM_MULTIPLE, TRANSFORM_NONE, TRANSFORM_ROTATE,
     TRANSFORM_SCALE, TRANSFORM_SKEW_X, TRANSFORM_SKEW_Y, TRANSFORM_TRANSLATE,
@@ -216,6 +216,7 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             if present & EXT_LETTER_SPACING  != 0 { s.letter_spacing  = Some(read_f32(data, cursor)?); }
             if present & EXT_TEXT_DECORATION != 0 { s.text_decoration = Some(TextDecoration::from_byte(read_u8(data, cursor)?)); }
             if present & EXT_FONT_STYLE      != 0 { s.font_style      = Some(FontStyle::from_byte(read_u8(data, cursor)?)); }
+            if present & EXT_WRITING_MODE    != 0 { s.writing_mode    = Some(WritingMode::from_byte(read_u8(data, cursor)?)); }
         }
     }
     Ok(s)
@@ -315,6 +316,7 @@ mod tests {
         style.letter_spacing    = Some(1.5);
         style.text_decoration   = Some(TextDecoration::parse("underline line-through"));
         style.font_style        = Some(FontStyle::Oblique);
+        style.writing_mode      = Some(WritingMode::Vertical);
         let mut buf  = Vec::new();
         let mut pool = Vec::new();
         write_style(&mut buf, &style, &mut pool);
@@ -325,6 +327,7 @@ mod tests {
         assert_eq!(back.letter_spacing, Some(1.5));
         assert_eq!(back.text_decoration, style.text_decoration);
         assert_eq!(back.font_style, Some(FontStyle::Oblique));
+        assert_eq!(back.writing_mode, Some(WritingMode::Vertical));
     }
 
     #[test]

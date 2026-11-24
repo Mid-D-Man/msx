@@ -33,6 +33,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
 - **Text.** Whitespace collapses across the whole chunk, and the space at both ends of it goes. A chunk starts at the `text` or at a `tspan` with `x` or `y`, and `text-anchor` moves a chunk as a whole.
   - Neighbouring spans with one style stay one text element.
   - Spans that differ in fill, stroke, size, weight, slant, spacing or decoration become one text element each. They are measured with the embedded font and placed one after another, each anchored at its start. A lone span keeps its anchor.
+  - `writing-mode` is read from the `text` element and its ancestors, and a value on a `tspan` is ignored. `tb`, `tb-rl`, `vertical-rl` and `vertical-lr` make vertical text, and `lr`, `lr-tb`, `rl`, `rl-tb` and `horizontal-tb` keep it horizontal. In vertical text the chunks, `dx` and `dy` swap their axes.
   - `dx` moves the pen and `dy` shifts the baseline for the characters that follow. A `tspan` with only `y` starts a chunk where the pen stopped.
   - Only the first value of an `x`, `y`, `dx` or `dy` list is read, `rotate` is ignored, and kerning does not cross a span boundary.
 - **Paths.** Path data is parsed leniently and written back normalized. A path with an error draws up to the error, and a path that does not start with a moveto is not drawn, as in SVG.
@@ -209,7 +210,7 @@ What the graph cannot express is reported and the element is drawn without that 
 | Blend modes beyond the nine above | Drawn normally |
 | CSS selectors with sibling combinators (`+`, `~`), pseudo-classes other than `:first-child`, and pseudo-elements | The rule is skipped |
 | Spans with different styles on one text line | The style of the line start is used |
-| `word-spacing`, `writing-mode`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
+| `word-spacing`, `vector-effect` | Ignored, with a warning when the value is not the initial one |
 
 See [Encodings](#encodings) for files that are not UTF-8. Elements are capped at 200,000 shapes, so an exponentially nested `use` chain cannot run away. A `use` that refers back to itself is skipped.
 

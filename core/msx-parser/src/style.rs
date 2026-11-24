@@ -1,6 +1,6 @@
 // core/msx-parser/src/style.rs
 use dixscript::Runtime::{DixData, dix_path};
-use msx_ast::{FillRule, FontStyle, FontWeight, LineCap, LineJoin, Style, TextAnchor, TextDecoration};
+use msx_ast::{FillRule, FontStyle, FontWeight, LineCap, LineJoin, Style, TextAnchor, TextDecoration, WritingMode};
 
 use crate::dix_helpers::{enum_discriminant, opt, paint_from, raw};
 
@@ -37,6 +37,7 @@ pub fn parse_style(data: &DixData, element_prefix: &str) -> Result<Style, String
     if let Some(ls) = opt::<f64>(data, &prefix, "letter_spacing")?        { style.letter_spacing = Some(ls); }
     if let Some(td) = opt::<String>(data, &prefix, "text_decoration")?    { style.text_decoration = Some(TextDecoration::parse(&td)); }
     if let Some(fs) = opt::<String>(data, &prefix, "font_style")?         { style.font_style = Some(FontStyle::parse(&fs)); }
+    if let Some(wm) = opt::<String>(data, &prefix, "writing_mode")?       { style.writing_mode = WritingMode::parse(&wm); }
 
     if let Some(v) = opt::<String>(data, &prefix, "visibility")? { style.visibility_hidden = v == "hidden"; }
     if let Some(d) = opt::<String>(data, &prefix, "display")?    { style.display_none = d == "none"; }

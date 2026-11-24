@@ -896,11 +896,11 @@ fn root_transform_origin_percentages_use_the_viewport() {
 
 #[test]
 fn ignored_text_and_stroke_properties_are_reported() {
-    let i = imp(&doc(r#"<text x="0" y="10" style="word-spacing: 4px; writing-mode: tb">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
-    for key in ["word-spacing", "writing-mode", "vector-effect"] {
+    let i = imp(&doc(r#"<text x="0" y="10" style="word-spacing: 4px">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
+    for key in ["word-spacing", "vector-effect"] {
         assert!(has_warning(&i, key), "no warning for {key}: {:?}", i.warnings);
     }
-    let plain = imp(&doc(r#"<text x="0" y="10" style="word-spacing: normal; writing-mode: horizontal-tb">hi</text>"#));
+    let plain = imp(&doc(r#"<text x="0" y="10" style="word-spacing: normal">hi</text>"#));
     assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
 }
 
@@ -1024,6 +1024,67 @@ fn a_tspan_with_x_starts_a_new_chunk_at_that_x() {
     let t = texts(&i);
     assert_eq!((t[1].x, t[1].y), (80.0, 30.0));
     assert_eq!(t[1].style.text_anchor, Some(TextAnchor::End));
+}
+
+fn mode(t: &Text) -> Option<WritingMode> {
+    t.style.writing_mode
+}
+
+#[test]
+fn writing_mode_words_pick_vertical_or_horizontal() {
+    for (word, vertical) in [("tb", true), ("tb-rl", true), ("vertical-rl", true), ("vertical-lr", true), ("lr", false), ("lr-tb", false), ("rl", false), ("rl-tb", false), ("horizontal-tb", false), ("random", false)] {
+        let i = imp(&doc(&format!(r#"<text x="40" y="100" writing-mode="{word}">Text</text>"#)));
+        assert!(i.warnings.is_empty(), "{word}: {:?}", i.warnings);
+        let t = text(&i.scene.elements[0]);
+        assert_eq!(mode(t) == Some(WritingMode::Vertical), vertical, "{word}");
+        assert_eq!((t.x, t.y), (40.0, 100.0), "{word}");
+    }
+}
+
+#[test]
+fn writing_mode_is_inherited_by_the_text_and_ignored_on_a_tspan() {
+    let i = imp(&doc(r#"<g writing-mode="tb"><text x="120" y="30">Text</text></g>"#));
+    assert_eq!(mode(text(&i.scene.elements[0])), Some(WritingMode::Vertical));
+    let on_span = imp(&doc(r#"<text x="40" y="100"><tspan writing-mode="tb">Text</tspan></text>"#));
+    assert_eq!(mode(text(&on_span.scene.elements[0])), None);
+}
+
+#[test]
+fn vertical_spans_are_placed_down_the_column() {
+    let i = imp(&doc(r#"<text x="50" y="20" font-size="20" writing-mode="tb">ab<tspan fill="red">cd</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    assert!(t.iter().all(|t| t.x == 50.0 && mode(t) == Some(WritingMode::Vertical)));
+    assert_eq!(t[0].y, 20.0);
+    assert!((t[1].y - (20.0 + width("ab", 20.0, false))).abs() < 1e-9, "{}", t[1].y);
+}
+
+#[test]
+fn in_vertical_text_dx_moves_the_column_and_dy_moves_along_the_text() {
+    let i = imp(&doc(r#"<text x="70" y="40" font-size="48" writing-mode="tb"><tspan dx="50">Text</tspan></text>"#));
+    let t = text(&i.scene.elements[0]);
+    assert_eq!((t.x, t.y), (120.0, 40.0));
+    let j = imp(&doc(r#"<text x="70" y="40" font-size="48" writing-mode="tb"><tspan dy="30">Text</tspan></text>"#));
+    let u = text(&j.scene.elements[0]);
+    assert_eq!((u.x, u.y), (70.0, 70.0));
+}
+
+#[test]
+fn a_vertical_tspan_with_only_x_continues_down_from_where_the_pen_stopped() {
+    let i = imp(&doc(r#"<text dy="40" font-size="48" writing-mode="tb"><tspan x="125" fill="red">Text</tspan><tspan x="125" dy="-105">Text</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    assert_eq!((t[0].x, t[0].y), (125.0, 40.0));
+    assert!((t[1].y - (40.0 + width("Text", 48.0, false) - 105.0)).abs() < 1e-9, "{}", t[1].y);
+    assert_eq!(t[1].x, 125.0);
+}
+
+#[test]
+fn vertical_text_keeps_its_anchor_along_y() {
+    let i = imp(&doc(r#"<text x="120" y="100" text-anchor="middle" writing-mode="tb">Text</text>"#));
+    let t = text(&i.scene.elements[0]);
+    assert_eq!((t.x, t.y), (120.0, 100.0));
+    assert_eq!(t.style.text_anchor, Some(TextAnchor::Middle));
 }
 
 #[test]

@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use msx_ast::{FontStyle, FontWeight, Path, PathCommand, Point, Style, Text, TextAnchor, TextDecoration};
+use msx_ast::{FontStyle, FontWeight, Path, PathCommand, Point, Style, Text, TextAnchor, TextDecoration, WritingMode};
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 static REGULAR_BYTES: &[u8] = include_bytes!("../fonts/DejaVuSans-subset.ttf");
@@ -74,19 +74,31 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     let ascender = f64::from(face.ascender());
     let descender = f64::from(face.descender());
 
-    let x0 = text.x
-        + match text.style.text_anchor.unwrap_or(TextAnchor::Start) {
-            TextAnchor::Start => 0.0,
-            TextAnchor::Middle => -width / 2.0,
-            TextAnchor::End => -width,
-        };
-    let baseline_y = text.y + baseline_shift(face, text.style.dominant_baseline.as_deref(), scale);
+    let anchor_shift = match text.style.text_anchor.unwrap_or(TextAnchor::Start) {
+        TextAnchor::Start => 0.0,
+        TextAnchor::Middle => -width / 2.0,
+        TextAnchor::End => -width,
+    };
+    let vertical = text.style.writing_mode == Some(WritingMode::Vertical);
+    // Horizontal text starts at `x0` on the baseline. Vertical text starts at
+    // `y0` and is centred on `text.x`, with the glyphs turned a quarter turn
+    // clockwise: glyph x runs down the page and glyph y runs to the right.
+    let (x0, y0, base_x, baseline_y) = if vertical {
+        let central = (ascender + descender) / 2.0 * scale;
+        (text.x, text.y + anchor_shift, text.x - central, text.y)
+    } else {
+        (text.x + anchor_shift, text.y, text.x, text.y + baseline_shift(face, text.style.dominant_baseline.as_deref(), scale))
+    };
 
     let slant = if text.style.font_style.is_some_and(FontStyle::is_slanted) { SLANT } else { 0.0 };
-    let mut sink = Sink { commands: Vec::new(), ox: x0, oy: baseline_y, scale, slant, open: false };
+    let mut sink = Sink { commands: Vec::new(), m: [0.0; 6], slant, open: false };
     let mut pen = 0.0f64;
     for (i, &gid) in glyphs.iter().enumerate() {
-        sink.ox = x0 + pen * scale;
+        sink.m = if vertical {
+            [0.0, scale, scale, 0.0, base_x, y0 + pen * scale]
+        } else {
+            [scale, 0.0, 0.0, -scale, x0 + pen * scale, baseline_y]
+        };
         face.outline_glyph(gid, &mut sink);
         sink.finish_contour();
         pen += f64::from(face.glyph_hor_advance(gid).unwrap_or(0));
@@ -97,15 +109,23 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     }
     if let Some(d) = text.style.text_decoration {
         for (top_units, thickness_units) in decoration_bars(face, d) {
-            let (y0, y1) = (baseline_y - top_units * scale, baseline_y - (top_units - thickness_units) * scale);
-            sink.rect(x0, y0, x0 + width, y1);
+            if vertical {
+                sink.rect(base_x + (top_units - thickness_units) * scale, y0, base_x + top_units * scale, y0 + width);
+            } else {
+                let (ya, yb) = (baseline_y - top_units * scale, baseline_y - (top_units - thickness_units) * scale);
+                sink.rect(x0, ya, x0 + width, yb);
+            }
         }
     }
 
-    let top = baseline_y - ascender * scale;
     let height = (ascender - descender) * scale;
+    let bounds = if vertical {
+        (base_x + descender * scale, y0, height, width)
+    } else {
+        (x0, baseline_y - ascender * scale, width, height)
+    };
 
-    Some(TextLayout { commands: sink.commands, bounds: (x0, top, width, height) })
+    Some(TextLayout { commands: sink.commands, bounds })
 }
 
 /// Convert a text element into a path element carrying its style and
@@ -220,9 +240,9 @@ fn baseline_shift(face: &Face<'_>, baseline: Option<&str>, scale: f64) -> f64 {
 /// Collects glyph outlines as absolute path commands, flipping y.
 struct Sink {
     commands: Vec<PathCommand>,
-    ox: f64,
-    oy: f64,
-    scale: f64,
+    /// Maps a glyph point (x along the advance, y up, in font units) to user
+    /// space: `X = m[0] x + m[2] y + m[4]` and `Y = m[1] x + m[3] y + m[5]`.
+    m: [f64; 6],
     /// Horizontal shift per unit of glyph height, zero for upright text.
     slant: f64,
     open: bool,
@@ -230,7 +250,8 @@ struct Sink {
 
 impl Sink {
     fn pt(&self, x: f32, y: f32) -> Point {
-        Point::new(self.ox + (f64::from(x) + f64::from(y) * self.slant) * self.scale, self.oy - f64::from(y) * self.scale)
+        let (x, y) = (f64::from(x) + f64::from(y) * self.slant, f64::from(y));
+        Point::new(self.m[0] * x + self.m[2] * y + self.m[4], self.m[1] * x + self.m[3] * y + self.m[5])
     }
 
     /// A closed box in user space, wound like the outer contours of a glyph so
@@ -459,6 +480,107 @@ mod tests {
             }
         }
         (0..pts.len()).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); a.0 * b.1 - b.0 * a.1 }).sum::<f64>() / 2.0
+    }
+
+    fn vertical(content: &str, anchor: TextAnchor) -> Text {
+        let mut s = plain();
+        s.writing_mode = Some(WritingMode::Vertical);
+        s.text_anchor = Some(anchor);
+        text(content, s)
+    }
+
+    /// `(min x, min y, max x, max y)` of every point in the commands.
+    fn extent(cmds: &[PathCommand]) -> (f64, f64, f64, f64) {
+        let mut e = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for c in cmds {
+            if let PathCommand::MoveTo(p) | PathCommand::LineTo(p) = c {
+                e = (e.0.min(p.x), e.1.min(p.y), e.2.max(p.x), e.3.max(p.y));
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn horizontal_mode_set_explicitly_changes_nothing() {
+        let mut s = plain();
+        s.writing_mode = Some(WritingMode::Horizontal);
+        let a = layout(&text("Hello", s)).unwrap();
+        let b = layout(&text("Hello", plain())).unwrap();
+        assert_eq!(a.commands, b.commands);
+        assert_eq!(a.bounds, b.bounds);
+    }
+
+    #[test]
+    fn vertical_text_runs_down_from_y_and_is_centred_on_x() {
+        let t = vertical("HH", TextAnchor::Start);
+        let l = layout(&t).unwrap();
+        let (x0, y0, x1, y1) = extent(&l.commands);
+        let width = advance_width(&t);
+        assert!(y0 >= 50.0 - 1e-9 && y1 <= 50.0 + width + 1e-9, "y {y0}..{y1} width {width}");
+        assert!(y1 > 50.0 + width * 0.8, "the second glyph is below the first: {y1}");
+        // The column straddles x = 100 rather than starting there.
+        assert!(x0 < 100.0 && x1 > 100.0, "x {x0}..{x1}");
+    }
+
+    #[test]
+    fn vertical_glyphs_turn_a_quarter_turn_clockwise() {
+        // In "H" the baseline edge is the one nearest the origin column, and the
+        // top of the capital faces right.
+        let l = layout(&vertical("H", TextAnchor::Start)).unwrap();
+        let (x0, _, x1, _) = extent(&l.commands);
+        let (hx0, hy0, hx1, hy1) = extent(&layout(&text("H", plain())).unwrap().commands);
+        let (cap_height, advance_span) = (hy1 - hy0, hx1 - hx0);
+        assert!(((x1 - x0) - cap_height).abs() < 0.01, "column width {} vs cap height {cap_height}", x1 - x0);
+        let (_, vy0, _, vy1) = extent(&l.commands);
+        assert!(((vy1 - vy0) - advance_span).abs() < 0.01, "glyph runs along y");
+        // Glyph y up is page x right, so the baseline is the left edge.
+        let central = (f64::from(pick_face(&plain()).ascender()) + f64::from(pick_face(&plain()).descender())) / 2.0
+            * (20.0 / f64::from(pick_face(&plain()).units_per_em()));
+        assert!((x0 - (100.0 - central)).abs() < 0.01, "baseline at {x0}");
+    }
+
+    #[test]
+    fn vertical_anchor_works_along_y() {
+        let w = advance_width(&vertical("HH", TextAnchor::Start));
+        let mid = layout(&vertical("HH", TextAnchor::Middle)).unwrap().bounds;
+        let end = layout(&vertical("HH", TextAnchor::End)).unwrap().bounds;
+        assert!((mid.1 - (50.0 - w / 2.0)).abs() < 1e-9, "{mid:?}");
+        assert!((end.1 - (50.0 - w)).abs() < 1e-9, "{end:?}");
+    }
+
+    #[test]
+    fn vertical_bounds_are_the_column_and_the_advance() {
+        let t = vertical("Hi", TextAnchor::Start);
+        let b = layout(&t).unwrap().bounds;
+        assert!((b.3 - advance_width(&t)).abs() < 1e-9);
+        let horizontal = layout(&text("Hi", plain())).unwrap().bounds;
+        assert!((b.2 - horizontal.3).abs() < 1e-9, "column width is the line height");
+        assert_eq!(b.1, 50.0);
+    }
+
+    #[test]
+    fn vertical_decoration_is_a_box_along_the_text() {
+        let mut s = plain();
+        s.writing_mode = Some(WritingMode::Vertical);
+        let base = layout(&text("H", s.clone())).unwrap().commands.len();
+        s.text_decoration = Some(TextDecoration::parse("underline"));
+        let l = layout(&text("H", s)).unwrap();
+        let bar = &l.commands[base..];
+        assert_eq!(bar.len(), 5);
+        let (bx0, by0, bx1, by1) = extent(bar);
+        assert!(by1 - by0 > bx1 - bx0, "long along y, thin along x");
+        assert!((by1 - by0 - l.bounds.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vertical_decoration_box_is_wound_like_a_glyph_outline() {
+        let mut s = plain();
+        s.writing_mode = Some(WritingMode::Vertical);
+        let outer = signed_area(&layout(&text("H", s.clone())).unwrap().commands);
+        let base = layout(&text("H", s.clone())).unwrap().commands.len();
+        s.text_decoration = Some(TextDecoration::parse("underline"));
+        let bar = signed_area(&layout(&text("H", s)).unwrap().commands[base..]);
+        assert!(outer * bar > 0.0, "glyph {outer} bar {bar}");
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, TextAnchor, TextDecoration};
+use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, TextAnchor, TextDecoration, WritingMode};
 
 use crate::parse::{parse_color, parse_length, parse_number};
 
@@ -68,6 +68,7 @@ pub struct Inh {
     /// remove a line an ancestor set, as in CSS.
     pub text_decoration: TextDecoration,
     pub font_style: Option<FontStyle>,
+    pub writing_mode: Option<WritingMode>,
     pub hidden: bool,
     pub color: Color,
     /// `paint-order` puts the stroke before the fill.
@@ -104,6 +105,7 @@ impl Default for Inh {
             letter_spacing: 0.0,
             text_decoration: TextDecoration::default(),
             font_style: None,
+            writing_mode: None,
             hidden: false,
             color: Color::BLACK,
             stroke_first: false,
@@ -286,6 +288,9 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
     }
     if let Some(f) = get("font-style").and_then(parse_font_style) {
         inh.font_style = Some(f);
+    }
+    if let Some(m) = get("writing-mode").and_then(WritingMode::parse) {
+        inh.writing_mode = Some(m);
     }
     if let Some(v) = get("letter-spacing") {
         if v == "normal" {

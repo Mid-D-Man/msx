@@ -510,7 +510,7 @@ pub fn compile_stats(scene: &Scene) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use msx_ast::{Canvas, Color, FontStyle, LinearGradient, Paint, Stop, TextDecoration};
+    use msx_ast::{Canvas, Color, FontStyle, LinearGradient, Paint, Stop, TextDecoration, WritingMode};
 
     fn basic_scene() -> Scene {
         let mut style = Style::empty();
@@ -574,6 +574,7 @@ mod tests {
             |s| s.letter_spacing = Some(2.5),
             |s| s.text_decoration = Some(TextDecoration::parse("underline")),
             |s| s.font_style = Some(FontStyle::Oblique),
+            |s| s.writing_mode = Some(WritingMode::Vertical),
         ] {
             let mut style = Style::empty();
             set(&mut style);
@@ -589,6 +590,7 @@ mod tests {
             assert_eq!(c.style.letter_spacing, style.letter_spacing);
             assert_eq!(c.style.text_decoration, style.text_decoration);
             assert_eq!(c.style.font_style, style.font_style);
+            assert_eq!(c.style.writing_mode, style.writing_mode);
         }
     }
 

@@ -887,11 +887,14 @@ const TEXT_STYLE_SOURCE: &str = r#"
     { type = "text", x = 10, y = 80, content = "Struck",
       style = { fill = #000000, font_size = 24, text_decoration = "overline line-through",
                 stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 250, y = 10, content = "Down",
+      style = { fill = #000000, font_size = 24, writing_mode = "tb",
+                stroke = "none", stroke_width = 0, opacity = 1.0 } }
 )
 "#;
 
 #[test]
-fn roundtrip_letter_spacing_text_decoration_and_font_style() {
+fn roundtrip_letter_spacing_text_decoration_font_style_and_writing_mode() {
     check_roundtrip("text_style_v3", TEXT_STYLE_SOURCE);
     let scene = parse_scene(TEXT_STYLE_SOURCE).unwrap();
     let data = compile(&scene, true).unwrap();
@@ -901,6 +904,7 @@ fn roundtrip_letter_spacing_text_decoration_and_font_style() {
     assert!(svg.contains("text-decoration=\"underline\""), "{svg}");
     assert!(svg.contains("font-style=\"italic\""), "{svg}");
     assert!(svg.contains("text-decoration=\"overline line-through\""), "{svg}");
+    assert!(svg.contains("writing-mode=\"vertical-rl\""), "{svg}");
 }
 
 #[test]

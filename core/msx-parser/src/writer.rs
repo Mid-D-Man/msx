@@ -322,6 +322,9 @@ fn style_object(s: &Style) -> Option<String> {
     if let Some(v) = s.font_style {
         f.push(format!("font_style = {}", quote(v.to_svg())));
     }
+    if let Some(v) = s.writing_mode {
+        f.push(format!("writing_mode = {}", quote(v.to_svg())));
+    }
     if s.visibility_hidden {
         f.push("visibility = \"hidden\"".into());
     }

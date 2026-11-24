@@ -94,6 +94,29 @@ impl FontStyle {
     pub fn is_slanted(self) -> bool { self != FontStyle::Normal }
 }
 
+/// `writing-mode`. Vertical text runs top to bottom and turns Latin glyphs
+/// a quarter turn clockwise, as in a browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritingMode { Horizontal, Vertical }
+
+impl WritingMode {
+    /// The SVG 2 word for the mode.
+    pub fn to_svg(self) -> &'static str {
+        match self { WritingMode::Horizontal => "horizontal-tb", WritingMode::Vertical => "vertical-rl" }
+    }
+    /// Reads the SVG 1.1 and SVG 2 words. `rl` and `rl-tb` are horizontal because
+    /// they only set the direction. Anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "tb" | "tb-rl" | "vertical-rl" | "vertical-lr" => Some(WritingMode::Vertical),
+            "lr" | "lr-tb" | "rl" | "rl-tb" | "horizontal-tb" => Some(WritingMode::Horizontal),
+            _ => None,
+        }
+    }
+    pub fn to_byte(self)    -> u8 { match self { WritingMode::Horizontal => 0, WritingMode::Vertical => 1 } }
+    pub fn from_byte(b: u8) -> Self { if b == 1 { WritingMode::Vertical } else { WritingMode::Horizontal } }
+}
+
 /// The lines of `text-decoration`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TextDecoration {
@@ -154,6 +177,7 @@ pub struct Style {
     pub letter_spacing:     Option<f64>,
     pub text_decoration:    Option<TextDecoration>,
     pub font_style:         Option<FontStyle>,
+    pub writing_mode:       Option<WritingMode>,
     pub visibility_hidden:  bool,
     pub display_none:       bool,
 }
@@ -181,6 +205,7 @@ impl Default for Style {
             letter_spacing:    None,
             text_decoration:   None,
             font_style:        None,
+            writing_mode:      None,
             visibility_hidden: false,
             display_none:      false,
         }
@@ -196,7 +221,7 @@ impl Style {
             stroke_dasharray: None, stroke_dashoffset: None,
             font_size: None, font_family: None, font_weight: None,
             text_anchor: None, dominant_baseline: None,
-            letter_spacing: None, text_decoration: None, font_style: None,
+            letter_spacing: None, text_decoration: None, font_style: None, writing_mode: None,
             visibility_hidden: false, display_none: false,
         }
     }
@@ -254,6 +279,9 @@ impl Style {
         if let Some(td) = self.text_decoration {
             if !td.is_none() { a.push(("text-decoration", td.to_svg())); }
         }
+        if self.writing_mode == Some(WritingMode::Vertical) {
+            a.push(("writing-mode", WritingMode::Vertical.to_svg().into()));
+        }
         if self.visibility_hidden { a.push(("visibility", "hidden".into())); }
         if self.display_none      { a.push(("display",    "none".into()));   }
         a
@@ -261,10 +289,11 @@ impl Style {
 
     /// Whether the style sets a field that only wire version 3 can hold:
     /// `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`,
-    /// `text_decoration` or `font_style`.
+    /// `text_decoration`, `font_style` or `writing_mode`.
     pub fn has_v3_fields(&self) -> bool {
         self.fill_opacity.is_some() || self.stroke_opacity.is_some() || self.dominant_baseline.is_some()
             || self.letter_spacing.is_some() || self.text_decoration.is_some() || self.font_style.is_some()
+            || self.writing_mode.is_some()
     }
 
     /// Bit flags indicating which fields are present (for binary encoding).
@@ -302,6 +331,18 @@ mod tests {
         let mut s = Style::empty(); s.letter_spacing = Some(2.0); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.text_decoration = Some(TextDecoration::default()); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.font_style = Some(FontStyle::Italic); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.writing_mode = Some(WritingMode::Horizontal); assert!(s.has_v3_fields());
+    }
+    #[test] fn writing_mode_words_and_bytes() {
+        for w in ["tb", "tb-rl", "vertical-rl", "vertical-lr"] { assert_eq!(WritingMode::parse(w), Some(WritingMode::Vertical), "{w}"); }
+        for w in ["lr", "lr-tb", "rl", "rl-tb", "horizontal-tb"] { assert_eq!(WritingMode::parse(w), Some(WritingMode::Horizontal), "{w}"); }
+        assert_eq!(WritingMode::parse("random"), None);
+        for m in [WritingMode::Horizontal, WritingMode::Vertical] { assert_eq!(WritingMode::from_byte(m.to_byte()), m); }
+        let mut s = Style::empty();
+        s.writing_mode = Some(WritingMode::Horizontal);
+        assert!(!s.to_svg_attrs().iter().any(|(k, _)| *k == "writing-mode"));
+        s.writing_mode = Some(WritingMode::Vertical);
+        assert!(s.to_svg_attrs().contains(&("writing-mode", "vertical-rl".to_string())));
     }
     #[test] fn font_style_words_and_bytes() {
         assert_eq!(FontStyle::parse("italic"), FontStyle::Italic);

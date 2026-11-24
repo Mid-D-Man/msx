@@ -22,6 +22,8 @@
       style = { fill = #e94560, font_size = 22, font_style = "oblique" } }
     { type = "text", x = 30, y = 320, content = "Bold and italic together",
       style = { fill = #f7971e, font_size = 22, font_weight = "bold", font_style = "italic" } }
+    { type = "text", x = 600, y = 100, content = "vertical text",
+      style = { fill = #43e97b, font_size = 22, writing_mode = "vertical-rl" } }
     { type = "text", x = 320, y = 375, content = "all three at once",
       style = { fill = #43e97b, font_size = 24, letter_spacing = 4, font_style = "italic",
                 text_decoration = "underline", text_anchor = "middle" } }
