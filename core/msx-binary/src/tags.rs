@@ -25,6 +25,7 @@ pub const TAG_IMAGE:           u8 = 0x11; // v0.4
 pub const TAG_AUDIO:           u8 = 0x12; // def only — v0.4
 pub const TAG_LINEAR_GRADIENT_V3: u8 = 0x13; // def only — wire version 3: units, spread, transform
 pub const TAG_RADIAL_GRADIENT_V3: u8 = 0x14; // def only — wire version 3: units, spread, transform
+pub const TAG_TEXT_PATH:       u8 = 0x15; // wire version 3: a text along a path
 pub const TAG_END:             u8 = 0xFF;
 
 // ── Gradient flags byte (wire version 3), after the stops ────────────────────

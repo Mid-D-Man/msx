@@ -35,6 +35,7 @@ mod gradient;
 mod parse;
 mod raster;
 mod style;
+mod textpath;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -42,7 +43,7 @@ use std::fmt;
 use msx_ast::path::parse_d_partial;
 use msx_ast::{
     BlendMode, Canvas, Circle, Color, Element, Ellipse, Group, Layer, Line, MaskType, Paint, Path, PathCommand, Point, Polyline, Rect, Scene, Style, Text, TextAnchor,
-    Transform, WritingMode,
+    TextPath, Transform, WritingMode,
 };
 use roxmltree::{Document, Node, ParsingOptions};
 
@@ -341,6 +342,10 @@ struct Chunk {
     /// chunk ended.
     start: Option<f64>,
     pieces: Vec<Piece>,
+    /// The path the pieces follow, when they sit in a `textPath`.
+    path: Option<TextPath>,
+    /// The chunk follows a `textPath` and starts where its last glyph ended.
+    after_path: bool,
 }
 
 /// Where the next characters go while the text is walked.
@@ -350,6 +355,12 @@ struct Pen {
     shift: f64,
     /// A new chunk starts at the next characters, at this position along.
     start: Option<Option<f64>>,
+    /// The `x` of the text, where its first `textPath` starts on the path.
+    text_along: f64,
+    /// The path of the `textPath` being walked.
+    path: Option<TextPath>,
+    /// The next chunk follows a `textPath`.
+    after_path: bool,
 }
 
 /// How an element composites against what is already drawn.
@@ -2001,7 +2012,7 @@ impl<'a, 'i> Importer<'a, 'i> {
     // ── Text ──────────────────────────────────────────────────────────────────
 
     /// Text box of a run, used as the gradient bounding box.
-    fn text_bbox(x: f64, y: f64, content: &str, inh: &Inh) -> Option<BBox> {
+    fn text_bbox(x: f64, y: f64, content: &str, inh: &Inh, path: Option<&TextPath>) -> Option<BBox> {
         let style = Style {
             font_size: Some(inh.font_size),
             font_weight: inh.font_weight.clone(),
@@ -2011,7 +2022,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             writing_mode: inh.writing_mode.filter(|m| *m == WritingMode::Vertical),
             ..Style::default()
         };
-        let probe = Text { x, y, content: content.to_string(), id: None, transform: None, style };
+        let probe = Text { x, y, content: content.to_string(), id: None, transform: None, style, path: path.cloned() };
         msx_text::layout(&probe).map(|l| BBox { x: l.bounds.0, y: l.bounds.1, w: l.bounds.2, h: l.bounds.3 })
     }
 
@@ -2026,7 +2037,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         for child in node.children() {
             if child.is_text() {
                 if let Some(start) = pen.start.take() {
-                    chunks.push(Chunk { start, pieces: Vec::new() });
+                    chunks.push(Chunk { start, pieces: Vec::new(), path: pen.path.clone(), after_path: std::mem::take(&mut pen.after_path) });
                 }
                 if let Some(chunk) = chunks.last_mut() {
                     let text = child.text().unwrap_or("").to_string();
@@ -2047,10 +2058,12 @@ impl<'a, 'i> Importer<'a, 'i> {
                             continue;
                         }
                         let fs = cinh.font_size;
+                        let on_path = pen.path.is_some();
                         let (along_axis, cross_axis, d_along, d_cross) = if pen.vertical { ("y", "x", "dy", "dx") } else { ("x", "y", "dx", "dy") };
                         let (a_base, c_base) = if pen.vertical { (self.vp.1, self.vp.0) } else { (self.vp.0, self.vp.1) };
-                        let along = self.first_coord(child, along_axis, fs, a_base);
-                        let cross = self.first_coord(child, cross_axis, fs, c_base);
+                        // On a path `x` is a distance from the path start, and `y` is not used.
+                        let along = self.first_coord(child, along_axis, fs, a_base).map(|a| a - pen.path.as_ref().map_or(0.0, |p| p.start_offset));
+                        let cross = if on_path { None } else { self.first_coord(child, cross_axis, fs, c_base) };
                         let d_along = self.first_coord(child, d_along, fs, a_base).unwrap_or(0.0);
                         let d_cross = self.first_coord(child, d_cross, fs, c_base).unwrap_or(0.0);
                         if along.is_none() && cross.is_none() {
@@ -2073,14 +2086,45 @@ impl<'a, 'i> Importer<'a, 'i> {
                         pen.cross += d_cross;
                         self.collect_chunks(child, &cinh, pen, chunks);
                     }
-                    "textPath" => {
-                        let msg = format!("{} is not supported (text on a path); its text was skipped", Self::label(&child));
-                        self.warn(msg);
-                    }
+                    "textPath" => self.collect_text_path(child, inh, pen, chunks),
                     _ => {}
                 }
             }
         }
+    }
+
+    /// A `textPath`, a direct child of the `text` only: its text is a chunk on
+    /// the path, and the text after it starts where the last glyph ended.
+    fn collect_text_path(&mut self, node: Node<'a, 'i>, inh: &Inh, pen: &mut Pen, chunks: &mut Vec<Chunk>) {
+        if pen.path.is_some() {
+            return;
+        }
+        let props = self.props_for(node);
+        if props.get("display").is_some_and(|v| v.trim() == "none") {
+            return;
+        }
+        let mut cinh = inh.clone();
+        apply(&mut cinh, &props, self.vp);
+        cinh.writing_mode = inh.writing_mode;
+        if cinh.hidden {
+            return;
+        }
+        let path = match self.text_path_source(node, cinh.font_size) {
+            Ok(p) => p,
+            Err(why) => {
+                let msg = format!("{} {why}; its text was skipped", Self::label(&node));
+                self.warn(msg);
+                return;
+            }
+        };
+        // The `x` of the text is where its first `textPath` starts, as long as
+        // nothing has been written yet.
+        let fresh = chunks.iter().all(|c| c.pieces.iter().all(|p| p.text.trim().is_empty()));
+        let along = if fresh { pen.text_along } else { 0.0 };
+        let saved_cross = pen.cross;
+        (pen.path, pen.start, pen.after_path, pen.cross, pen.shift) = (Some(path), Some(Some(along)), false, 0.0, 0.0);
+        self.collect_chunks(node, &cinh, pen, chunks);
+        (pen.path, pen.start, pen.after_path, pen.cross, pen.shift) = (None, Some(None), true, saved_cross, 0.0);
     }
 
     /// Advance width of characters in the style of `inh`.
@@ -2091,7 +2135,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
             ..Style::default()
         };
-        msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: content.to_string(), id: None, transform: None, style })
+        msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: content.to_string(), id: None, transform: None, style, path: None })
     }
 
     fn walk_text(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
@@ -2106,16 +2150,27 @@ impl<'a, 'i> Importer<'a, 'i> {
         let (along, cross) = if vertical { (y, x) } else { (x, y) };
 
         let mut chunks = Vec::new();
-        let mut pen = Pen { vertical, cross, shift: 0.0, start: Some(Some(along)) };
+        let mut pen = Pen { vertical, cross, shift: 0.0, start: Some(Some(along)), text_along: along, path: None, after_path: false };
         self.collect_chunks(node, &inh, &mut pen, &mut chunks);
 
         let transform = self.node_transform(node);
         let mut first = true;
         let mut pen_end = along;
+        // Where the text on the last `textPath` ended, for the chunk after it.
+        let mut path_end: Option<(f64, f64)> = None;
         for mut chunk in chunks {
             collapse_white_space(&mut chunk);
             merge_pieces(&mut chunk);
-            let start = chunk.start.unwrap_or(pen_end);
+            let mut start = chunk.start.unwrap_or(pen_end);
+            if chunk.after_path {
+                if let (Some((ex, ey)), Some(head)) = (path_end.take(), chunk.pieces.first()) {
+                    start = ex;
+                    let shift_y = ey - head.cross;
+                    for p in &mut chunk.pieces {
+                        p.cross += shift_y;
+                    }
+                }
+            }
             let widths: Vec<f64> = chunk.pieces.iter().map(|p| Self::piece_width(&p.text, &p.inh)).collect();
             let total: f64 = chunk.pieces.iter().zip(&widths).map(|(p, w)| p.shift + w).sum();
             let anchor = chunk.pieces.first().and_then(|p| p.inh.text_anchor).unwrap_or(TextAnchor::Start);
@@ -2125,6 +2180,9 @@ impl<'a, 'i> Importer<'a, 'i> {
                 TextAnchor::End => -total,
             };
             pen_end = start + shift + total;
+            if let (Some(path), false) = (&chunk.path, chunk.pieces.is_empty()) {
+                path_end = msx_text::path_point_at(&path.commands, path.start_offset + pen_end);
+            }
             // One piece keeps its anchor. Several are placed one after another,
             // each anchored at its start.
             let several = chunk.pieces.len() > 1;
@@ -2142,13 +2200,13 @@ impl<'a, 'i> Importer<'a, 'i> {
                 if content.is_empty() {
                     continue;
                 }
-                let (px, py) = if vertical { (piece.cross, at) } else { (at, piece.cross) };
-                let bbox = Self::text_bbox(px, py, &content, &pinh);
+                let (px, py) = if vertical && chunk.path.is_none() { (piece.cross, at) } else { (at, piece.cross) };
+                let bbox = Self::text_bbox(px, py, &content, &pinh, chunk.path.as_ref());
                 let comp = self.composite(&node, &props, bbox);
                 let style = self.leaf_style(&pinh, &props, bbox, Kind::Text);
                 let id = if first && !expanded { node.attribute("id").map(String::from) } else { None };
                 first = false;
-                let element = Element::Text(Text { x: px, y: py, content, id, transform: transform.clone(), style });
+                let element = Element::Text(Text { x: px, y: py, content, id, transform: transform.clone(), style, path: chunk.path.clone() });
                 self.push_leaf(element, Vec::new(), &pinh, comp, out);
             }
         }

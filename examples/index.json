@@ -58,6 +58,12 @@
       "description": "Letter spacing, underline, overline and line-through, italic and oblique text, and vertical text."
     },
     {
+      "file": "text_on_path.msx",
+      "title": "Text on a path",
+      "category": "start",
+      "description": "Text that follows a curve, a circle and a line, with an offset, a centred anchor and a lift off the path."
+    },
+    {
       "file": "stroke_styles.msx",
       "title": "Stroke styles",
       "category": "start",

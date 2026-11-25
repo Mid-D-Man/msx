@@ -679,10 +679,157 @@ fn text_with_a_box_gradient_is_painted_against_the_text_box() {
 }
 
 #[test]
-fn text_path_is_reported() {
-    let i = imp(&doc(r##"<text><textPath href="#p">Curvy</textPath></text>"##));
-    assert!(has_warning(&i, "text on a path"));
-    assert!(i.scene.elements.is_empty());
+fn a_text_path_to_a_missing_element_is_reported_and_its_text_skipped() {
+    for body in [r##"<text><textPath href="#p">Curvy</textPath></text>"##, r##"<text><textPath>Curvy</textPath></text>"##] {
+        let i = imp(&doc(body));
+        assert!(has_warning(&i, "does not point at an element"), "{:?}", i.warnings);
+        assert!(has_warning(&i, "its text was skipped"), "{:?}", i.warnings);
+        assert!(i.scene.elements.is_empty());
+    }
+}
+
+const WAVE: &str = "M 20 100 C 35 135 85 135 100 100 C 115 65 165 65 180 100";
+
+fn on_paths(i: &Imported) -> Vec<&Text> {
+    i.scene.elements.iter().filter_map(|e| if let Element::Text(t) = e { Some(t) } else { None }).collect()
+}
+
+#[test]
+fn a_text_on_a_path_is_a_text_that_carries_the_path() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text font-size="24"><textPath href="#p" startOffset="12">Some long text</textPath></text>"##)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = on_paths(&i);
+    assert_eq!(t.len(), 1);
+    assert_eq!(t[0].content, "Some long text");
+    let path = t[0].path.as_ref().expect("the text follows a path");
+    assert_eq!(path.commands, msx_ast::path::parse_d(WAVE).unwrap());
+    assert_eq!(path.start_offset, 12.0);
+    assert_eq!((t[0].x, t[0].y), (0.0, 0.0));
+}
+
+#[test]
+fn start_offset_takes_units_and_percent_of_the_path_length() {
+    let length = msx_text::path_length(&msx_ast::path::parse_d(WAVE).unwrap());
+    for (value, expected) in [("30", 30.0), ("5mm", 5.0 * 96.0 / 25.4), ("10%", length * 0.1), ("-100", -100.0), ("9999", 9999.0)] {
+        let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text><textPath href="#p" startOffset="{value}">T</textPath></text>"##)));
+        let got = on_paths(&i)[0].path.as_ref().unwrap().start_offset;
+        assert!((got - expected).abs() < 1e-9, "{value}: {got} vs {expected}");
+    }
+}
+
+#[test]
+fn the_x_of_the_text_is_a_distance_along_the_path_and_y_is_not_used() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text x="20" y="40"><textPath href="#p">Some long text</textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!((t[0].x, t[0].y), (20.0, 0.0));
+    let on_path_element = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text><textPath href="#p" x="20" y="40">Some long text</textPath></text>"##)));
+    assert_eq!((on_paths(&on_path_element)[0].x, on_paths(&on_path_element)[0].y), (0.0, 0.0));
+}
+
+#[test]
+fn a_path_attribute_is_used_instead_of_href() {
+    let i = imp(&doc(r##"<path id="p" d="M 0 0 L 500 0"/><text><textPath href="#p" path="M 0 50 L 100 50">Hi</textPath></text>"##));
+    let path = on_paths(&i)[0].path.as_ref().unwrap();
+    assert_eq!(path.commands, msx_ast::path::parse_d("M 0 50 L 100 50").unwrap());
+}
+
+#[test]
+fn shapes_can_be_followed_from_their_first_corner() {
+    for (shape, perimeter) in [
+        (r#"<rect id="p" x="10" y="20" width="100" height="50"/>"#, 300.0),
+        (r#"<polygon id="p" points="0,0 30,0 30,40"/>"#, 30.0 + 40.0 + 50.0),
+        (r#"<polyline id="p" points="0,0 30,0 30,40"/>"#, 70.0),
+        (r#"<line id="p" x1="0" y1="0" x2="30" y2="40"/>"#, 50.0),
+    ] {
+        let i = imp(&doc(&format!(r##"{shape}<text><textPath href="#p">Hi</textPath></text>"##)));
+        assert!(i.warnings.is_empty(), "{shape}: {:?}", i.warnings);
+        let t = on_paths(&i);
+        let commands = &t[0].path.as_ref().unwrap().commands;
+        assert!((msx_text::path_length(commands) - perimeter).abs() < 1e-6, "{shape}: {}", msx_text::path_length(commands));
+    }
+    let circle = imp(&doc(r##"<circle id="p" cx="100" cy="100" r="50"/><text><textPath href="#p">Hi</textPath></text>"##));
+    let len = msx_text::path_length(&on_paths(&circle)[0].path.as_ref().unwrap().commands);
+    assert!((len - std::f64::consts::TAU * 50.0).abs() < 0.5, "{len}");
+    let rect = imp(&doc(r##"<rect id="p" x="10" y="20" width="100" height="50"/><text><textPath href="#p">Hi</textPath></text>"##));
+    let first = &on_paths(&rect)[0].path.as_ref().unwrap().commands[0];
+    assert_eq!(first, &PathCommand::MoveTo(Point::new(10.0, 20.0)));
+}
+
+#[test]
+fn an_element_with_no_outline_cannot_be_followed() {
+    let i = imp(&doc(r##"<g id="p"/><text><textPath href="#p">Hi</textPath></text>"##));
+    assert!(has_warning(&i, "which has no outline to follow"), "{:?}", i.warnings);
+    assert!(on_paths(&i).is_empty());
+}
+
+#[test]
+fn the_transform_of_the_referenced_path_moves_the_path() {
+    let i = imp(&doc(r##"<path id="p" d="M 0 0 L 100 0" transform="translate(10 20)"/><text><textPath href="#p">Hi</textPath></text>"##));
+    let commands = &on_paths(&i)[0].path.as_ref().unwrap().commands;
+    assert_eq!(commands.first(), Some(&PathCommand::MoveTo(Point::new(10.0, 20.0))));
+    assert_eq!(commands.last(), Some(&PathCommand::LineTo(Point::new(110.0, 20.0))));
+}
+
+#[test]
+fn spans_inside_a_text_path_shift_along_and_across_and_the_shift_stays() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text font-size="24"><textPath href="#p">Some<tspan fill="green" dx="10" dy="20">long</tspan><tspan fill="blue" dx="-5" dy="-20">text</tspan></textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["Some", "long", "text"]);
+    let (w1, w2) = (width("Some", 24.0, false), width("long", 24.0, false));
+    assert!((t[1].x - (w1 + 10.0)).abs() < 1e-9, "{}", t[1].x);
+    assert!((t[2].x - (w1 + 10.0 + w2 - 5.0)).abs() < 1e-9, "{}", t[2].x);
+    assert_eq!((t[0].y, t[1].y, t[2].y), (0.0, 20.0, 0.0));
+    assert!(t.iter().all(|t| t.path.is_some()));
+}
+
+#[test]
+fn an_absolute_x_on_a_span_inside_a_text_path_is_a_distance_along_the_path() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text font-size="24"><textPath href="#p" startOffset="30">Some <tspan fill="green" x="10" y="20">long</tspan> text</textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["Some", "long", "text"]);
+    assert!((t[1].x - (10.0 - 30.0)).abs() < 1e-9, "{}", t[1].x);
+    assert_eq!(t[1].y, 0.0, "y is not used on a path");
+    // The black " text" goes on from the end of the green word, after a space.
+    let expected = t[1].x + width("long", 24.0, false) + width(" ", 24.0, false);
+    assert!((t[2].x - expected).abs() < 1e-9, "{} vs {expected}", t[2].x);
+}
+
+#[test]
+fn text_before_and_after_a_text_path_stays_flat_and_the_text_after_starts_where_it_ended() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text x="20" y="60" font-size="24">Text<textPath href="#p">Some long text</textPath><tspan fill="green">Text</tspan></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["Text", "Some long text", "Text"]);
+    assert_eq!((t[0].x, t[0].y), (20.0, 60.0));
+    assert!(t[0].path.is_none() && t[1].path.is_some() && t[2].path.is_none());
+    // The first textPath starts at the path start because text came before it.
+    assert_eq!(t[1].x, 0.0);
+    let commands = &t[1].path.as_ref().unwrap().commands;
+    let (ex, ey) = msx_text::path_point_at(commands, width("Some long text", 24.0, false)).unwrap();
+    assert!((t[2].x - ex).abs() < 1e-9 && (t[2].y - ey).abs() < 1e-9, "({}, {}) vs ({ex}, {ey})", t[2].x, t[2].y);
+}
+
+#[test]
+fn two_text_paths_each_start_at_their_own_path() {
+    let i = imp(&doc(&format!(r##"<path id="a" d="{WAVE}"/><path id="b" d="M 20 127 L 180 127"/><text><textPath href="#a">One</textPath><textPath href="#b">Two</textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t.len(), 2);
+    assert_eq!((t[0].x, t[1].x), (0.0, 0.0));
+    assert_ne!(t[0].path, t[1].path);
+}
+
+#[test]
+fn a_nested_text_path_is_ignored() {
+    let i = imp(&doc(&format!(r##"<path id="a" d="{WAVE}"/><path id="b" d="M 20 127 L 180 127"/><text><textPath href="#a">Outer<textPath href="#b">Inner</textPath></textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["Outer"]);
+}
+
+#[test]
+fn a_text_path_leaves_the_anchor_to_the_layout_and_the_text_style_intact() {
+    let i = imp(&doc(&format!(r##"<path id="p" d="{WAVE}"/><text font-size="24" fill="red" text-anchor="middle"><textPath href="#p" startOffset="50%">Some long text</textPath></text>"##)));
+    let t = on_paths(&i);
+    assert_eq!(t[0].style.text_anchor, Some(TextAnchor::Middle));
+    assert_eq!(t[0].style.font_size, Some(24.0));
 }
 
 // ── Errors and round trip ────────────────────────────────────────────────────
@@ -944,7 +1091,7 @@ fn the_font_shorthand_sets_style_weight_size_and_family() {
 fn width(s: &str, size: f64, bold: bool) -> f64 {
     let font_weight = bold.then_some(FontWeight::Bold);
     let style = msx_ast::Style { font_size: Some(size), font_weight, ..msx_ast::Style::default() };
-    msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: s.to_string(), id: None, transform: None, style })
+    msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: s.to_string(), id: None, transform: None, style, path: None })
 }
 
 fn texts(i: &Imported) -> Vec<&Text> {

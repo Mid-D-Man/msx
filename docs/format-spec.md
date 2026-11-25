@@ -162,9 +162,13 @@ d = $"M {cx - half} {cy} L {cx + half} {cy} Z"
   x       = <float>
   y       = <float>     // baseline y
   content = <string>
+  path         = <string>?   // path data: the glyphs follow it
+  start_offset = <float>?    // with path, where the text starts along it, default 0
   id = <string>?  transform = <transform>?  style = <style>
 }
 ```
+
+With a `path`, the glyphs follow the first subpath of it, in the user space of the text. Each glyph stands on the path with the middle of its baseline, turned to the direction of the path there, and a glyph whose middle falls past either end is not drawn. The text starts `start_offset + x` along the path, moved by `text_anchor`, and `y` moves the baseline across the path, positive on the side away from the glyphs. Decoration lines, `writing_mode` and `dominant_baseline` do not apply to a text on a path.
 
 ### `group`
 
@@ -517,7 +521,7 @@ MSX source supports DixScript interpolated strings for parametric paths:
 | Offset | Size | Field | Type | Notes |
 |---|---|---|---|---|
 | 0 | 4 | magic | `[u8; 4]` | `0x4D 0x53 0x58 0x00` — "MSX\0" |
-| 4 | 1 | version | `u8` | `2` or `3`. A file carries the lowest version that can hold its content, so a scene that uses nothing newer is written as `2`. `3` marks the style extension block (see "Style Block") and the gradient tags `0x13` and `0x14`. A reader accepts `2` to `3` and refuses anything else. Bumped when bytes an old decoder would misread are added; new tags and flags that an old decoder never meets or safely ignores (Image/Audio, the animations flag below) do **not** bump it. See "Wire-format versioning" below. |
+| 4 | 1 | version | `u8` | `2` or `3`. A file carries the lowest version that can hold its content, so a scene that uses nothing newer is written as `2`. `3` marks the style extension block (see "Style Block"), the gradient tags `0x13` and `0x14` and the text-on-path tag `0x15`. A reader accepts `2` to `3` and refuses anything else. Bumped when bytes an old decoder would misread are added; new tags and flags that an old decoder never meets or safely ignores (Image/Audio, the animations flag below) do **not** bump it. See "Wire-format versioning" below. |
 | 5 | 1 | compress | `u8` | `0`=none `1`=mbfa |
 | 6 | 1 | flags | `u8` | bit0=has_viewbox bit1=has_metadata bit2=has_defs bit3=has_animations |
 | 7 | 1 | reserved | `u8` | zero |
@@ -537,7 +541,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration`, `font_style` and `writing_mode`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration`, `font_style` and `writing_mode`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07`. A text on a path, element tag `0x15` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -577,6 +581,7 @@ The `TAG_END` sentinel is always written after the element stream, regardless of
 | `0x12` | Audio (def only) | v0.4 |
 | `0x13` | LinearGradient with units, spread or transform (def only) | wire version 3 |
 | `0x14` | RadialGradient with units, spread or transform (def only) | wire version 3 |
+| `0x15` | Text on a path | wire version 3 |
 | `0xFF` | End sentinel | v0.1 |
 
 ("Since" tracks when each tag was added to `tags.rs`, not the file-header `version` byte — see "Wire-format versioning" above for why those two numbers don't move together.)
@@ -619,6 +624,7 @@ The `TAG_END` sentinel is always written after the element stream, regardless of
 | `0x12` Audio | `[u16 id_str_idx] [media_source]` — no style block, def only |
 | `0x13` LinearGradient (v3) | as `0x0A`, then `[u8 flags] [transform]?` |
 | `0x14` RadialGradient (v3) | as `0x0B`, then `[u8 flags] [transform]?` |
+| `0x15` Text on a path (v3) | as `0x07`, then `[u32 cmd_len] [path_command]*` as in `0x06` and `[f32 start_offset]`, and last the shared style block. A reader older than version 3 stops at the unknown tag instead of drawing the text flat |
 
 The flags byte of `0x13` and `0x14`: bit 0 is set for `user_space` units, bits 1 and 2 hold the spread (0 pad, 1 reflect, 2 repeat, 3 is invalid), bit 3 says that a transform follows, in the same encoding as an element transform, and bit 4 (radial only) says that an `f32` focal radius follows the transform. A linear gradient with bit 4 set is invalid. The other bits are 0. A gradient that uses none of these, with no `fr` either, is written with `0x0A` or `0x0B`, so its bytes and the file version are as before.
 

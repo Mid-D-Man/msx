@@ -907,6 +907,45 @@ fn roundtrip_letter_spacing_text_decoration_font_style_and_writing_mode() {
     assert!(svg.contains("writing-mode=\"vertical-rl\""), "{svg}");
 }
 
+const TEXT_PATH_SOURCE: &str = r#"
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 300, height = 200, background = #ffffff }
+  elements::
+    { type = "text", x = 5, y = 3, content = "Round and round",
+      path = "M 20 150 C 60 20 240 20 280 150", start_offset = 12.5,
+      style = { fill = #000000, font_size = 20, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+    { type = "text", x = 10, y = 30, content = "Flat",
+      style = { fill = #000000, font_size = 20, stroke = "none", stroke_width = 0, opacity = 1.0 } }
+)
+"#;
+
+#[test]
+fn roundtrip_text_on_a_path() {
+    check_roundtrip("text_path_v3", TEXT_PATH_SOURCE);
+    let scene = parse_scene(TEXT_PATH_SOURCE).unwrap();
+    let data = compile(&scene, true).unwrap();
+    assert_eq!(data[4], 3, "a text on a path needs wire version 3");
+    let back = decode(&data).unwrap();
+    let (Element::Text(a), Element::Text(b)) = (&scene.elements[0], &back.elements[0]) else { panic!("text first") };
+    assert_eq!(a.path, b.path);
+    assert_eq!((a.x, a.y), (b.x, b.y));
+    let Element::Text(flat) = &back.elements[1] else { panic!("text second") };
+    assert!(flat.path.is_none());
+    let svg = render(&back);
+    assert!(svg.contains("<textPath href=\"#msx-textpath-1\" startOffset=\"17.5\" dy=\"3\">Round and round</textPath>"), "{svg}");
+}
+
+#[test]
+fn a_text_without_a_path_is_still_written_as_version_2() {
+    let source = TEXT_PATH_SOURCE.replace(
+        "      path = \"M 20 150 C 60 20 240 20 280 150\", start_offset = 12.5,\n",
+        "",
+    );
+    let data = compile(&parse_scene(&source).unwrap(), true).unwrap();
+    assert_eq!(data[4], 2);
+}
+
 #[test]
 fn a_scene_without_v3_fields_is_still_written_as_version_2() {
     let plain = parse_scene(r#"

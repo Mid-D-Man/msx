@@ -1,0 +1,25 @@
+@CONFIG( version -> "1.0.0" )
+@DATA(
+  scene = { width = 640, height = 400, background = #14161f }
+  elements::
+    { type = "text", x = 320, y = 40, content = "Text on a path",
+      style = { fill = #ffffff, font_size = 34, font_weight = "bold", text_anchor = "middle" } }
+    { type = "path", d = "M 30 190 C 110 60 210 300 300 150",
+      style = { fill = "none", stroke = #3b4258, stroke_width = 1.5 } }
+    { type = "text", x = 0, y = 0, content = "Some long text on a curve",
+      path = "M 30 190 C 110 60 210 300 300 150",
+      style = { fill = #4facfe, font_size = 24 } }
+    { type = "path", d = "M 410 210 A 90 90 0 1 1 590 210 A 90 90 0 1 1 410 210",
+      style = { fill = "none", stroke = #3b4258, stroke_width = 1.5 } }
+    { type = "text", x = 0, y = 0, content = "Around and around we go, and around",
+      path = "M 410 210 A 90 90 0 1 1 590 210 A 90 90 0 1 1 410 210",
+      style = { fill = #ffd200, font_size = 20, letter_spacing = 1 } }
+    { type = "path", d = "M 40 340 L 600 340",
+      style = { fill = "none", stroke = #3b4258, stroke_width = 1.5 } }
+    { type = "text", x = 0, y = 0, content = "centred on its start offset",
+      path = "M 40 340 L 600 340", start_offset = 280,
+      style = { fill = #43e97b, font_size = 24, text_anchor = "middle", font_style = "italic" } }
+    { type = "text", x = 0, y = -28, content = "and lifted off the line",
+      path = "M 40 340 L 600 340", start_offset = 280,
+      style = { fill = #e94560, font_size = 18, text_anchor = "middle" } }
+)

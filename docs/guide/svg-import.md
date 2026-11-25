@@ -35,6 +35,7 @@ The importer does the work that the CPU and GPU renderers do not, so an imported
   - Spans that differ in fill, stroke, size, weight, slant, spacing or decoration become one text element each. They are measured with the embedded font and placed one after another, each anchored at its start. A lone span keeps its anchor.
   - `writing-mode` is read from the `text` element and its ancestors, and a value on a `tspan` is ignored. `tb`, `tb-rl`, `vertical-rl` and `vertical-lr` make vertical text, and `lr`, `lr-tb`, `rl`, `rl-tb` and `horizontal-tb` keep it horizontal. In vertical text the chunks, `dx` and `dy` swap their axes.
   - `dx` moves the pen and `dy` shifts the baseline for the characters that follow. A `tspan` with only `y` starts a chunk where the pen stopped.
+  - A `textPath`, a direct child of the `text`, becomes text on a path. Its path is the `path` attribute, or the `path`, `rect`, `circle`, `ellipse`, `line`, `polyline` or `polygon` that `href` points at, with the transform of that element and only that one. A transform turns curves into short lines. `startOffset` takes a number, a length with a unit or a percentage of the path length. The `x` of the `text` is a distance along the path, and `x` and `y` on the `textPath` are not used. Inside a `textPath`, `dx` and `dy` shift along and across and stay for what follows, and an `x` on a `tspan` is a distance from the path start. Text before and after the `textPath` stays flat, and the text after it starts where the last glyph ended. Several `textPath` elements each start at their own path. Only the first subpath is followed, and `side`, `method` and `spacing` are ignored, as in resvg.
   - Only the first value of an `x`, `y`, `dx` or `dy` list is read, `rotate` is ignored, and kerning does not cross a span boundary.
 - **Paths.** Path data is parsed leniently and written back normalized. A path with an error draws up to the error, and a path that does not start with a moveto is not drawn, as in SVG.
 
@@ -203,7 +204,9 @@ What the graph cannot express is reported and the element is drawn without that 
 | Animation inside an SVG `image` | The inner document is drawn as its static frame |
 | An SVG `image` that already contains the document it sits in, or sits more than four documents deep | Skipped |
 | `image-rendering` other than `auto` and `optimizeQuality` | Drawn with smooth scaling |
-| `textPath` | Its text is skipped |
+| `textPath` that does not point at an element with an outline, or has an unreadable `path` or a path with no length | Its text is skipped, with a warning |
+| `textPath` inside a `textPath` | Ignored |
+| `rotate`, and decoration lines, on a text on a path | Ignored |
 | `spreadMethod` that is not `pad`, `reflect` or `repeat` | Imported as `pad`, with a warning |
 | `context-fill` and `context-stroke` outside a marker or a `use` | Painted as none, because there is no context |
 | A gradient used through `context-fill` or `context-stroke` | Fitted to the shape that is painted, not to the box of the context element |

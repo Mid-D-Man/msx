@@ -20,7 +20,7 @@ pub use canvas::{Canvas, Scene};
 pub use color::{Color, Paint};
 pub use effect::{Effect, EffectType};
 pub use filter::{CompositeOp, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn, MAX_FILTER_NODES, MAX_MERGE_INPUTS, MAX_TRANSFER_VALUES};
-pub use element::{Circle, Ellipse, Element, Group, Image, Line, Path, Polyline, Polygon, Rect, Text, Use};
+pub use element::{Circle, Ellipse, Element, Group, Image, Line, Path, Polyline, Polygon, Rect, Text, TextPath, Use};
 pub use gradient::{gradient_matrix, usable_transform, ConicGradient, Def, GradientUnits, LinearGradient, RadialGradient, ShaderDef, ShaderUniform, ShaderUniformValue, SpreadMethod, Stop};
 pub use layer::{layer_reordered, BlendMode, Layer, MaskType};
 pub use media::{Anchor, AudioDef, AudioFormat, ImageFormat, MediaSource};

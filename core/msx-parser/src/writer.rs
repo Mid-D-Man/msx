@@ -545,7 +545,13 @@ fn write_element(out: &mut String, el: &Element, indent: usize, comma: bool) -> 
             let _ = write!(out, "{}{}{} }}{tail}", pad(indent), s, common(&e.id, &e.transform, Some(&e.style)));
         }
         Element::Text(e) => {
-            let s = format!("{{ type = \"text\", x = {}, y = {}, content = {}", num(e.x), num(e.y), quote(&e.content));
+            let mut s = format!("{{ type = \"text\", x = {}, y = {}, content = {}", num(e.x), num(e.y), quote(&e.content));
+            if let Some(p) = &e.path {
+                let _ = write!(s, ", path = {}", quote(&msx_ast::path::commands_to_d(&p.commands)));
+                if p.start_offset != 0.0 {
+                    let _ = write!(s, ", start_offset = {}", num(p.start_offset));
+                }
+            }
             let _ = write!(out, "{}{}{} }}{tail}", pad(indent), s, common(&e.id, &e.transform, Some(&e.style)));
         }
         Element::Use(e) => {
@@ -750,9 +756,23 @@ mod tests {
         ts.font_weight = Some(FontWeight::Numeric(700));
         ts.text_anchor = Some(TextAnchor::Middle);
         ts.dominant_baseline = Some("middle".into());
-        let text = Element::Text(Text { x: 60.0, y: 40.0, content: "Hello".into(), id: None, transform: None, style: ts });
+        let text = Element::Text(Text { x: 60.0, y: 40.0, content: "Hello".into(), id: None, transform: None, style: ts, path: None });
         let u = Element::Use(Use { href: "#p".into(), x: 5.0, y: 6.0, id: None, transform: Some(Transform::Scale { x: 2.0, y: 2.0 }) });
         assert_roundtrip(&scene_with(vec![], vec![path, text, u]));
+    }
+
+    #[test]
+    fn text_on_a_path_roundtrips_with_and_without_an_offset() {
+        let commands = msx_ast::path::parse_d("M 10 80 C 40 10 80 10 120 80 L 150 60").unwrap();
+        let on = |start_offset: f64, y: f64| {
+            Element::Text(Text {
+                x: 4.5, y, content: "Along the curve".into(), id: None, transform: None, style: style(),
+                path: Some(msx_ast::TextPath { commands: commands.clone(), start_offset }),
+            })
+        };
+        assert_roundtrip(&scene_with(vec![], vec![on(0.0, 0.0), on(12.5, -3.0)]));
+        let text = scene_to_msx(&scene_with(vec![], vec![on(0.0, 0.0)])).unwrap();
+        assert!(!text.contains("start_offset"), "a zero offset is not written: {text}");
     }
 
     #[test]
@@ -865,7 +885,7 @@ mod tests {
         let nasty = "quote \" backslash \\ newline \n tab \t brace {x} slash // hash # dollar $ unicode é ñ 日本 emoji 🎉 end";
         let mut st = style();
         st.font_family = Some("Fira \"Code\", 'Mono'".into());
-        let el = Element::Text(Text { x: 1.0, y: 2.0, content: nasty.into(), id: Some("id \"x\"".into()), transform: None, style: st });
+        let el = Element::Text(Text { x: 1.0, y: 2.0, content: nasty.into(), id: Some("id \"x\"".into()), transform: None, style: st, path: None });
         assert_roundtrip(&scene_with(vec![], vec![el]));
     }
 

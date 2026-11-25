@@ -7,7 +7,7 @@ use msx_ast::{
     AnimatedProperty, AnimationTrack, Canvas, Circle, ConicGradient, Def, Easing, Element,
     Ellipse, GaussianSplat, GradientUnits, Group, Image, Keyframe, Layer, Line, LinearGradient,
     LoopMode, MediaSource, Path, Point, Polyline, RadialGradient, Rect, SdfNode, Scene, ShaderDef,
-    ShaderUniform, ShaderUniformValue, SpreadMethod, Stop, Text, Transform, Use, ViewBox,
+    ShaderUniform, ShaderUniformValue, SpreadMethod, Stop, Text, TextPath, Transform, Use, ViewBox,
 };
 
 use crate::decoder::*;
@@ -373,7 +373,22 @@ fn decode_element(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             let x       = read_f32(data, cursor)?;
             let y       = read_f32(data, cursor)?;
             let style   = read_style(data, cursor, pool)?;
-            Ok(Element::Text(Text { x, y, content, id, transform, style }))
+            Ok(Element::Text(Text { x, y, content, id, transform, style, path: None }))
+        }
+        TAG_TEXT_PATH => {
+            let str_idx = read_u16(data, cursor)?;
+            let content = pool.get(str_idx as usize).cloned().unwrap_or_default();
+            let x       = read_f32(data, cursor)?;
+            let y       = read_f32(data, cursor)?;
+            let cmd_len = read_u32(data, cursor)? as usize;
+            if *cursor + cmd_len > data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "text path commands truncated"));
+            }
+            let commands = decode_commands(&data[*cursor..*cursor + cmd_len])?;
+            *cursor += cmd_len;
+            let start_offset = read_f32(data, cursor)?;
+            let style = read_style(data, cursor, pool)?;
+            Ok(Element::Text(Text { x, y, content, id, transform, style, path: Some(TextPath { commands, start_offset }) }))
         }
         TAG_GROUP => {
             let child_count = read_u32(data, cursor)? as usize;

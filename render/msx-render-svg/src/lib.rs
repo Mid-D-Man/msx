@@ -161,6 +161,41 @@ mod tests {
         }
     }
 
+    fn text_on_a_path(d: &str, start_offset: f64, x: f64, y: f64) -> Element {
+        Element::Text(msx_ast::Text {
+            x, y, content: "Some <text>".into(), id: Some("t1".into()), transform: None, style: Style::default(),
+            path: Some(msx_ast::TextPath { commands: msx_ast::path::parse_d(d).unwrap(), start_offset }),
+        })
+    }
+
+    #[test]
+    fn text_on_a_path_is_a_textpath_that_points_into_the_defs() {
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.elements.push(text_on_a_path("M 10 50 C 30 10 70 90 90 50", 12.5, 2.5, 4.0));
+        let svg = render(&scene);
+        assert!(svg.contains("<defs><path id=\"msx-textpath-1\" d=\"M 10 50 C 30 10 70 90 90 50\"/></defs>"), "{svg}");
+        assert!(svg.contains("<textPath href=\"#msx-textpath-1\" startOffset=\"15\" dy=\"4\">Some &lt;text&gt;</textPath>"), "{svg}");
+        assert!(svg.contains("<text id=\"t1\""), "{svg}");
+    }
+
+    #[test]
+    fn a_text_on_a_path_leaves_out_a_zero_offset_and_a_zero_dy() {
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.elements.push(text_on_a_path("M 0 0 L 50 0", 0.0, 0.0, 0.0));
+        let svg = render(&scene);
+        assert!(svg.contains("<textPath href=\"#msx-textpath-1\">"), "{svg}");
+        assert!(!svg.contains("startOffset") && !svg.contains("dy="), "{svg}");
+    }
+
+    #[test]
+    fn two_texts_on_paths_get_two_paths() {
+        let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));
+        scene.elements.push(text_on_a_path("M 0 0 L 50 0", 0.0, 0.0, 0.0));
+        scene.elements.push(text_on_a_path("M 0 9 L 50 9", 0.0, 0.0, 0.0));
+        let svg = render(&scene);
+        assert!(svg.contains("id=\"msx-textpath-1\"") && svg.contains("id=\"msx-textpath-2\""), "{svg}");
+    }
+
     #[test]
     fn renders_basic_shapes_with_expected_attrs() {
         let mut scene = Scene::new(Canvas::new(100.0, 100.0, Color::WHITE));

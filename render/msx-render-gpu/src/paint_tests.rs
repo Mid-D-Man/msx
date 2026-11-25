@@ -68,7 +68,7 @@ fn conic_def() -> Def {
 }
 
 fn text_el(x: f64, y: f64, content: &str, style: Style) -> Element {
-    Element::Text(Text { x, y, content: content.into(), id: None, transform: None, style })
+    Element::Text(Text { x, y, content: content.into(), id: None, transform: None, style, path: None })
 }
 
 fn text_style(paint: Paint) -> Style {

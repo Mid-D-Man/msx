@@ -191,6 +191,22 @@ pub struct Path {
     pub style:     Style,
 }
 
+/// Puts the characters of a text along a path.
+///
+/// Each glyph stands on the path with its midpoint, turned to the direction of
+/// the path there. A glyph whose midpoint falls off either end is not drawn.
+/// Only the first subpath is followed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPath {
+    /// The path, in the user space of the text.
+    pub commands:     Vec<PathCommand>,
+    /// Distance along the path where the text starts, in user units.
+    pub start_offset: f64,
+}
+
+/// With a `path`, `x` is added to the start offset and `y` moves the baseline
+/// across the path, positive away from the side the glyphs stand on. Without
+/// one, they are the position of the text.
 #[derive(Debug, Clone)]
 pub struct Text {
     pub x:         f64,
@@ -199,11 +215,12 @@ pub struct Text {
     pub id:        Option<String>,
     pub transform: Option<Transform>,
     pub style:     Style,
+    pub path:      Option<TextPath>,
 }
 
 impl Text {
     pub fn new(x: f64, y: f64, content: String, style: Style) -> Self {
-        Text { x, y, content, id: None, transform: None, style }
+        Text { x, y, content, id: None, transform: None, style, path: None }
     }
 }
 

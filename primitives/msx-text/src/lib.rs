@@ -4,7 +4,13 @@
 //! it through their normal path pipelines, gradients and shader fills
 //! included.
 
+mod route;
+
 use std::sync::OnceLock;
+
+use route::Route;
+
+pub use route::{path_length, path_point_at, path_points};
 
 use msx_ast::{FontStyle, FontWeight, Path, PathCommand, Point, Style, Text, TextAnchor, TextDecoration, WritingMode};
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
@@ -79,7 +85,11 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
         TextAnchor::Middle => -width / 2.0,
         TextAnchor::End => -width,
     };
-    let vertical = text.style.writing_mode == Some(WritingMode::Vertical);
+    let route = match &text.path {
+        Some(p) => Some(Route::new(&p.commands)?),
+        None => None,
+    };
+    let vertical = route.is_none() && text.style.writing_mode == Some(WritingMode::Vertical);
     // Horizontal text starts at `x0` on the baseline. Vertical text starts at
     // `y0` and is centred on `text.x`, with the glyphs turned a quarter turn
     // clockwise: glyph x runs down the page and glyph y runs to the right.
@@ -93,19 +103,38 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     let slant = if text.style.font_style.is_some_and(FontStyle::is_slanted) { SLANT } else { 0.0 };
     let mut sink = Sink { commands: Vec::new(), m: [0.0; 6], slant, open: false };
     let mut pen = 0.0f64;
+    // On a path the text starts `x` past the start offset, moved by the anchor.
+    let route_start = text.path.as_ref().map_or(0.0, |p| p.start_offset + text.x + anchor_shift);
     for (i, &gid) in glyphs.iter().enumerate() {
-        sink.m = if vertical {
-            [0.0, scale, scale, 0.0, base_x, y0 + pen * scale]
+        let advance = f64::from(face.glyph_hor_advance(gid).unwrap_or(0));
+        let placed = if let Some(route) = &route {
+            glyph_on_route(route, route_start + (pen + advance / 2.0) * scale, advance * scale, scale, text.y)
+        } else if vertical {
+            Some([0.0, scale, scale, 0.0, base_x, y0 + pen * scale])
         } else {
-            [scale, 0.0, 0.0, -scale, x0 + pen * scale, baseline_y]
+            Some([scale, 0.0, 0.0, -scale, x0 + pen * scale, baseline_y])
         };
-        face.outline_glyph(gid, &mut sink);
-        sink.finish_contour();
-        pen += f64::from(face.glyph_hor_advance(gid).unwrap_or(0));
+        if let Some(m) = placed {
+            sink.m = m;
+            face.outline_glyph(gid, &mut sink);
+            sink.finish_contour();
+        }
+        pen += advance;
         if let Some(&next) = glyphs.get(i + 1) {
             pen += kerning(face, gid, next);
         }
         pen += spacing;
+    }
+    if route.is_some() {
+        // A text on a path has no line box. Its box is that of what was drawn.
+        let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+        for c in &sink.commands {
+            if let PathCommand::MoveTo(p) | PathCommand::LineTo(p) = c {
+                lo = (lo.0.min(p.x), lo.1.min(p.y));
+                hi = (hi.0.max(p.x), hi.1.max(p.y));
+            }
+        }
+        return (!sink.commands.is_empty()).then_some(TextLayout { commands: sink.commands, bounds: (lo.0, lo.1, hi.0 - lo.0, hi.1 - lo.1) });
     }
     if let Some(d) = text.style.text_decoration {
         for (top_units, thickness_units) in decoration_bars(face, d) {
@@ -196,6 +225,19 @@ fn kerning(face: &Face<'_>, left: GlyphId, right: GlyphId) -> f64 {
         }
     }
     total
+}
+
+/// The matrix that stands a glyph on the route with its midpoint at distance
+/// `mid`, turned to the direction there and moved `across` the route. `None`
+/// when the midpoint is off either end, the rule for text on a path.
+fn glyph_on_route(route: &Route, mid: f64, advance: f64, scale: f64, across: f64) -> Option<[f64; 6]> {
+    if mid < 0.0 || mid > route.length() {
+        return None;
+    }
+    let ((px, py), (dx, dy)) = route.at(mid);
+    // Back half an advance along the direction, then down the normal by `across`.
+    let (ox, oy) = (px - dx * advance / 2.0 - dy * across, py - dy * advance / 2.0 + dx * across);
+    Some([scale * dx, scale * dy, scale * dy, -scale * dx, ox, oy])
 }
 
 /// The decoration lines as `(top, thickness)` in font units, y up from the
@@ -305,7 +347,7 @@ mod tests {
     use super::*;
 
     fn text(content: &str, style: Style) -> Text {
-        Text { x: 100.0, y: 50.0, content: content.to_string(), id: None, transform: None, style }
+        Text { x: 100.0, y: 50.0, content: content.to_string(), id: None, transform: None, style, path: None }
     }
 
     fn plain() -> Style {
@@ -498,6 +540,112 @@ mod tests {
             }
         }
         e
+    }
+
+    fn on_path(d: &str, start_offset: f64, content: &str, style: Style) -> Text {
+        let commands = msx_ast::path::parse_d(d).unwrap();
+        Text { x: 0.0, y: 0.0, content: content.to_string(), id: None, transform: None, style, path: Some(msx_ast::TextPath { commands, start_offset }) }
+    }
+
+    fn contours(cmds: &[PathCommand]) -> usize {
+        cmds.iter().filter(|c| matches!(c, PathCommand::MoveTo(_))).count()
+    }
+
+    #[test]
+    fn text_on_a_horizontal_line_is_the_text_laid_flat_at_that_baseline() {
+        let on = layout(&on_path("M 0 100 L 500 100", 20.0, "Hi", plain())).unwrap();
+        let mut flat = text("Hi", plain());
+        flat.x = 20.0;
+        flat.y = 100.0;
+        let flat = layout(&flat).unwrap();
+        assert_eq!(on.commands.len(), flat.commands.len());
+        for (a, b) in on.commands.iter().zip(&flat.commands) {
+            if let (PathCommand::MoveTo(p) | PathCommand::LineTo(p), PathCommand::MoveTo(q) | PathCommand::LineTo(q)) = (a, b) {
+                assert!((p.x - q.x).abs() < 1e-6 && (p.y - q.y).abs() < 1e-6, "{p:?} vs {q:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_on_a_downward_line_stands_on_it_with_its_tops_to_the_right() {
+        let l = layout(&on_path("M 100 0 L 100 500", 10.0, "H", plain())).unwrap();
+        let (x0, y0, x1, y1) = extent(&l.commands);
+        let (hx0, hy0, hx1, hy1) = extent(&layout(&text("H", plain())).unwrap().commands);
+        assert!((x0 - 100.0).abs() < 1e-6, "the baseline is on the line: {x0}");
+        assert!((x1 - x0 - (hy1 - hy0)).abs() < 1e-6, "cap height runs across");
+        assert!((y1 - y0 - (hx1 - hx0)).abs() < 1e-6, "advance runs along");
+        assert!(y0 > 10.0, "the glyph starts past the offset: {y0}");
+    }
+
+    #[test]
+    fn glyphs_whose_midpoint_is_past_the_end_are_not_drawn() {
+        let long = contours(&layout(&on_path("M 0 0 L 1000 0", 0.0, "HHHHHHHH", plain())).unwrap().commands);
+        let short = layout(&on_path("M 0 0 L 40 0", 0.0, "HHHHHHHH", plain())).unwrap();
+        assert!(contours(&short.commands) < long, "{} of {long}", contours(&short.commands));
+        let (_, _, x1, _) = extent(&short.commands);
+        assert!(x1 < 40.0 + 20.0, "{x1}");
+    }
+
+    #[test]
+    fn glyphs_before_the_start_are_not_drawn() {
+        let one = advance_width(&text("H", plain()));
+        let all = layout(&on_path("M 0 0 L 500 0", 0.0, "HH", plain())).unwrap();
+        let cut = layout(&on_path("M 0 0 L 500 0", -one * 0.8, "HH", plain())).unwrap();
+        assert_eq!(contours(&all.commands), 2 * contours(&cut.commands));
+    }
+
+    #[test]
+    fn text_that_is_all_off_the_path_draws_nothing() {
+        assert!(layout(&on_path("M 0 0 L 20 0", 500.0, "Hello", plain())).is_none());
+        assert!(layout(&on_path("M 0 0", 0.0, "Hello", plain())).is_none());
+    }
+
+    #[test]
+    fn the_anchor_moves_the_text_around_the_start_offset() {
+        let w = advance_width(&text("HHHH", plain()));
+        let mut s = plain();
+        s.text_anchor = Some(TextAnchor::Middle);
+        let (x0, _, x1, _) = extent(&layout(&on_path("M 0 0 L 500 0", 200.0, "HHHH", s)).unwrap().commands);
+        assert!(((x0 + x1) / 2.0 - 200.0).abs() < w * 0.2, "{x0}..{x1} around 200");
+        let mut e = plain();
+        e.text_anchor = Some(TextAnchor::End);
+        let (_, _, ex1, _) = extent(&layout(&on_path("M 0 0 L 500 0", 200.0, "HHHH", e)).unwrap().commands);
+        assert!(ex1 <= 200.0 + 1e-6 && ex1 > 200.0 - 0.2 * w, "{ex1}");
+    }
+
+    #[test]
+    fn x_adds_to_the_start_offset_and_y_moves_the_baseline_across() {
+        let base = layout(&on_path("M 0 100 L 500 100", 20.0, "H", plain())).unwrap();
+        let mut t = on_path("M 0 100 L 500 100", 20.0, "H", plain());
+        t.x = 30.0;
+        t.y = 12.0;
+        let moved = layout(&t).unwrap();
+        let (bx0, by0, ..) = extent(&base.commands);
+        let (mx0, my0, ..) = extent(&moved.commands);
+        assert!((mx0 - bx0 - 30.0).abs() < 1e-6 && (my0 - by0 - 12.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn glyphs_turn_with_the_path() {
+        let l = layout(&on_path("M 0 0 L 300 300", 10.0, "H", plain())).unwrap();
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for c in &l.commands {
+            if let PathCommand::MoveTo(p) | PathCommand::LineTo(p) = c {
+                lo = lo.min(p.y - p.x);
+                hi = hi.max(p.y - p.x);
+            }
+        }
+        assert!(hi.abs() < 1e-6, "the baseline lies on the line: {hi}");
+        assert!(lo < -10.0, "the tops stand off it: {lo}");
+    }
+
+    #[test]
+    fn a_vertical_writing_mode_does_not_apply_on_a_path() {
+        let mut v = plain();
+        v.writing_mode = Some(WritingMode::Vertical);
+        let a = layout(&on_path("M 0 100 L 500 100", 20.0, "Hi", v)).unwrap();
+        let b = layout(&on_path("M 0 100 L 500 100", 20.0, "Hi", plain())).unwrap();
+        assert_eq!(a.commands, b.commands);
     }
 
     #[test]

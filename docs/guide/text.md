@@ -39,6 +39,29 @@ Text takes the usual `id` and `transform` fields and a `style`. The keys that sh
 - In vertical text `dx` moves the column and `dy` moves along the text. Only the glyphs of the embedded face are drawn, so upright CJK glyphs are not part of this.
 - A scene that sets one of these keys is written as binary version 3 (see [Binary format](binary-format.md#versions)).
 
+## Text on a path
+
+```dixscript
+{ type = "text", x = 0, y = 0, content = "Some long text on a curve",
+  path = "M 20 100 C 35 135 85 135 100 100 C 115 65 165 65 180 100",
+  start_offset = 10,
+  style = { fill = #ffffff, font_size = 24 } }
+```
+
+<!-- example: text_on_path -->
+
+| Key | Meaning | Default |
+|---|---|---|
+| `path` | Path data. The first subpath is followed | none, the text is flat |
+| `start_offset` | Distance along the path where the text starts, in user units | `0` |
+
+- Each glyph stands on the path with the middle of its baseline, turned to the direction of the path there. A glyph whose middle falls before the start or past the end is not drawn.
+- `x` adds to `start_offset` and `y` moves the baseline across the path, positive away from the side the glyphs stand on. `text_anchor` moves the text around the start, so `middle` centres it on `start_offset + x`.
+- Letter spacing, size, weight and slant apply. Decoration lines, `writing_mode` and `dominant_baseline` do not.
+- A path with no length draws nothing.
+- The SVG renderer writes a `textPath` that points at a copy of the path in the `defs`, and the browser lays the glyphs out with its own font.
+- A text with a path is written as binary version 3, in its own element tag.
+
 ## Where text renders
 
 All three renderers draw text.

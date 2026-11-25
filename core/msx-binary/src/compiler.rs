@@ -395,11 +395,21 @@ fn encode_path(e: &Path, out: &mut Vec<u8>, pool: &mut Vec<String>) {
 }
 
 fn encode_text(e: &Text, out: &mut Vec<u8>, pool: &mut Vec<String>) {
-    write_u8(out, TAG_TEXT);
+    // A text on a path has its own tag so that a reader older than version 3
+    // stops at an unknown element instead of drawing the text flat.
+    write_u8(out, if e.path.is_some() { TAG_TEXT_PATH } else { TAG_TEXT });
     write_id_flags(out, e.id.as_deref(), e.transform.as_ref(), pool);
     let str_idx = intern_string(pool, &e.content);
     write_u16(out, str_idx);
     write_f32(out, e.x); write_f32(out, e.y);
+    if let Some(path) = &e.path {
+        crate::version::require(3);
+        let mut cmd_buf: Vec<u8> = Vec::new();
+        encode_commands(&path.commands, &mut cmd_buf);
+        write_u32(out, cmd_buf.len() as u32);
+        out.extend_from_slice(&cmd_buf);
+        write_f32(out, path.start_offset);
+    }
     write_style(out, &e.style, pool);
 }
 

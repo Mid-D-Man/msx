@@ -92,6 +92,29 @@ pub(crate) fn render_path(ctx: &mut Ctx, p: &Path) {
 }
 
 pub(crate) fn render_text(ctx: &mut Ctx, t: &Text) {
+    if let Some(path) = &t.path {
+        // The path goes to the shared defs and the text follows it with a
+        // `textPath`. `x` adds to the start offset and `y` is a `dy`.
+        let id = ctx.fresh_id("msx-textpath-");
+        ctx.extra_defs.push_str(&format!("<path id=\"{id}\" d=\"{}\"/>", escape_attr(&commands_to_d(&path.commands))));
+        ctx.push("<text");
+        write_id(ctx, t.id.as_deref());
+        write_transform(ctx, t.transform.as_ref());
+        write_style(ctx, &t.style);
+        ctx.push("><textPath");
+        write_attr(ctx, "href", format!("#{id}"));
+        let offset = path.start_offset + t.x;
+        if offset != 0.0 {
+            write_attr(ctx, "startOffset", fmt_f64(offset));
+        }
+        if t.y != 0.0 {
+            write_attr(ctx, "dy", fmt_f64(t.y));
+        }
+        ctx.push(">");
+        ctx.push(&escape_text(&t.content));
+        ctx.push("</textPath></text>");
+        return;
+    }
     ctx.push("<text");
     write_attr(ctx, "x", fmt_f64(t.x));
     write_attr(ctx, "y", fmt_f64(t.y));

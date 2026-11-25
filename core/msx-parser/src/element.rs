@@ -2,7 +2,7 @@
 use dixscript::Runtime::{DixData, dix_path};
 use msx_ast::{
     path::parse_d, Anchor, Circle, Element, Ellipse, Group, Image, ImageFormat, Line, Path,
-    Point, Polyline, Rect, Text, Transform, Use,
+    Point, Polyline, Rect, Text, TextPath, Transform, Use,
 };
 
 use crate::dix_helpers::{array_len, opt, parse_media_source, path_present, type_tag};
@@ -157,7 +157,15 @@ fn parse_path(data: &DixData, prefix: &str) -> Result<Path, String> {
 
 fn parse_text(data: &DixData, prefix: &str) -> Result<Text, String> {
     let (id, transform) = id_and_transform(data, prefix)?;
+    let path = match opt::<String>(data, prefix, "path")? {
+        Some(d) => Some(TextPath {
+            commands: parse_d(&d).map_err(|e| format!("{}.path: {}", prefix, e))?,
+            start_offset: opt::<f64>(data, prefix, "start_offset")?.unwrap_or(0.0),
+        }),
+        None => None,
+    };
     Ok(Text {
+        path,
         x: opt::<f64>(data, prefix, "x")?.ok_or_else(|| format!("{}.x: required", prefix))?,
         y: opt::<f64>(data, prefix, "y")?.ok_or_else(|| format!("{}.y: required", prefix))?,
         content: opt::<String>(data, prefix, "content")?
