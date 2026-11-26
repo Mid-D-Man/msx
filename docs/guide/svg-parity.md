@@ -87,7 +87,8 @@ Progress is measured with `scripts/svg-compare/`. At the last full run the impor
 | `writing-mode` | Native | Vertical text turns Latin glyphs a quarter turn clockwise. Upright CJK glyphs and `text-orientation` are open |
 | `word-spacing` | Gap | Reported |
 | Different styles inside one line | Gap | The style of the line start is used |
-| `textPath` with `href` or `path`, `startOffset`, `dx` and `dy`, on a path, `rect`, `circle`, `ellipse`, `line`, `polyline` or `polygon` | Native | Text on a path, binary version 3. Open: decoration lines and `rotate` on the path, `baseline-shift`, glyphs flowing on to a second subpath, and the exact pen position after a text that runs past the end |
+| `textPath` with `href` or `path`, `startOffset`, `dx` and `dy`, on a path, `rect`, `circle`, `ellipse`, `line`, `polyline` or `polygon` | Native | Text on a path, binary version 3. Open: decoration lines and `rotate` on the path, glyphs flowing on to a second subpath, and the exact pen position after a text that runs past the end |
+| `baseline-shift` | Native | Read on `tspan` and `textPath` (`sub`, `super`, length, percentage, `inherit`, nested shifts add up) and baked into the text position, so no format change. `sub` and `super` use fixed fractions of the font size. Open: `alignment-baseline` on a span |
 | `dominant-baseline` | Native | Kept in the binary from version 3 on |
 
 ## Renderers
@@ -111,6 +112,6 @@ The remaining gaps share a few causes, so they are closed in this order.
 4. Done: markers, expanded by the importer into copies at the vertices.
 5. Done for PNG, JPEG and SVG images. What is left is GIF, WebP and `.svgz`, which need a decoder.
 6. Done for blur (also per axis), color matrix, drop shadow, offset, the CSS color functions and, as a filter graph, flood, composite, merge, blend, component transfer, named results, standard inputs and primitive regions. What is left is new graph nodes: `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` and lighting, the graph on the GPU renderer, and clipping the source graphic to the filter region before the effects run.
-7. Done: text styling, vertical text and `textPath`. What is left is `baseline-shift`, `word-spacing`, per-glyph lists and `rotate`, upright CJK glyphs, and shaping.
+7. Done: text styling, vertical text and `textPath`. `baseline-shift` followed. What is left is `alignment-baseline` on spans, `word-spacing`, per-glyph lists and `rotate`, upright CJK glyphs, and shaping.
 8. Done: a binary version 3 with slots for `fill_opacity`, `stroke_opacity` and `dominant_baseline`, written only for a scene that uses one. CPU and GPU now honor the two opacities.
 9. Done for SMIL transforms and opacity, and the writer now writes animated scenes. CSS `@keyframes` followed. `set`, `animateMotion` and `steps()` followed. Style channels for fill and stroke color, stroke width and dash offset followed (binary version 3). What is left is the properties that have no track channel yet, such as rect width and height, `rx`, `ry`, the radius of a stroked circle, `d` and `points`.

@@ -82,6 +82,8 @@ A gradient on text maps onto the text box, which is the advance width of the str
 
 From binary version 3 the compiled file keeps `dominant_baseline`, and a scene that sets it is written as version 3 (see [Binary format](binary-format.md#versions)).
 
+Text has no `baseline-shift` key. The SVG importer reads `baseline-shift` on spans and puts the result in the position of each text, so a raised piece is a text with a smaller `y` (or a larger `x` in vertical text). On a path the shift is a negative `y`, which moves the baseline toward the side the glyphs stand on. See [SVG import](svg-import.md) for the values it reads.
+
 ## Text and the roundtrip
 
 Text survives the binary format unchanged. A compiled file renders the same SVG text as its source, which is what `msx roundtrip` checks.

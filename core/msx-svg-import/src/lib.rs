@@ -333,6 +333,9 @@ struct Piece {
     /// Shift of the pen along the text before the characters (`dx`, or `dy` in
     /// vertical text).
     shift: f64,
+    /// How far the characters sit above their baseline (`baseline-shift`), in
+    /// the direction the glyphs point up.
+    rise: f64,
 }
 
 /// Pieces laid out from one anchor: the start of the `text`, or a `tspan` with
@@ -361,6 +364,11 @@ struct Pen {
     path: Option<TextPath>,
     /// The next chunk follows a `textPath`.
     after_path: bool,
+    /// Rise of the span being walked, the sum of the `baseline-shift` of its
+    /// ancestors and its own.
+    rise: f64,
+    /// The `baseline-shift` of the enclosing span alone, for `inherit`.
+    own_rise: f64,
 }
 
 /// How an element composites against what is already drawn.
@@ -2041,7 +2049,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
                 if let Some(chunk) = chunks.last_mut() {
                     let text = child.text().unwrap_or("").to_string();
-                    chunk.pieces.push(Piece { text, inh: inh.clone(), cross: pen.cross, shift: std::mem::take(&mut pen.shift) });
+                    chunk.pieces.push(Piece { text, inh: inh.clone(), cross: pen.cross, shift: std::mem::take(&mut pen.shift), rise: pen.rise });
                 }
             } else if child.is_element() && !is_foreign(&child) {
                 match child.tag_name().name() {
@@ -2084,7 +2092,11 @@ impl<'a, 'i> Importer<'a, 'i> {
                             }
                         }
                         pen.cross += d_cross;
+                        let saved = (pen.rise, pen.own_rise);
+                        let own = Self::baseline_rise(&props, cinh.font_size, pen.own_rise);
+                        (pen.rise, pen.own_rise) = (pen.rise + own, own);
                         self.collect_chunks(child, &cinh, pen, chunks);
+                        (pen.rise, pen.own_rise) = saved;
                     }
                     "textPath" => self.collect_text_path(child, inh, pen, chunks),
                     _ => {}
@@ -2122,9 +2134,30 @@ impl<'a, 'i> Importer<'a, 'i> {
         let fresh = chunks.iter().all(|c| c.pieces.iter().all(|p| p.text.trim().is_empty()));
         let along = if fresh { pen.text_along } else { 0.0 };
         let saved_cross = pen.cross;
+        let saved_rise = (pen.rise, pen.own_rise);
+        let own = Self::baseline_rise(&props, cinh.font_size, pen.own_rise);
+        (pen.rise, pen.own_rise) = (pen.rise + own, own);
         (pen.path, pen.start, pen.after_path, pen.cross, pen.shift) = (Some(path), Some(Some(along)), false, 0.0, 0.0);
         self.collect_chunks(node, &cinh, pen, chunks);
         (pen.path, pen.start, pen.after_path, pen.cross, pen.shift) = (None, Some(None), true, saved_cross, 0.0);
+        (pen.rise, pen.own_rise) = saved_rise;
+    }
+
+    /// The `baseline-shift` of a `tspan` or `textPath`, as a rise above the
+    /// baseline of its parent in user units. The value is not inherited, so a
+    /// missing or invalid one is no shift. `sub` and `super` use the offsets
+    /// of Noto Sans, the font of the reference renders, as fractions of the
+    /// font size and not the metrics of the embedded face, so a later font
+    /// change does not move them. A percentage is of the font size.
+    fn baseline_rise(props: &Props, font_size: f64, parent: f64) -> f64 {
+        let Some(value) = props.get("baseline-shift") else { return 0.0 };
+        match value.trim() {
+            "baseline" => 0.0,
+            "sub" => -font_size * 0.075,
+            "super" => font_size * 0.35,
+            "inherit" => parent,
+            other => parse_length(other).map_or(0.0, |l| l.to_px(font_size, font_size)),
+        }
     }
 
     /// Advance width of characters in the style of `inh`.
@@ -2150,7 +2183,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         let (along, cross) = if vertical { (y, x) } else { (x, y) };
 
         let mut chunks = Vec::new();
-        let mut pen = Pen { vertical, cross, shift: 0.0, start: Some(Some(along)), text_along: along, path: None, after_path: false };
+        let mut pen = Pen { vertical, cross, shift: 0.0, start: Some(Some(along)), text_along: along, path: None, after_path: false, rise: 0.0, own_rise: 0.0 };
         self.collect_chunks(node, &inh, &mut pen, &mut chunks);
 
         let transform = self.node_transform(node);
@@ -2200,7 +2233,9 @@ impl<'a, 'i> Importer<'a, 'i> {
                 if content.is_empty() {
                     continue;
                 }
-                let (px, py) = if vertical && chunk.path.is_none() { (piece.cross, at) } else { (at, piece.cross) };
+                // Up is toward smaller y in horizontal text and on a path (`y` is
+                // the baseline), and toward larger x in vertical text.
+                let (px, py) = if vertical && chunk.path.is_none() { (piece.cross + piece.rise, at) } else { (at, piece.cross - piece.rise) };
                 let bbox = Self::text_bbox(px, py, &content, &pinh, chunk.path.as_ref());
                 let comp = self.composite(&node, &props, bbox);
                 let style = self.leaf_style(&pinh, &props, bbox, Kind::Text);
@@ -2257,7 +2292,7 @@ fn merge_pieces(chunk: &mut Chunk) {
     let mut merged: Vec<Piece> = Vec::with_capacity(chunk.pieces.len());
     for p in chunk.pieces.drain(..) {
         match merged.last_mut() {
-            Some(last) if p.shift == 0.0 && last.cross == p.cross && same_text_style(&last.inh, &p.inh) => last.text.push_str(&p.text),
+            Some(last) if p.shift == 0.0 && last.cross == p.cross && last.rise == p.rise && same_text_style(&last.inh, &p.inh) => last.text.push_str(&p.text),
             _ => merged.push(p),
         }
     }

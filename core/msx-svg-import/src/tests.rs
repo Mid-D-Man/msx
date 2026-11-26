@@ -1173,6 +1173,140 @@ fn a_tspan_with_x_starts_a_new_chunk_at_that_x() {
     assert_eq!(t[1].style.text_anchor, Some(TextAnchor::End));
 }
 
+/// The `y` of every text of `body`, a `text` at y 50 with a font size of 26.
+fn ys(body: &str) -> Vec<f64> {
+    let i = imp(&doc(&format!(r#"<text x="0" y="50" font-size="26">{body}</text>"#)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    texts(&i).iter().map(|t| t.y).collect()
+}
+
+fn same(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+}
+
+#[test]
+fn a_length_raises_the_span_and_a_negative_one_lowers_it() {
+    let up = ys(r#"a<tspan baseline-shift="10">b</tspan>c"#);
+    assert!(same(&up, &[50.0, 40.0, 50.0]), "{up:?}");
+    let down = ys(r#"a<tspan baseline-shift="-10">b</tspan>c"#);
+    assert!(same(&down, &[50.0, 60.0, 50.0]), "{down:?}");
+}
+
+#[test]
+fn the_shift_leaves_the_pen_along_the_text_alone() {
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="26">a<tspan baseline-shift="10">b</tspan>c</text>"#));
+    let t = texts(&i);
+    assert!((t[1].x - width("a", 26.0, false)).abs() < 1e-9);
+    assert!((t[2].x - width("ab", 26.0, false)).abs() < 1e-9);
+}
+
+#[test]
+fn units_and_percent_resolve_against_the_font_size_of_the_span() {
+    let pct = ys(r#"a<tspan baseline-shift="50%">b</tspan>"#);
+    assert!(same(&pct, &[50.0, 37.0]), "{pct:?}");
+    let em = ys(r#"a<tspan baseline-shift="0.5em">b</tspan>"#);
+    assert!(same(&em, &[50.0, 37.0]), "{em:?}");
+    let mm = ys(r#"a<tspan baseline-shift="2mm">b</tspan>"#);
+    assert!((mm[1] - (50.0 - 2.0 * 96.0 / 25.4)).abs() < 1e-9, "{mm:?}");
+    let own = ys(r#"a<tspan font-size="40" baseline-shift="50%">b</tspan>"#);
+    assert!(same(&own, &[50.0, 30.0]), "{own:?}");
+}
+
+#[test]
+fn sub_and_super_move_by_a_fraction_of_the_font_size() {
+    let sup = ys(r#"a<tspan baseline-shift="super">b</tspan>"#);
+    assert!((sup[1] - (50.0 - 26.0 * 0.35)).abs() < 1e-9, "{sup:?}");
+    let sub = ys(r#"a<tspan baseline-shift="sub">b</tspan>"#);
+    assert!((sub[1] - (50.0 + 26.0 * 0.075)).abs() < 1e-9, "{sub:?}");
+}
+
+#[test]
+fn nested_shifts_add_up_and_baseline_adds_nothing() {
+    let two = ys(r#"a<tspan baseline-shift="5">b<tspan baseline-shift="5">c</tspan></tspan>"#);
+    assert!(same(&two, &[50.0, 45.0, 40.0]), "{two:?}");
+    let level = ys(r#"<tspan baseline-shift="10"><tspan baseline-shift="baseline"><tspan baseline-shift="10">x</tspan></tspan></tspan>"#);
+    assert!(same(&level, &[30.0]), "{level:?}");
+    // The shift ends with its span.
+    let after = ys(r#"<tspan baseline-shift="10">a<tspan baseline-shift="10">b</tspan>c</tspan>d"#);
+    assert!(same(&after, &[40.0, 30.0, 40.0, 50.0]), "{after:?}");
+}
+
+#[test]
+fn a_span_inside_a_shifted_span_rides_with_it() {
+    let y = ys(r#"<tspan baseline-shift="10"><tspan fill="red">b</tspan></tspan>"#);
+    assert!(same(&y, &[40.0]), "{y:?}");
+}
+
+#[test]
+fn baseline_shift_is_not_inherited_and_the_text_element_ignores_it() {
+    let g = imp(&doc(r#"<g baseline-shift="super"><text x="0" y="50" font-size="26">a<tspan fill="red">b</tspan></text></g>"#));
+    assert!(texts(&g).iter().all(|t| t.y == 50.0));
+    let on_text = imp(&doc(r#"<text x="0" y="50" font-size="26" baseline-shift="super">a<tspan fill="red">b</tspan></text>"#));
+    assert!(texts(&on_text).iter().all(|t| t.y == 50.0));
+}
+
+#[test]
+fn inherit_takes_the_value_of_the_parent_span() {
+    let y = ys(r#"<tspan baseline-shift="10"><tspan baseline-shift="inherit">x</tspan></tspan>"#);
+    assert!(same(&y, &[30.0]), "{y:?}");
+    // The text element has no value to give.
+    let none = ys(r#"<tspan baseline-shift="inherit">x</tspan>"#);
+    assert!(same(&none, &[50.0]), "{none:?}");
+}
+
+#[test]
+fn an_invalid_value_is_no_shift_and_no_warning() {
+    // "a" and "b" share a style and a baseline, so they are one text.
+    let y = ys(r#"a<tspan baseline-shift="qwe">b</tspan>"#);
+    assert!(same(&y, &[50.0]), "{y:?}");
+}
+
+#[test]
+fn baseline_shift_in_a_style_attribute_counts() {
+    let y = ys(r#"a<tspan style="baseline-shift: 10">b</tspan>"#);
+    assert!(same(&y, &[50.0, 40.0]), "{y:?}");
+}
+
+#[test]
+fn neighbours_with_one_style_and_one_shift_stay_one_text_and_other_shifts_do_not_merge() {
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="26"><tspan baseline-shift="5">a</tspan><tspan baseline-shift="5">b</tspan><tspan baseline-shift="6">c</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["ab", "c"]);
+    assert_eq!((t[0].y, t[1].y), (45.0, 44.0));
+}
+
+#[test]
+fn in_vertical_text_a_shift_moves_the_column_the_way_the_glyphs_point_up() {
+    let i = imp(&doc(r#"<text x="50" y="20" font-size="20" writing-mode="tb">a<tspan baseline-shift="10">b</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!((t[0].x, t[1].x), (50.0, 60.0));
+    assert!((t[1].y - (20.0 + width("a", 20.0, false))).abs() < 1e-9, "{}", t[1].y);
+}
+
+#[test]
+fn a_text_path_shift_moves_the_baseline_across_the_path_and_ends_with_the_path() {
+    let svg = |attrs: &str, inner: &str| doc(&format!(r##"<defs><path id="p" d="M 0 0 L 300 0"/></defs><text font-size="24"><textPath href="#p" {attrs}>{inner}</textPath>z</text>"##));
+    let i = imp(&svg(r#"baseline-shift="10""#, "a"));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = texts(&i);
+    assert!(t[0].path.is_some() && t[0].y == -10.0, "{:?}", t[0].y);
+    // The text after the path is flat and unshifted.
+    assert!(t[1].path.is_none() && t[1].y == 0.0, "{:?}", t[1].y);
+    let span = imp(&svg("", r#"a<tspan baseline-shift="sub">b</tspan>"#));
+    let t = texts(&span);
+    assert_eq!(t[0].y, 0.0);
+    assert!((t[1].y - 24.0 * 0.075).abs() < 1e-9, "{}", t[1].y);
+}
+
+#[test]
+fn a_shifted_import_survives_write_and_parse() {
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="26">a<tspan baseline-shift="super" fill="red">b</tspan></text>"#));
+    let text_src = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&text_src).expect("parsed");
+    let ys: Vec<f64> = back.elements.iter().map(|e| text(e).y).collect();
+    assert!((ys[0] - 50.0).abs() < 1e-3 && (ys[1] - (50.0 - 26.0 * 0.35)).abs() < 1e-3, "{ys:?}");
+}
+
 fn mode(t: &Text) -> Option<WritingMode> {
     t.style.writing_mode
 }
