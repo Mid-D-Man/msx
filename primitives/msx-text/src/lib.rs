@@ -108,7 +108,7 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     for (i, &gid) in glyphs.iter().enumerate() {
         let advance = f64::from(face.glyph_hor_advance(gid).unwrap_or(0));
         let placed = if let Some(route) = &route {
-            glyph_on_route(route, route_start + (pen + advance / 2.0) * scale, advance * scale, scale, text.y)
+            glyph_on_route(route, route_start + (pen + advance / 2.0) * scale, advance * scale, scale, baseline_y)
         } else if vertical {
             Some([0.0, scale, scale, 0.0, base_x, y0 + pen * scale])
         } else {
@@ -273,6 +273,7 @@ fn baseline_shift(face: &Face<'_>, baseline: Option<&str>, scale: f64) -> f64 {
         }
         Some("central") => (asc + desc) / 2.0 * scale,
         Some("hanging") => asc * 0.8 * scale,
+        Some("mathematical") => asc * 0.5 * scale,
         Some("text-before-edge") | Some("text-top") => asc * scale,
         Some("text-after-edge") | Some("text-bottom") | Some("ideographic") => desc * scale,
         _ => 0.0,
@@ -477,6 +478,18 @@ mod tests {
     }
 
     #[test]
+    fn mathematical_baseline_is_half_the_ascender_below_y() {
+        let base = y_extent(&layout(&text("H", plain())).unwrap().commands).1;
+        let mut s = plain();
+        s.dominant_baseline = Some("mathematical".into());
+        let math = y_extent(&layout(&text("H", s)).unwrap().commands).1;
+        let face = pick_face(&plain());
+        let size = plain().font_size.expect("a size");
+        let want = f64::from(face.ascender()) * 0.5 * size / f64::from(face.units_per_em());
+        assert!((math - base - want).abs() < 0.01, "moved {}, want {want}", math - base);
+    }
+
+    #[test]
     fn missing_glyph_draws_notdef() {
         let l = layout(&text("\u{4E2D}", plain())).unwrap();
         assert!(!l.commands.is_empty());
@@ -623,6 +636,17 @@ mod tests {
         let (bx0, by0, ..) = extent(&base.commands);
         let (mx0, my0, ..) = extent(&moved.commands);
         assert!((mx0 - bx0 - 30.0).abs() < 1e-6 && (my0 - by0 - 12.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_baseline_moves_text_on_a_path_across_it() {
+        let base = layout(&on_path("M 0 100 L 500 100", 20.0, "H", plain())).unwrap();
+        let mut s = plain();
+        s.dominant_baseline = Some("middle".into());
+        let mid = layout(&on_path("M 0 100 L 500 100", 20.0, "H", s)).unwrap();
+        let (_, by0, ..) = extent(&base.commands);
+        let (_, my0, ..) = extent(&mid.commands);
+        assert!(my0 - by0 > 3.0, "moved {}", my0 - by0);
     }
 
     #[test]

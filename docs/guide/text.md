@@ -57,7 +57,7 @@ Text takes the usual `id` and `transform` fields and a `style`. The keys that sh
 
 - Each glyph stands on the path with the middle of its baseline, turned to the direction of the path there. A glyph whose middle falls before the start or past the end is not drawn.
 - `x` adds to `start_offset` and `y` moves the baseline across the path, positive away from the side the glyphs stand on. `text_anchor` moves the text around the start, so `middle` centres it on `start_offset + x`.
-- Letter spacing, size, weight and slant apply. Decoration lines, `writing_mode` and `dominant_baseline` do not.
+- Letter spacing, size, weight and slant apply. Decoration lines and `writing_mode` do not. `dominant_baseline` moves the baseline across the path.
 - A path with no length draws nothing.
 - The SVG renderer writes a `textPath` that points at a copy of the path in the `defs`, and the browser lays the glyphs out with its own font.
 - A text with a path is written as binary version 3, in its own element tag.
@@ -78,11 +78,13 @@ A gradient on text maps onto the text box, which is the advance width of the str
 
 ## Baselines
 
-`y` is the alphabetic baseline unless `dominant_baseline` says otherwise. The CPU and GPU renderers read these values: `middle`, `central`, `hanging`, `text-before-edge`, `text-top`, `text-after-edge`, `text-bottom` and `ideographic`. Any other value keeps the alphabetic baseline.
+`y` is the alphabetic baseline unless `dominant_baseline` says otherwise. The CPU and GPU renderers read these values: `middle`, `central`, `hanging`, `mathematical`, `text-before-edge`, `text-top`, `text-after-edge`, `text-bottom` and `ideographic`. `mathematical` is half the ascender below `y`, `hanging` is eight tenths of it. On a path the baseline moves across the path by the same amount. Vertical text ignores the value. Any other value keeps the alphabetic baseline.
 
 From binary version 3 the compiled file keeps `dominant_baseline`, and a scene that sets it is written as version 3 (see [Binary format](binary-format.md#versions)).
 
 Text has no `baseline-shift` key. The SVG importer reads `baseline-shift` on spans and puts the result in the position of each text, so a raised piece is a text with a smaller `y` (or a larger `x` in vertical text). On a path the shift is a negative `y`, which moves the baseline toward the side the glyphs stand on. See [SVG import](svg-import.md) for the values it reads.
+
+Text has no `alignment-baseline` key either. The importer reads it on `text`, `tspan` and `textPath` and sets the `dominant_baseline` of each piece, so a span with its own alignment is its own text.
 
 ## Text and the roundtrip
 

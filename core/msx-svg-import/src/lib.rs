@@ -2062,6 +2062,7 @@ impl<'a, 'i> Importer<'a, 'i> {
                         apply(&mut cinh, &props, self.vp);
                         // The writing mode belongs to the `text` element alone.
                         cinh.writing_mode = inh.writing_mode;
+                        self.align(child, &mut cinh);
                         if cinh.hidden {
                             continue;
                         }
@@ -2118,6 +2119,7 @@ impl<'a, 'i> Importer<'a, 'i> {
         let mut cinh = inh.clone();
         apply(&mut cinh, &props, self.vp);
         cinh.writing_mode = inh.writing_mode;
+        self.align(node, &mut cinh);
         if cinh.hidden {
             return;
         }
@@ -2141,6 +2143,35 @@ impl<'a, 'i> Importer<'a, 'i> {
         self.collect_chunks(node, &cinh, pen, chunks);
         (pen.path, pen.start, pen.after_path, pen.cross, pen.shift) = (None, Some(None), true, saved_cross, 0.0);
         (pen.rise, pen.own_rise) = saved_rise;
+    }
+
+    /// The `alignment-baseline` of a `text`, `tspan` or `textPath` as the
+    /// baseline its characters are set on. `None` leaves the baseline they
+    /// have (`auto`, `baseline`, an unknown word), `Some(None)` is the
+    /// alphabetic one. The value is not inherited, but `inherit` takes the
+    /// value of the parent.
+    fn alignment_baseline(&mut self, node: Node<'a, 'i>) -> Option<Option<String>> {
+        let mut cur = node;
+        loop {
+            let value = self.props_for(cur).get("alignment-baseline")?.trim().to_string();
+            if value != "inherit" {
+                return Some(match value.as_str() {
+                    "alphabetic" => None,
+                    "hanging" | "middle" | "central" | "mathematical" | "ideographic" => Some(value),
+                    "before-edge" | "text-before-edge" | "text-top" => Some("text-before-edge".to_string()),
+                    "after-edge" | "text-after-edge" | "text-bottom" => Some("text-after-edge".to_string()),
+                    _ => return None,
+                });
+            }
+            cur = cur.parent().filter(|p| p.is_element())?;
+        }
+    }
+
+    /// Sets the baseline of the characters of `node` from its `alignment-baseline`.
+    fn align(&mut self, node: Node<'a, 'i>, inh: &mut Inh) {
+        if let Some(baseline) = self.alignment_baseline(node) {
+            inh.dominant_baseline = baseline;
+        }
     }
 
     /// The `baseline-shift` of a `tspan` or `textPath`, as a rise above the
@@ -2172,10 +2203,11 @@ impl<'a, 'i> Importer<'a, 'i> {
     }
 
     fn walk_text(&mut self, node: Node<'a, 'i>, parent: &Inh, out: &mut Vec<Element>, expanded: bool) {
-        let Some((inh, props)) = self.begin(node, parent) else { return };
+        let Some((mut inh, props)) = self.begin(node, parent) else { return };
         if inh.hidden {
             return;
         }
+        self.align(node, &mut inh);
         let (fs, vp) = (inh.font_size, self.vp);
         let vertical = inh.writing_mode == Some(WritingMode::Vertical);
         let x = self.first_coord(node, "x", fs, vp.0).unwrap_or(0.0) + self.first_coord(node, "dx", fs, vp.0).unwrap_or(0.0);

@@ -1307,6 +1307,106 @@ fn a_shifted_import_survives_write_and_parse() {
     assert!((ys[0] - 50.0).abs() < 1e-3 && (ys[1] - (50.0 - 26.0 * 0.35)).abs() < 1e-3, "{ys:?}");
 }
 
+/// The baseline of every text of `body`, a `text` at y 50 with a font size of 26.
+fn baselines(body: &str) -> Vec<Option<String>> {
+    let i = imp(&doc(&format!(r#"<text x="0" y="50" font-size="26">{body}</text>"#)));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    texts(&i).iter().map(|t| t.style.dominant_baseline.clone()).collect()
+}
+
+fn some(words: &[&str]) -> Vec<Option<String>> {
+    words.iter().map(|w| Some(w.to_string())).collect()
+}
+
+#[test]
+fn alignment_baseline_words_pick_the_baseline_of_the_text() {
+    for (word, want) in [
+        ("hanging", "hanging"),
+        ("middle", "middle"),
+        ("central", "central"),
+        ("mathematical", "mathematical"),
+        ("ideographic", "ideographic"),
+        ("before-edge", "text-before-edge"),
+        ("text-before-edge", "text-before-edge"),
+        ("text-top", "text-before-edge"),
+        ("after-edge", "text-after-edge"),
+        ("text-after-edge", "text-after-edge"),
+        ("text-bottom", "text-after-edge"),
+    ] {
+        let i = imp(&doc(&format!(r#"<text x="0" y="50" alignment-baseline="{word}">Text</text>"#)));
+        assert!(i.warnings.is_empty(), "{word}: {:?}", i.warnings);
+        assert_eq!(text(&i.scene.elements[0]).style.dominant_baseline.as_deref(), Some(want), "{word}");
+    }
+}
+
+#[test]
+fn auto_baseline_and_unknown_words_leave_the_baseline_alone() {
+    for word in ["auto", "baseline", "alphabetic", "qwe"] {
+        let i = imp(&doc(&format!(r#"<text x="0" y="50" alignment-baseline="{word}">Text</text>"#)));
+        assert_eq!(text(&i.scene.elements[0]).style.dominant_baseline, None, "{word}");
+    }
+    let kept = imp(&doc(r#"<text x="0" y="50" dominant-baseline="middle" alignment-baseline="auto">Text</text>"#));
+    assert_eq!(text(&kept.scene.elements[0]).style.dominant_baseline.as_deref(), Some("middle"));
+    let alphabetic = imp(&doc(r#"<text x="0" y="50" dominant-baseline="middle" alignment-baseline="alphabetic">Text</text>"#));
+    assert_eq!(text(&alphabetic.scene.elements[0]).style.dominant_baseline, None);
+}
+
+#[test]
+fn alignment_baseline_is_not_inherited_but_inherit_takes_the_parent_value() {
+    let g = imp(&doc(r#"<g alignment-baseline="hanging"><text x="0" y="50">Text</text></g>"#));
+    assert_eq!(text(&g.scene.elements[0]).style.dominant_baseline, None);
+    let inherit = imp(&doc(r#"<g alignment-baseline="hanging"><text x="0" y="50" alignment-baseline="inherit">Text</text></g>"#));
+    assert_eq!(text(&inherit.scene.elements[0]).style.dominant_baseline.as_deref(), Some("hanging"));
+    let two = imp(&doc(r#"<g alignment-baseline="central"><g alignment-baseline="inherit"><text x="0" y="50" alignment-baseline="inherit">Text</text></g></g>"#));
+    assert_eq!(text(&two.scene.elements[0]).style.dominant_baseline.as_deref(), Some("central"));
+    let none = imp(&doc(r#"<text x="0" y="50" alignment-baseline="inherit">Text</text>"#));
+    assert_eq!(text(&none.scene.elements[0]).style.dominant_baseline, None);
+}
+
+#[test]
+fn a_span_with_its_own_alignment_is_its_own_text() {
+    let b = baselines(r#"Some <tspan alignment-baseline="hanging">long</tspan> text"#);
+    assert_eq!(b, [None, Some("hanging".to_string()), None]);
+}
+
+#[test]
+fn what_is_inside_an_aligned_span_goes_with_it() {
+    let b = baselines(r#"a<tspan alignment-baseline="hanging">b<tspan fill="red">c</tspan></tspan>"#);
+    assert_eq!(b, [None, Some("hanging".to_string()), Some("hanging".to_string())]);
+    // An aligned text carries its spans.
+    let i = imp(&doc(r#"<text x="0" y="50" alignment-baseline="middle">a<tspan fill="red">b</tspan></text>"#));
+    assert_eq!(texts(&i).iter().map(|t| t.style.dominant_baseline.as_deref()).collect::<Vec<_>>(), [Some("middle"), Some("middle")]);
+}
+
+#[test]
+fn the_innermost_alignment_wins() {
+    let b = baselines(r#"<tspan alignment-baseline="hanging">a<tspan alignment-baseline="middle">b</tspan></tspan>"#);
+    assert_eq!(b, some(&["hanging", "middle"]));
+}
+
+#[test]
+fn alignment_and_baseline_shift_add_up() {
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="24">Some<tspan alignment-baseline="hanging" baseline-shift="-20">long</tspan></text>"#));
+    let t = texts(&i);
+    assert_eq!(t[1].style.dominant_baseline.as_deref(), Some("hanging"));
+    assert_eq!(t[1].y, 70.0);
+}
+
+#[test]
+fn alignment_baseline_in_a_style_attribute_counts() {
+    let b = baselines(r#"a<tspan style="alignment-baseline: middle">b</tspan>"#);
+    assert_eq!(b, [None, Some("middle".to_string())]);
+}
+
+#[test]
+fn a_text_path_takes_the_alignment_of_its_element() {
+    let i = imp(&doc(r##"<defs><path id="p" d="M 0 0 L 300 0"/></defs><text font-size="24"><textPath href="#p" alignment-baseline="middle">a</textPath><textPath href="#p">b</textPath></text>"##));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = texts(&i);
+    assert!(t[0].path.is_some() && t[1].path.is_some());
+    assert_eq!((t[0].style.dominant_baseline.as_deref(), t[1].style.dominant_baseline.as_deref()), (Some("middle"), None));
+}
+
 fn mode(t: &Text) -> Option<WritingMode> {
     t.style.writing_mode
 }
