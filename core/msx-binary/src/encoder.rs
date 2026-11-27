@@ -159,6 +159,10 @@ pub const EXT_LETTER_SPACING: u8 = 1 << 3;
 pub const EXT_TEXT_DECORATION: u8 = 1 << 4;
 pub const EXT_FONT_STYLE: u8 = 1 << 5;
 pub const EXT_WRITING_MODE: u8 = 1 << 6;
+/// Bit 7 of the presence byte: a second presence byte follows it.
+pub const EXT_MORE: u8 = 1 << 7;
+/// Presence bits of the second byte.
+pub const EXT2_WORD_SPACING: u8 = 1 << 0;
 /// Marks an unset font size. A real size is stored as hundredths of a unit.
 pub const UNSET_U16: u16 = 0xFFFF;
 
@@ -231,7 +235,11 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
             if style.text_decoration.is_some()   { present |= EXT_TEXT_DECORATION; }
             if style.font_style.is_some()        { present |= EXT_FONT_STYLE; }
             if style.writing_mode.is_some()      { present |= EXT_WRITING_MODE; }
+            let mut present2 = 0u8;
+            if style.word_spacing.is_some()      { present2 |= EXT2_WORD_SPACING; }
+            if present2 != 0 { present |= EXT_MORE; }
             write_u8(out, present);
+            if present2 != 0 { write_u8(out, present2); }
             if let Some(v) = style.fill_opacity   { write_f32(out, v); }
             if let Some(v) = style.stroke_opacity { write_f32(out, v); }
             if let Some(b) = &style.dominant_baseline {
@@ -242,6 +250,7 @@ pub fn write_style(out: &mut Vec<u8>, style: &Style, pool: &mut Vec<String>) {
             if let Some(d) = style.text_decoration { write_u8(out, d.to_byte()); }
             if let Some(f) = style.font_style      { write_u8(out, f.to_byte()); }
             if let Some(w) = style.writing_mode    { write_u8(out, w.to_byte()); }
+            if let Some(v) = style.word_spacing    { write_f32(out, v); }
         }
     }
 }

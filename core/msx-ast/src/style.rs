@@ -175,6 +175,8 @@ pub struct Style {
     pub dominant_baseline:  Option<String>,
     /// Extra space after every glyph, in user units.
     pub letter_spacing:     Option<f64>,
+    /// Extra space after every word separator, in user units.
+    pub word_spacing:       Option<f64>,
     pub text_decoration:    Option<TextDecoration>,
     pub font_style:         Option<FontStyle>,
     pub writing_mode:       Option<WritingMode>,
@@ -203,6 +205,7 @@ impl Default for Style {
             text_anchor:       None,
             dominant_baseline: None,
             letter_spacing:    None,
+            word_spacing:      None,
             text_decoration:   None,
             font_style:        None,
             writing_mode:      None,
@@ -221,7 +224,7 @@ impl Style {
             stroke_dasharray: None, stroke_dashoffset: None,
             font_size: None, font_family: None, font_weight: None,
             text_anchor: None, dominant_baseline: None,
-            letter_spacing: None, text_decoration: None, font_style: None, writing_mode: None,
+            letter_spacing: None, word_spacing: None, text_decoration: None, font_style: None, writing_mode: None,
             visibility_hidden: false, display_none: false,
         }
     }
@@ -276,6 +279,9 @@ impl Style {
         if let Some(ls) = self.letter_spacing {
             if ls != 0.0 { a.push(("letter-spacing", fmt_f64(ls))); }
         }
+        if let Some(ws) = self.word_spacing {
+            if ws != 0.0 { a.push(("word-spacing", fmt_f64(ws))); }
+        }
         if let Some(td) = self.text_decoration {
             if !td.is_none() { a.push(("text-decoration", td.to_svg())); }
         }
@@ -289,11 +295,11 @@ impl Style {
 
     /// Whether the style sets a field that only wire version 3 can hold:
     /// `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`,
-    /// `text_decoration`, `font_style` or `writing_mode`.
+    /// `word_spacing`, `text_decoration`, `font_style` or `writing_mode`.
     pub fn has_v3_fields(&self) -> bool {
         self.fill_opacity.is_some() || self.stroke_opacity.is_some() || self.dominant_baseline.is_some()
-            || self.letter_spacing.is_some() || self.text_decoration.is_some() || self.font_style.is_some()
-            || self.writing_mode.is_some()
+            || self.letter_spacing.is_some() || self.word_spacing.is_some() || self.text_decoration.is_some()
+            || self.font_style.is_some() || self.writing_mode.is_some()
     }
 
     /// Bit flags indicating which fields are present (for binary encoding).
@@ -329,6 +335,7 @@ mod tests {
         let mut s = Style::empty(); s.stroke_opacity = Some(0.5); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.dominant_baseline = Some("middle".into()); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.letter_spacing = Some(2.0); assert!(s.has_v3_fields());
+        let mut s = Style::empty(); s.word_spacing = Some(2.0); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.text_decoration = Some(TextDecoration::default()); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.font_style = Some(FontStyle::Italic); assert!(s.has_v3_fields());
         let mut s = Style::empty(); s.writing_mode = Some(WritingMode::Horizontal); assert!(s.has_v3_fields());
@@ -361,11 +368,12 @@ mod tests {
     }
     #[test] fn text_attrs_skip_the_defaults() {
         let mut s = Style::empty();
-        s.font_style = Some(FontStyle::Normal); s.letter_spacing = Some(0.0); s.text_decoration = Some(TextDecoration::default());
+        s.font_style = Some(FontStyle::Normal); s.letter_spacing = Some(0.0); s.word_spacing = Some(0.0); s.text_decoration = Some(TextDecoration::default());
         let a = s.to_svg_attrs();
-        assert!(!a.iter().any(|(k, _)| matches!(*k, "font-style" | "letter-spacing" | "text-decoration")));
-        s.font_style = Some(FontStyle::Italic); s.letter_spacing = Some(1.5); s.text_decoration = Some(TextDecoration::parse("underline"));
+        assert!(!a.iter().any(|(k, _)| matches!(*k, "font-style" | "letter-spacing" | "word-spacing" | "text-decoration")));
+        s.font_style = Some(FontStyle::Italic); s.letter_spacing = Some(1.5); s.word_spacing = Some(4.0); s.text_decoration = Some(TextDecoration::parse("underline"));
         let a = s.to_svg_attrs();
+        assert!(a.contains(&("word-spacing", "4".to_string())));
         assert!(a.contains(&("font-style", "italic".to_string())));
         assert!(a.contains(&("letter-spacing", "1.5".to_string())));
         assert!(a.contains(&("text-decoration", "underline".to_string())));

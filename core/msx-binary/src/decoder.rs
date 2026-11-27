@@ -2,7 +2,7 @@
 //! Low-level binary read helpers. All read_ functions advance a &mut usize cursor.
 
 use std::io;
-use crate::encoder::{EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_FONT_STYLE, EXT_LETTER_SPACING, EXT_STROKE_OPACITY, EXT_TEXT_DECORATION, EXT_WRITING_MODE, UNSET_BYTE, UNSET_U16};
+use crate::encoder::{EXT2_WORD_SPACING, EXT_MORE, EXT_DOMINANT_BASELINE, EXT_FILL_OPACITY, EXT_FONT_STYLE, EXT_LETTER_SPACING, EXT_STROKE_OPACITY, EXT_TEXT_DECORATION, EXT_WRITING_MODE, UNSET_BYTE, UNSET_U16};
 use msx_ast::{Color, FillRule, FontStyle, FontWeight, LineCap, LineJoin, Paint, Style, TextAnchor, TextDecoration, Transform, WritingMode};
 use msx_ast::transform::{
     Matrix2D, TRANSFORM_MATRIX, TRANSFORM_MULTIPLE, TRANSFORM_NONE, TRANSFORM_ROTATE,
@@ -207,6 +207,7 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
         s.display_none      = vd & 2 != 0;
         if vd & 4 != 0 {
             let present = read_u8(data, cursor)?;
+            let present2 = if present & EXT_MORE != 0 { read_u8(data, cursor)? } else { 0 };
             if present & EXT_FILL_OPACITY      != 0 { s.fill_opacity      = Some(read_f32(data, cursor)?); }
             if present & EXT_STROKE_OPACITY    != 0 { s.stroke_opacity    = Some(read_f32(data, cursor)?); }
             if present & EXT_DOMINANT_BASELINE != 0 {
@@ -217,6 +218,7 @@ pub fn read_style(data: &[u8], cursor: &mut usize, pool: &[String]) -> io::Resul
             if present & EXT_TEXT_DECORATION != 0 { s.text_decoration = Some(TextDecoration::from_byte(read_u8(data, cursor)?)); }
             if present & EXT_FONT_STYLE      != 0 { s.font_style      = Some(FontStyle::from_byte(read_u8(data, cursor)?)); }
             if present & EXT_WRITING_MODE    != 0 { s.writing_mode    = Some(WritingMode::from_byte(read_u8(data, cursor)?)); }
+            if present2 & EXT2_WORD_SPACING  != 0 { s.word_spacing    = Some(read_f32(data, cursor)?); }
         }
     }
     Ok(s)
@@ -310,10 +312,29 @@ mod tests {
     }
 
     #[test]
+    fn word_spacing_takes_a_second_presence_byte_only_when_set() {
+        let mut plain = Style::empty();
+        plain.letter_spacing = Some(1.0);
+        let mut spaced = plain.clone();
+        spaced.word_spacing = Some(6.0);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        write_style(&mut a, &plain, &mut Vec::new());
+        write_style(&mut b, &spaced, &mut Vec::new());
+        // One more presence byte and the f32.
+        assert_eq!(b.len(), a.len() + 5);
+        let mut cursor = 0;
+        let back = read_style(&b, &mut cursor, &[]).unwrap();
+        assert_eq!((cursor, back.letter_spacing, back.word_spacing), (b.len(), Some(1.0), Some(6.0)));
+        let mut cursor = 0;
+        assert_eq!(read_style(&a, &mut cursor, &[]).unwrap().word_spacing, None);
+    }
+
+    #[test]
     fn text_style_extension_roundtrip() {
         let mut style = Style::empty();
         style.dominant_baseline = Some("hanging".to_string());
         style.letter_spacing    = Some(1.5);
+        style.word_spacing      = Some(-3.0);
         style.text_decoration   = Some(TextDecoration::parse("underline line-through"));
         style.font_style        = Some(FontStyle::Oblique);
         style.writing_mode      = Some(WritingMode::Vertical);
@@ -325,6 +346,7 @@ mod tests {
         assert_eq!(cursor, buf.len());
         assert_eq!(back.dominant_baseline.as_deref(), Some("hanging"));
         assert_eq!(back.letter_spacing, Some(1.5));
+        assert_eq!(back.word_spacing, Some(-3.0));
         assert_eq!(back.text_decoration, style.text_decoration);
         assert_eq!(back.font_style, Some(FontStyle::Oblique));
         assert_eq!(back.writing_mode, Some(WritingMode::Vertical));

@@ -421,6 +421,7 @@ All keys are optional. Unset keys fall back to the defaults below. Style set on 
   font_style        = "normal" | "italic" | "oblique"
   writing_mode      = "horizontal-tb" | "vertical-rl"   // also tb, tb-rl, vertical-lr, lr, lr-tb, rl, rl-tb
   letter_spacing    = <float>?       // user units after every glyph
+  word_spacing      = <float>?       // user units after every word separator, on top of letter_spacing
   text_decoration   = <string>?      // "underline", "overline", "line-through" in a list, or "none"
   text_anchor       = "start" | "middle" | "end"
   dominant_baseline = <string>?
@@ -541,7 +542,7 @@ A change that alters the bytes of something an old decoder does read, such as th
 | Version | Adds |
 |---|---|
 | 2 | `Sdf`, `Splat`, `Layer` and `ConicGradient` tags |
-| 3 | The style extension block: `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration`, `font_style` and `writing_mode`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07`. A text on a path, element tag `0x15` |
+| 3 | The style extension block: `fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `word_spacing`, `text_decoration`, `font_style` and `writing_mode`. Gradient `units`, `spread`, `transform` and, for a radial gradient, `fr`, in tags `0x13` and `0x14`. The ten animation style channels, `property` bytes 7 to 16, and the eleven geometry channels, bytes 17 to 27. The layer effects `BlurXY`, `ColorMatrix` and `Graph`, effect tags `0x05`, `0x06` and `0x07`. A text on a path, element tag `0x15` |
 
 ### Payload Layout (after header; optionally MBFA-compressed as a unit)
 
@@ -805,6 +806,9 @@ The track layout does not change for the style channels. A scene with a track on
   bit 4 = text_decoration present
   bit 5 = font_style present
   bit 6 = writing_mode present
+  bit 7 = a second presence byte follows (ext_present2)
+[u8  ext_present2]          if ext_present.bit7
+  bit 0 = word_spacing present
 [f32 fill_opacity]          if ext_present.bit0
 [f32 stroke_opacity]        if ext_present.bit1
 [u16 dominant_baseline_str_idx]  if ext_present.bit2
@@ -812,11 +816,12 @@ The track layout does not change for the style channels. A scene with a track on
 [u8  text_decoration]       if ext_present.bit4   (bit0=underline bit1=overline bit2=line-through)
 [u8  font_style]            if ext_present.bit5   (0=normal 1=italic 2=oblique)
 [u8  writing_mode]          if ext_present.bit6   (0=horizontal 1=vertical)
+[f32 word_spacing]          if ext_present2.bit0
 ```
 
 One flag bit covers each group of fields, so a field that the source left unset carries its own marker inside the group. A decoder returns `None` for a marker and an explicit value otherwise. Files written before the markers existed hold the default value in those slots and decode to explicit values, which renders identically.
 
-`fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `text_decoration`, `font_style` and `writing_mode` are stored in the extension block, which exists from version 3 on. Bit 7 of `present_flags` is set when any of them is set, even when neither `hidden` nor `display_none` is, and `vis_display_flags` then carries bit 2. Files written before version 3 have no such block and decode with those seven keys unset. A `text_decoration` of `none` is stored as a zero byte, so it stays set. An unset key has no presence bit and decodes to `None`. A value of `fill_opacity` or `stroke_opacity` above 1 or below 0 is held to the range 0 to 1 when drawn.
+`fill_opacity`, `stroke_opacity`, `dominant_baseline`, `letter_spacing`, `word_spacing`, `text_decoration`, `font_style` and `writing_mode` are stored in the extension block, which exists from version 3 on. The first presence byte has no free bit left, so bit 7 of it says that a second presence byte follows, and `word_spacing` is its bit 0. A scene that sets none of the keys of the second byte has no second byte, so its bytes do not change. Bit 7 of `present_flags` is set when any of them is set, even when neither `hidden` nor `display_none` is, and `vis_display_flags` then carries bit 2. Files written before version 3 have no such block and decode with those eight keys unset. A `text_decoration` of `none` is stored as a zero byte, so it stays set. An unset key has no presence bit and decodes to `None`. A value of `fill_opacity` or `stroke_opacity` above 1 or below 0 is held to the range 0 to 1 when drawn.
 
 Note: `Sdf` and `Layer` don't have a style block at all — `Sdf` has direct `fill`/`stroke` paint fields instead (see its geometry-fields row above), and `Layer` has no fill/stroke concept at all (it's a compositing group, not a drawable shape).
 

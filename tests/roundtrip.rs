@@ -881,8 +881,8 @@ const TEXT_STYLE_SOURCE: &str = r#"
 @DATA(
   scene = { width = 300, height = 100, background = #ffffff }
   elements::
-    { type = "text", x = 10, y = 40, content = "Spaced",
-      style = { fill = #000000, font_size = 24, letter_spacing = 3, text_decoration = "underline",
+    { type = "text", x = 10, y = 40, content = "Spaced out",
+      style = { fill = #000000, font_size = 24, letter_spacing = 3, word_spacing = 8, text_decoration = "underline",
                 font_style = "italic", stroke = "none", stroke_width = 0, opacity = 1.0 } }
     { type = "text", x = 10, y = 80, content = "Struck",
       style = { fill = #000000, font_size = 24, text_decoration = "overline line-through",
@@ -901,6 +901,7 @@ fn roundtrip_letter_spacing_text_decoration_font_style_and_writing_mode() {
     assert_eq!(data[4], 3, "the text style fields need wire version 3");
     let svg = render(&decode(&data).unwrap());
     assert!(svg.contains("letter-spacing=\"3\""), "{svg}");
+    assert!(svg.contains("word-spacing=\"8\""), "{svg}");
     assert!(svg.contains("text-decoration=\"underline\""), "{svg}");
     assert!(svg.contains("font-style=\"italic\""), "{svg}");
     assert!(svg.contains("text-decoration=\"overline line-through\""), "{svg}");

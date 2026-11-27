@@ -1042,13 +1042,63 @@ fn root_transform_origin_percentages_use_the_viewport() {
 }
 
 #[test]
-fn ignored_text_and_stroke_properties_are_reported() {
-    let i = imp(&doc(r#"<text x="0" y="10" style="word-spacing: 4px">hi</text><path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
-    for key in ["word-spacing", "vector-effect"] {
-        assert!(has_warning(&i, key), "no warning for {key}: {:?}", i.warnings);
-    }
-    let plain = imp(&doc(r#"<text x="0" y="10" style="word-spacing: normal">hi</text>"#));
+fn ignored_stroke_properties_are_reported() {
+    let i = imp(&doc(r#"<path d="M0 0L9 9" vector-effect="non-scaling-stroke"/>"#));
+    assert!(has_warning(&i, "vector-effect"), "{:?}", i.warnings);
+    let plain = imp(&doc(r#"<path d="M0 0L9 9" vector-effect="none"/>"#));
     assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
+}
+
+/// The `word_spacing` of the first text of `body`, a `text` at font size 20 in a 100 by 100 canvas.
+fn word_spacing_of(attrs: &str) -> Option<f64> {
+    let i = imp(&doc(&format!(r#"<text x="0" y="50" font-size="20" {attrs}>a b</text>"#)));
+    assert!(i.warnings.is_empty(), "{attrs}: {:?}", i.warnings);
+    text(&i.scene.elements[0]).style.word_spacing
+}
+
+#[test]
+fn word_spacing_takes_lengths_and_percent_of_the_viewport() {
+    assert_eq!(word_spacing_of(r#"word-spacing="10""#), Some(10.0));
+    assert_eq!(word_spacing_of(r#"word-spacing="-5""#), Some(-5.0));
+    assert_eq!(word_spacing_of(r#"word-spacing="0.5em""#), Some(10.0));
+    let mm = word_spacing_of(r#"word-spacing="2mm""#).unwrap();
+    assert!((mm - 2.0 * 96.0 / 25.4).abs() < 1e-9, "{mm}");
+    // 5 percent of the 100 by 100 viewport.
+    assert_eq!(word_spacing_of(r#"word-spacing="5%""#), Some(5.0));
+}
+
+#[test]
+fn word_spacing_normal_zero_and_invalid_are_no_spacing() {
+    for v in ["normal", "0", "qwe"] {
+        assert_eq!(word_spacing_of(&format!(r#"word-spacing="{v}""#)), None, "{v}");
+    }
+}
+
+#[test]
+fn word_spacing_is_inherited_and_a_span_can_change_it() {
+    let g = imp(&doc(r#"<g word-spacing="4"><text x="0" y="50">a b</text></g>"#));
+    assert_eq!(text(&g.scene.elements[0]).style.word_spacing, Some(4.0));
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="20" word-spacing="4">a b<tspan word-spacing="9">c d</tspan></text>"#));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let t = texts(&i);
+    assert_eq!(t.len(), 2);
+    assert_eq!((t[0].style.word_spacing, t[1].style.word_spacing), (Some(4.0), Some(9.0)));
+    // The second piece starts after the first one, with its spacing.
+    assert!((t[1].x - width_ws("a b", 20.0, 4.0)).abs() < 1e-9, "{}", t[1].x);
+}
+
+fn width_ws(s: &str, size: f64, word: f64) -> f64 {
+    let style = msx_ast::Style { font_size: Some(size), word_spacing: Some(word), ..msx_ast::Style::default() };
+    msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: s.to_string(), id: None, transform: None, style, path: None })
+}
+
+#[test]
+fn word_spacing_writes_and_parses_back() {
+    let i = imp(&doc(r#"<text x="0" y="50" font-size="20" word-spacing="6">a b</text>"#));
+    let src = msx_parser::scene_to_msx(&i.scene).expect("written");
+    assert!(src.contains("word_spacing = 6"), "{src}");
+    let back = msx_parser::parse_scene(&src).expect("parsed");
+    assert_eq!(text(&back.elements[0]).style.word_spacing, Some(6.0));
 }
 
 #[test]

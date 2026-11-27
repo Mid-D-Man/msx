@@ -316,6 +316,9 @@ fn style_object(s: &Style) -> Option<String> {
     if let Some(v) = s.letter_spacing {
         f.push(format!("letter_spacing = {}", num(v)));
     }
+    if let Some(v) = s.word_spacing {
+        f.push(format!("word_spacing = {}", num(v)));
+    }
     if let Some(d) = s.text_decoration {
         f.push(format!("text_decoration = {}", quote(&d.to_svg())));
     }

@@ -827,12 +827,9 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
             }
         }
-        // Text and stroke properties the renderers have no slot for. Each is
+        // Properties the renderers have no slot for. Each is
         // reported only when it differs from the initial value.
-        let ignored: [(&str, &[&str]); 2] = [
-            ("word-spacing", &["normal", "0", "0px", ""]),
-            ("vector-effect", &["none", ""]),
-        ];
+        let ignored: [(&str, &[&str]); 1] = [("vector-effect", &["none", ""])];
         for (key, initial) in ignored {
             if let Some(v) = props.get(key) {
                 if !initial.contains(&v.trim()) {
@@ -1970,6 +1967,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             st.text_anchor = inh.text_anchor;
             st.dominant_baseline = inh.dominant_baseline.clone();
             st.letter_spacing = (inh.letter_spacing != 0.0).then_some(inh.letter_spacing);
+            st.word_spacing = (inh.word_spacing != 0.0).then_some(inh.word_spacing);
             st.text_decoration = (!inh.text_decoration.is_none()).then_some(inh.text_decoration);
             st.font_style = inh.font_style.filter(|f| f.is_slanted());
             st.writing_mode = inh.writing_mode.filter(|m| *m == WritingMode::Vertical);
@@ -2027,6 +2025,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             text_anchor: inh.text_anchor,
             dominant_baseline: inh.dominant_baseline.clone(),
             letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
+            word_spacing: (inh.word_spacing != 0.0).then_some(inh.word_spacing),
             writing_mode: inh.writing_mode.filter(|m| *m == WritingMode::Vertical),
             ..Style::default()
         };
@@ -2197,6 +2196,7 @@ impl<'a, 'i> Importer<'a, 'i> {
             font_size: Some(inh.font_size),
             font_weight: inh.font_weight.clone(),
             letter_spacing: (inh.letter_spacing != 0.0).then_some(inh.letter_spacing),
+            word_spacing: (inh.word_spacing != 0.0).then_some(inh.word_spacing),
             ..Style::default()
         };
         msx_text::advance_width(&Text { x: 0.0, y: 0.0, content: content.to_string(), id: None, transform: None, style, path: None })
@@ -2348,6 +2348,7 @@ fn same_text_style(a: &Inh, b: &Inh) -> bool {
         && a.font_weight == b.font_weight
         && a.font_style == b.font_style
         && a.letter_spacing == b.letter_spacing
+        && a.word_spacing == b.word_spacing
         && a.text_decoration == b.text_decoration
         && a.dominant_baseline == b.dominant_baseline
 }

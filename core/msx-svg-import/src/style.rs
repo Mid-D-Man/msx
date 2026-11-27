@@ -64,6 +64,8 @@ pub struct Inh {
     pub dominant_baseline: Option<String>,
     /// `letter-spacing` in user units, zero for `normal`.
     pub letter_spacing: f64,
+    /// `word-spacing` in user units, zero for `normal`.
+    pub word_spacing: f64,
     /// The decoration lines of the element and its ancestors. A `none` does not
     /// remove a line an ancestor set, as in CSS.
     pub text_decoration: TextDecoration,
@@ -103,6 +105,7 @@ impl Default for Inh {
             text_anchor: None,
             dominant_baseline: None,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
             text_decoration: TextDecoration::default(),
             font_style: None,
             writing_mode: None,
@@ -297,6 +300,13 @@ pub fn apply(inh: &mut Inh, props: &Props, vp: (f64, f64)) {
             inh.letter_spacing = 0.0;
         } else if let Some(l) = parse_length(v) {
             inh.letter_spacing = l.to_px(inh.font_size, 0.0);
+        }
+    }
+    if let Some(v) = get("word-spacing") {
+        if v == "normal" {
+            inh.word_spacing = 0.0;
+        } else if let Some(l) = parse_length(v) {
+            inh.word_spacing = l.to_px(inh.font_size, diagonal(vp));
         }
     }
     if let Some(v) = get("text-decoration") {

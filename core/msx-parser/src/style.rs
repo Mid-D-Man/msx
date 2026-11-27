@@ -35,6 +35,7 @@ pub fn parse_style(data: &DixData, element_prefix: &str) -> Result<Style, String
     if let Some(ta) = parse_text_anchor(data, &prefix)?            { style.text_anchor = Some(ta); }
     if let Some(db) = opt::<String>(data, &prefix, "dominant_baseline")? { style.dominant_baseline = Some(db); }
     if let Some(ls) = opt::<f64>(data, &prefix, "letter_spacing")?        { style.letter_spacing = Some(ls); }
+    if let Some(ws) = opt::<f64>(data, &prefix, "word_spacing")?          { style.word_spacing = Some(ws); }
     if let Some(td) = opt::<String>(data, &prefix, "text_decoration")?    { style.text_decoration = Some(TextDecoration::parse(&td)); }
     if let Some(fs) = opt::<String>(data, &prefix, "font_style")?         { style.font_style = Some(FontStyle::parse(&fs)); }
     if let Some(wm) = opt::<String>(data, &prefix, "writing_mode")?       { style.writing_mode = WritingMode::parse(&wm); }

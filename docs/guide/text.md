@@ -12,7 +12,7 @@
 | `x`, `y` | Anchor position. `y` is the baseline | yes |
 | `content` | The string to draw | yes |
 
-Text takes the usual `id` and `transform` fields and a `style`. The keys that shape the text are `font_size`, `font_family`, `font_weight`, `font_style`, `letter_spacing`, `text_decoration`, `writing_mode`, `text_anchor` and `dominant_baseline`. `text_anchor` chooses which part of the string sits at `x`: `start`, `middle` or `end`. `font_weight` takes `normal`, `bold` or a number such as 600. The fill color comes from `fill`.
+Text takes the usual `id` and `transform` fields and a `style`. The keys that shape the text are `font_size`, `font_family`, `font_weight`, `font_style`, `letter_spacing`, `word_spacing`, `text_decoration`, `writing_mode`, `text_anchor` and `dominant_baseline`. `text_anchor` chooses which part of the string sits at `x`: `start`, `middle` or `end`. `font_weight` takes `normal`, `bold` or a number such as 600. The fill color comes from `fill`.
 
 ## Spacing, decoration and slant
 
@@ -27,6 +27,7 @@ Text takes the usual `id` and `transform` fields and a `style`. The keys that sh
 | Key | Values | Default |
 |---|---|---|
 | `letter_spacing` | A number, the extra space after every glyph in user units. It can be negative | `0` |
+| `word_spacing` | A number, the extra space after every word separator in user units, on top of `letter_spacing`. It can be negative. The separators are the space, the no-break space, the Ethiopic word space and the Aegean word separators | `0` |
 | `text_decoration` | A list of `underline`, `overline` and `line-through`, or `none` | `none` |
 | `font_style` | `normal`, `italic` or `oblique` | `normal` |
 | `writing_mode` | `horizontal-tb` or `vertical-rl` | `horizontal-tb` |

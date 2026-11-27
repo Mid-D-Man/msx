@@ -24,6 +24,7 @@ Every drawable element takes a `style` object. Style controls how an element is 
 | `text_anchor` | `start`, `middle` or `end` | `start` |
 | `dominant_baseline` | string passed to SVG | unset |
 | `letter_spacing` | number | unset |
+| `word_spacing` | number | unset |
 | `text_decoration` | a list of `underline`, `overline` and `line-through`, or `none` | unset |
 | `font_style` | `normal`, `italic` or `oblique` | unset |
 | `writing_mode` | `horizontal-tb` or `vertical-rl` | unset |

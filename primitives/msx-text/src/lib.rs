@@ -58,7 +58,14 @@ pub fn advance_width(text: &Text) -> f64 {
     let scale = text.style.font_size.unwrap_or(DEFAULT_FONT_SIZE) / f64::from(face.units_per_em());
     let glyphs: Vec<GlyphId> = text.content.chars().map(|c| glyph_for(face, c)).collect();
     let spacing = text.style.letter_spacing.unwrap_or(0.0) / scale;
-    (total_advance(face, &glyphs) + spacing * glyphs.len() as f64) * scale
+    let word = text.style.word_spacing.unwrap_or(0.0) / scale * text.content.chars().filter(|&c| is_word_separator(c)).count() as f64;
+    (total_advance(face, &glyphs) + spacing * glyphs.len() as f64 + word) * scale
+}
+
+/// The characters that take `word-spacing`: the space, the no-break space,
+/// the Ethiopic word space and the Aegean word separators.
+fn is_word_separator(c: char) -> bool {
+    matches!(c as u32, 0x20 | 0xA0 | 0x1361 | 0x10100 | 0x10101 | 0x1039F | 0x1091F)
 }
 
 /// Lay out a text element. Returns `None` for empty or whitespace-only text.
@@ -71,10 +78,14 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
     let size = text.style.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let scale = size / f64::from(face.units_per_em());
 
-    let glyphs: Vec<GlyphId> = text.content.chars().map(|c| glyph_for(face, c)).collect();
+    let chars: Vec<char> = text.content.chars().collect();
+    let glyphs: Vec<GlyphId> = chars.iter().map(|&c| glyph_for(face, c)).collect();
     // Letter spacing follows every glyph, the last one included, as in SVG.
+    // Word spacing follows every word separator on top of it.
     let spacing = text.style.letter_spacing.unwrap_or(0.0) / scale;
-    let advance_units = total_advance(face, &glyphs) + spacing * glyphs.len() as f64;
+    let word_spacing = text.style.word_spacing.unwrap_or(0.0) / scale;
+    let separators = chars.iter().filter(|&&c| is_word_separator(c)).count() as f64;
+    let advance_units = total_advance(face, &glyphs) + spacing * glyphs.len() as f64 + word_spacing * separators;
     let width = advance_units * scale;
 
     let ascender = f64::from(face.ascender());
@@ -124,6 +135,9 @@ pub fn layout(text: &Text) -> Option<TextLayout> {
             pen += kerning(face, gid, next);
         }
         pen += spacing;
+        if is_word_separator(chars[i]) {
+            pen += word_spacing;
+        }
     }
     if route.is_some() {
         // A text on a path has no line box. Its box is that of what was drawn.
@@ -772,6 +786,37 @@ mod tests {
         let mut s = plain();
         s.letter_spacing = Some(2.0);
         assert!((advance_width(&text("  ", s)) - (2.0 * space + 4.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn word_spacing_follows_every_word_separator() {
+        let mut s = plain();
+        s.word_spacing = Some(7.0);
+        let base = advance_width(&text("a b c", plain()));
+        let spaced = advance_width(&text("a b c", s.clone()));
+        assert!((spaced - base - 14.0).abs() < 1e-9, "{}", spaced - base);
+        // Two no-break spaces and a space count, a letter does not.
+        let mixed = advance_width(&text("a\u{a0}b\u{a0}c d", s.clone())) - advance_width(&text("a\u{a0}b\u{a0}c d", plain()));
+        assert!((mixed - 21.0).abs() < 1e-9, "{mixed}");
+        assert_eq!(advance_width(&text("abc", s)), advance_width(&text("abc", plain())));
+    }
+
+    #[test]
+    fn word_spacing_moves_the_next_word_and_adds_to_letter_spacing() {
+        let first_x = |s: Style| {
+            let l = layout(&text("a b", s)).unwrap();
+            let (x0, ..) = extent(&l.commands);
+            let (_, _, x1, _) = extent(&l.commands);
+            (x0, x1)
+        };
+        let (_, end) = first_x(plain());
+        let mut w = plain();
+        w.word_spacing = Some(10.0);
+        let (_, end_w) = first_x(w.clone());
+        assert!((end_w - end - 10.0).abs() < 1e-6, "{}", end_w - end);
+        w.letter_spacing = Some(2.0);
+        let (_, end_both) = first_x(w);
+        assert!((end_both - end - 10.0 - 2.0 * 2.0).abs() < 1e-6, "{}", end_both - end);
     }
 
     #[test]

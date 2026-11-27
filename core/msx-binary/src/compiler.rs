@@ -582,6 +582,7 @@ mod tests {
             |s| s.stroke_opacity = Some(0.5),
             |s| s.dominant_baseline = Some("hanging".to_string()),
             |s| s.letter_spacing = Some(2.5),
+            |s| s.word_spacing = Some(2.5),
             |s| s.text_decoration = Some(TextDecoration::parse("underline")),
             |s| s.font_style = Some(FontStyle::Oblique),
             |s| s.writing_mode = Some(WritingMode::Vertical),
@@ -598,6 +599,7 @@ mod tests {
             assert_eq!(c.style.stroke_opacity.is_some(), style.stroke_opacity.is_some());
             assert_eq!(c.style.dominant_baseline, style.dominant_baseline);
             assert_eq!(c.style.letter_spacing, style.letter_spacing);
+            assert_eq!(c.style.word_spacing, style.word_spacing);
             assert_eq!(c.style.text_decoration, style.text_decoration);
             assert_eq!(c.style.font_style, style.font_style);
             assert_eq!(c.style.writing_mode, style.writing_mode);
