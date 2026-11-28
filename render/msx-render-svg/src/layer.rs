@@ -286,6 +286,22 @@ fn graph_primitives(graph: &msx_ast::FilterGraph, input: &str, result: &str, pre
                 }
                 format!(r#"<feComponentTransfer in="{}"{attrs}>{body}</feComponentTransfer>"#, name_of(*i))
             }
+            FilterOp::Morphology { input: i, dilate, rx, ry } => format!(
+                r#"<feMorphology in="{}" operator="{}" radius="{} {}"{attrs}/>"#,
+                name_of(*i),
+                if *dilate { "dilate" } else { "erode" },
+                num(*rx),
+                num(*ry)
+            ),
+            FilterOp::Tile { input: i } => format!(r#"<feTile in="{}"{attrs}/>"#, name_of(*i)),
+            FilterOp::ConvolveMatrix { input: i, columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha } => format!(
+                r#"<feConvolveMatrix in="{}" order="{columns} {rows}" kernelMatrix="{}" divisor="{}" bias="{}" targetX="{target_x}" targetY="{target_y}" edgeMode="{}" preserveAlpha="{preserve_alpha}"{attrs}/>"#,
+                name_of(*i),
+                list(kernel),
+                num(*divisor),
+                num(*bias),
+                edge.source_name()
+            ),
         };
         out.push_str(&prim);
     }
@@ -314,6 +330,36 @@ mod graph_tests {
         assert!(svg.contains(r#"<feFlood flood-color="rgb(255,0,0)" flood-opacity="0.501961" color-interpolation-filters="sRGB" result="fx3-n0"/>"#), "{svg}");
         assert!(svg.contains(r#"<feComposite in="fx3-n0" in2="SourceAlpha" operator="in""#));
         assert!(svg.contains(r#"<feMerge color-interpolation-filters="sRGB" result="out"><feMergeNode in="fx3-n1"/><feMergeNode in="SourceGraphic"/></feMerge>"#));
+    }
+
+    #[test]
+    fn morphology_tile_and_convolve_matrix_are_written_as_their_primitives() {
+        let mut tile = FilterNode::new(FilterOp::Tile { input: In::Node(0) });
+        tile.region = Some(FilterRegion { x: 5.0, y: 6.0, width: 70.0, height: 80.0 });
+        let g = FilterGraph {
+            nodes: vec![
+                FilterNode::new(FilterOp::Morphology { input: In::SourceGraphic, dilate: true, rx: 2.0, ry: 0.5 }),
+                tile,
+                FilterNode::new(FilterOp::ConvolveMatrix {
+                    input: In::Node(1),
+                    columns: 3,
+                    rows: 1,
+                    kernel: vec![0.25, 0.5, 0.25],
+                    divisor: 1.0,
+                    bias: 0.125,
+                    target_x: 1,
+                    target_y: 0,
+                    edge: msx_ast::ConvolveEdge::Wrap,
+                    preserve_alpha: true,
+                }),
+            ],
+        };
+        let svg = emit(g, "SourceGraphic");
+        assert!(svg.contains(r#"<feMorphology in="SourceGraphic" operator="dilate" radius="2 0.5" color-interpolation-filters="sRGB" result="fx3-n0"/>"#), "{svg}");
+        assert!(svg.contains(r#"<feTile in="fx3-n0" x="5" y="6" width="70" height="80""#), "{svg}");
+        assert!(svg.contains(r#"<feConvolveMatrix in="fx3-n1" order="3 1" kernelMatrix="0.25 0.5 0.25" divisor="1" bias="0.125" targetX="1" targetY="0" edgeMode="wrap" preserveAlpha="true""#), "{svg}");
+        let erode = emit(FilterGraph { nodes: vec![FilterNode::new(FilterOp::Morphology { input: In::SourceGraphic, dilate: false, rx: 1.0, ry: 1.0 })] }, "SourceGraphic");
+        assert!(erode.contains(r#"operator="erode" radius="1 1""#), "{erode}");
     }
 
     #[test]

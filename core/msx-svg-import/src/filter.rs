@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use msx_ast::{BlendMode, Color, CompositeOp, Effect, Element, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, Group, Layer, TransferFn, Transform};
+use msx_ast::{BlendMode, Color, CompositeOp, ConvolveEdge, Effect, Element, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, Group, Layer, TransferFn, Transform};
 use roxmltree::Node;
 
 use crate::color_matrix as cm;
@@ -562,6 +562,10 @@ impl<'a, 'i> Importer<'a, 'i> {
                     }
                     FilterOp::ComponentTransfer { input: input("in"), funcs }
                 }
+                "feMorphology" => morphology_op(prim, input("in"), scale),
+                "feTile" => FilterOp::Tile { input: input("in") },
+                // A convolve matrix with a value that cannot work is skipped, as resvg does.
+                "feConvolveMatrix" => convolve_op(prim, input("in")).unwrap_or_else(|| passthrough(input("in"))),
                 "feDropShadow" => {
                     // blur and offset the alpha of the input, color it, and put the input over it
                     let src = input("in");
@@ -586,7 +590,29 @@ impl<'a, 'i> Importer<'a, 'i> {
                 }
                 other => return Err(format!("{other} has no filter graph node")),
             };
-            let region_of = self.graph_region(*prim, object_units, region, bbox)?;
+            let mut region_of = self.graph_region(*prim, object_units, region, bbox)?;
+            // A region is cut to the filter region, and one with nothing left gives a transparent node.
+            let mut op = op;
+            if let Some(r) = region_of {
+                region_of = clip_region(r, region);
+                if region_of.is_none() {
+                    op = FilterOp::Flood { color: Color::rgba(0, 0, 0, 0) };
+                }
+            }
+            if region_of.is_none() {
+                match (tag, &op) {
+                    // An offset without a region of its own takes the region of what it reads.
+                    ("feOffset", FilterOp::Offset { input: FilterInput::Node(j), .. }) => {
+                        region_of = nodes.get(usize::from(*j)).and_then(|n| n.region);
+                    }
+                    // These work on the pixels of their region, so they get the filter region
+                    // and its edge is where the window stops.
+                    ("feMorphology" | "feConvolveMatrix", _) => {
+                        region_of = Some(FilterRegion { x: region.0, y: region.1, width: region.2, height: region.3 });
+                    }
+                    _ => {}
+                }
+            }
             nodes.append(&mut extra);
             nodes.push(FilterNode { op, region: region_of, linear });
             if nodes.len() > msx_ast::MAX_FILTER_NODES {
@@ -684,6 +710,89 @@ impl<'a, 'i> Importer<'a, 'i> {
         }
         Ok((effects, offset))
     }
+}
+
+/// `r` cut to the filter region `(x, y, width, height)`, or `None` when nothing is left.
+fn clip_region(r: FilterRegion, f: (f64, f64, f64, f64)) -> Option<FilterRegion> {
+    let (x0, y0) = (r.x.max(f.0), r.y.max(f.1));
+    let (x1, y1) = ((r.x + r.width).min(f.0 + f.2), (r.y + r.height).min(f.1 + f.3));
+    (x1 > x0 && y1 > y0).then_some(FilterRegion { x: x0, y: y0, width: x1 - x0, height: y1 - y0 })
+}
+
+/// `feMorphology`. The radius is one number or two, in user units. Like resvg,
+/// a missing radius, an empty one and one with more than two numbers act as a
+/// radius of 1, a zero in one place becomes 1, and a negative radius is not
+/// read, so the default of 1 stays.
+fn morphology_op(prim: &Node, input: FilterInput, scale: (f64, f64)) -> FilterOp {
+    let dilate = prim.attribute("operator").map(str::trim) == Some("dilate");
+    let (mut rx, mut ry) = (1.0, 1.0);
+    if let Some(raw) = prim.attribute("radius") {
+        let list = number_list(raw);
+        let (mut a, mut b) = match list.as_slice() {
+            [one] => (*one, *one),
+            [x, y] => (*x, *y),
+            _ => (0.0, 0.0),
+        };
+        if a == 0.0 {
+            a = 1.0;
+        }
+        if b == 0.0 {
+            b = 1.0;
+        }
+        if a >= 0.0 && b >= 0.0 {
+            (rx, ry) = (a, b);
+        }
+    }
+    FilterOp::Morphology { input, dilate, rx: rx * scale.0, ry: ry * scale.1 }
+}
+
+/// `feConvolveMatrix`, or `None` when its attributes cannot work: an `order`
+/// that is not a whole number above zero, or a kernel with another count of
+/// values than the order says. A `divisor` of zero and a target outside the
+/// kernel are not errors, they fall back to the default, as in resvg.
+/// `kernelUnitLength` is not read. The default divisor is the sum of the
+/// kernel, or 1 when that is zero.
+fn convolve_op(prim: &Node, input: FilterInput) -> Option<FilterOp> {
+    let whole = |v: f64| (v.fract() == 0.0 && (1.0..=65535.0).contains(&v)).then_some(v as u16);
+    let (columns, rows) = match prim.attribute("order") {
+        None => (3, 3),
+        Some(raw) => match number_list(raw).as_slice() {
+            [n] => (whole(*n)?, whole(*n)?),
+            [x, y] => (whole(*x)?, whole(*y)?),
+            _ => return None,
+        },
+    };
+    if usize::from(columns) * usize::from(rows) > msx_ast::MAX_KERNEL_VALUES {
+        return None;
+    }
+    let kernel = number_list(prim.attribute("kernelMatrix")?);
+    if kernel.len() != usize::from(columns) * usize::from(rows) {
+        return None;
+    }
+    let sum = (kernel.iter().sum::<f64>() * 1000.0).round() / 1000.0;
+    let default_divisor = if sum == 0.0 { 1.0 } else { sum };
+    let divisor = number_attr(prim, "divisor").filter(|d| *d != 0.0).unwrap_or(default_divisor);
+    let target = |name: &str, order: u16| -> u16 {
+        let t = number_attr(prim, name).map_or(i32::from(order / 2), |v| v as i32);
+        if (0..i32::from(order)).contains(&t) { t as u16 } else { order / 2 }
+    };
+    let edge = match prim.attribute("edgeMode").map(str::trim) {
+        Some("none") => ConvolveEdge::None,
+        Some("wrap") => ConvolveEdge::Wrap,
+        _ => ConvolveEdge::Duplicate,
+    };
+    Some(FilterOp::ConvolveMatrix {
+        input,
+        columns,
+        rows,
+        kernel,
+        divisor,
+        bias: number_attr(prim, "bias").unwrap_or(0.0),
+        target_x: target("targetX", columns),
+        target_y: target("targetY", rows),
+        edge,
+        preserve_alpha: prim.attribute("preserveAlpha").map(str::trim) == Some("true"),
+    })
 }
 
 /// The one amount of a color function, a number or a percentage, 1 when there

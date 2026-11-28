@@ -153,6 +153,27 @@ fn graph_text(g: &msx_ast::FilterGraph) -> String {
                     f.push(format!("input = {}", input(*i)));
                     f.push(format!("values = [{}]", list(values)));
                 }
+                FilterOp::Morphology { input: i, dilate, rx, ry } => {
+                    f.push(format!("input = {}", input(*i)));
+                    f.push(format!("operator = {}", quote(if *dilate { "dilate" } else { "erode" })));
+                    f.push(format!("rx = {}", float(*rx)));
+                    f.push(format!("ry = {}", float(*ry)));
+                }
+                FilterOp::Tile { input: i } => f.push(format!("input = {}", input(*i))),
+                FilterOp::ConvolveMatrix { input: i, columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha } => {
+                    f.push(format!("input = {}", input(*i)));
+                    f.push(format!("columns = {columns}"));
+                    f.push(format!("rows = {rows}"));
+                    f.push(format!("kernel = [{}]", list(kernel)));
+                    f.push(format!("divisor = {}", float(*divisor)));
+                    f.push(format!("bias = {}", float(*bias)));
+                    f.push(format!("target_x = {target_x}"));
+                    f.push(format!("target_y = {target_y}"));
+                    f.push(format!("edge = {}", quote(edge.source_name())));
+                    if *preserve_alpha {
+                        f.push("preserve_alpha = true".to_string());
+                    }
+                }
                 FilterOp::ComponentTransfer { input: i, funcs } => {
                     f.push(format!("input = {}", input(*i)));
                     for (func, channel) in funcs.iter().zip(["r", "g", "b", "a"]) {
@@ -981,7 +1002,7 @@ mod tests {
     }
 
     fn sample_graph() -> msx_ast::FilterGraph {
-        use msx_ast::{BlendMode, CompositeOp, FilterGraph, FilterInput as In, FilterNode, FilterOp, FilterRegion, TransferFn};
+        use msx_ast::{BlendMode, CompositeOp, ConvolveEdge, FilterGraph, FilterInput as In, FilterNode, FilterOp, FilterRegion, TransferFn};
         let mut flood = FilterNode::new(FilterOp::Flood { color: Color::rgba(10, 20, 30, 128) });
         flood.region = Some(FilterRegion { x: 1.5, y: 2.0, width: 30.0, height: 40.0 });
         let mut arithmetic = FilterNode::new(FilterOp::Composite { a: In::Node(0), b: In::SourceAlpha, op: CompositeOp::Arithmetic { k1: 0.0, k2: 1.0, k3: 0.5, k4: -0.25 } });
@@ -1003,6 +1024,33 @@ mod tests {
                 FilterNode::new(FilterOp::ComponentTransfer {
                     input: In::SourceGraphic,
                     funcs: [TransferFn::Gamma { amplitude: 1.0, exponent: 2.0, offset: 0.0 }, TransferFn::Identity, TransferFn::Identity, TransferFn::Identity],
+                }),
+                FilterNode::new(FilterOp::Morphology { input: In::Node(8), dilate: true, rx: 2.5, ry: 0.0 }),
+                FilterNode::new(FilterOp::Morphology { input: In::SourceAlpha, dilate: false, rx: 1.0, ry: 3.0 }),
+                FilterNode::new(FilterOp::Tile { input: In::Node(0) }),
+                FilterNode::new(FilterOp::ConvolveMatrix {
+                    input: In::Node(9),
+                    columns: 3,
+                    rows: 2,
+                    kernel: vec![0.5, -1.0, 0.25, 0.0, 2.0, 1.0],
+                    divisor: 2.0,
+                    bias: -0.5,
+                    target_x: 2,
+                    target_y: 1,
+                    edge: ConvolveEdge::Wrap,
+                    preserve_alpha: true,
+                }),
+                FilterNode::new(FilterOp::ConvolveMatrix {
+                    input: In::SourceGraphic,
+                    columns: 1,
+                    rows: 1,
+                    kernel: vec![1.0],
+                    divisor: 1.0,
+                    bias: 0.0,
+                    target_x: 0,
+                    target_y: 0,
+                    edge: ConvolveEdge::None,
+                    preserve_alpha: false,
                 }),
             ],
         }
@@ -1033,6 +1081,10 @@ mod tests {
             }
         };
         // No input reads the node before, and the first node reads the source.
+        let m = graph_of(r#"{ op = "morphology", rx = 2.0 }, { op = "tile" }, { op = "convolve_matrix", kernel = [0, 0, 0, 0, 1, 0, 0, 0, 0] }"#).unwrap();
+        assert!(matches!(m.nodes[0].op, msx_ast::FilterOp::Morphology { dilate: false, rx, ry, .. } if rx == 2.0 && ry == 0.0));
+        assert!(matches!(m.nodes[1].op, msx_ast::FilterOp::Tile { input: msx_ast::FilterInput::Node(0) }));
+        assert!(matches!(&m.nodes[2].op, msx_ast::FilterOp::ConvolveMatrix { columns: 3, rows: 3, target_x: 1, target_y: 1, edge: msx_ast::ConvolveEdge::Duplicate, preserve_alpha: false, divisor, .. } if *divisor == 1.0));
         let g = graph_of(r#"{ op = "blur", rx = 2.0, ry = 2.0 }, { op = "offset", dx = 1.0, dy = 0.0 }"#).unwrap();
         assert!(matches!(g.nodes[0].op, msx_ast::FilterOp::Blur { input: msx_ast::FilterInput::SourceGraphic, .. }));
         assert!(matches!(g.nodes[1].op, msx_ast::FilterOp::Offset { input: msx_ast::FilterInput::Node(0), .. }));
@@ -1045,6 +1097,13 @@ mod tests {
             (r#"{ op = "composite", operator = "nope" }"#, "unknown composite operator"),
             (r#"{ op = "flood", region = [1.0, 2.0] }"#, "expected [x, y, width, height]"),
             (r#"{ op = "flood", region = [0.0, 0.0, 0.0, 5.0] }"#, "region"),
+            (r#"{ op = "morphology", operator = "open" }"#, "not erode or dilate"),
+            (r#"{ op = "morphology", rx = -1.0 }"#, "morphology"),
+            (r#"{ op = "convolve_matrix" }"#, "needs `kernel`"),
+            (r#"{ op = "convolve_matrix", kernel = [1, 2, 3] }"#, "convolve_matrix"),
+            (r#"{ op = "convolve_matrix", kernel = [1], columns = 1, rows = 1, edge = "mirror" }"#, "not duplicate, wrap or none"),
+            (r#"{ op = "convolve_matrix", kernel = [1], columns = 1, rows = 1, target_x = 1 }"#, "convolve_matrix"),
+            (r#"{ op = "convolve_matrix", kernel = [1], columns = 1.5, rows = 1 }"#, "whole number"),
         ] {
             let err = graph_of(bad).unwrap_err();
             assert!(err.contains(needle), "{bad}: {err}");

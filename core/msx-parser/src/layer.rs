@@ -204,6 +204,49 @@ fn parse_graph(data: &DixData, prefix: &str) -> Result<FilterGraph, String> {
                 }
                 FilterOp::ComponentTransfer { input: input(data, "input", previous)?, funcs }
             }
+            "morphology" => {
+                let operator = opt::<String>(data, &p, "operator")?.unwrap_or_else(|| "erode".to_string());
+                let dilate = match operator.as_str() {
+                    "erode" => false,
+                    "dilate" => true,
+                    other => return Err(format!("{p}.operator: '{other}' is not erode or dilate")),
+                };
+                FilterOp::Morphology {
+                    input: input(data, "input", previous)?,
+                    dilate,
+                    rx: opt::<f64>(data, &p, "rx")?.unwrap_or(0.0),
+                    ry: opt::<f64>(data, &p, "ry")?.unwrap_or(0.0),
+                }
+            }
+            "tile" => FilterOp::Tile { input: input(data, "input", previous)? },
+            "convolve_matrix" => {
+                let kernel = opt::<Vec<f64>>(data, &p, "kernel")?.ok_or_else(|| format!("{p}: a convolve_matrix needs `kernel`, columns * rows numbers"))?;
+                let count = |name: &str, default: u16| -> Result<u16, String> {
+                    let v = opt::<f64>(data, &p, name)?.unwrap_or(f64::from(default));
+                    if v.fract() != 0.0 || !(0.0..=65535.0).contains(&v) {
+                        return Err(format!("{p}.{name}: {v} is not a whole number from 0 to 65535"));
+                    }
+                    Ok(v as u16)
+                };
+                let columns = count("columns", 3)?;
+                let rows = count("rows", columns)?;
+                let edge = match opt::<String>(data, &p, "edge")? {
+                    None => msx_ast::ConvolveEdge::Duplicate,
+                    Some(name) => msx_ast::ConvolveEdge::from_source_name(&name).ok_or_else(|| format!("{p}.edge: '{name}' is not duplicate, wrap or none"))?,
+                };
+                FilterOp::ConvolveMatrix {
+                    input: input(data, "input", previous)?,
+                    columns,
+                    rows,
+                    kernel,
+                    divisor: opt::<f64>(data, &p, "divisor")?.unwrap_or(1.0),
+                    bias: opt::<f64>(data, &p, "bias")?.unwrap_or(0.0),
+                    target_x: count("target_x", columns / 2)?,
+                    target_y: count("target_y", rows / 2)?,
+                    edge,
+                    preserve_alpha: opt::<bool>(data, &p, "preserve_alpha")?.unwrap_or(false),
+                }
+            }
             other => return Err(format!("{p}.op: unknown filter op '{other}'")),
         };
         let region = match opt::<Vec<f64>>(data, &p, "region")? {

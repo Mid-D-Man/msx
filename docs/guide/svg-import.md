@@ -164,10 +164,13 @@ A layer carries effects, and a filter that is a chain of single input primitives
 | `feFlood` | A `flood` node of a graph. The color is `flood-color` (with `inherit` and `currentColor`, which is the `color` of the filter) and its alpha is multiplied by `flood-opacity` |
 | `feComposite` | A `composite` node: `over` (also for an unknown operator), `in`, `out`, `atop`, `xor`, and `arithmetic` with `k1` to `k4` |
 | `feMerge` | A `merge` node of its `feMergeNode` inputs |
+| `feMorphology` | A `morphology` node. `radius` is one number or two in user units. A missing, empty or invalid radius, one with more than two numbers, and a zero are a radius of 1, as in resvg, and a negative one keeps the default. The node works inside the filter region |
+| `feTile` | A `tile` node. It repeats the region of the node it reads. An `feOffset` without a region of its own has the region of the node it reads, which is what makes the usual flood, offset and tile chain work |
+| `feConvolveMatrix` | A `convolve_matrix` node, inside the filter region. `order` is one whole number or two above zero, 3 by default, and `kernelMatrix` must hold `order` squared values, or the primitive is skipped as in resvg. The default `divisor` is the sum of the kernel, or 1 when that is zero, and a divisor of zero or a target outside the kernel fall back to the defaults. `edgeMode` is `duplicate` (default), `wrap` or `none`, and `preserveAlpha` is `true` or not. `kernelUnitLength` is not read |
 | `feBlend` | A `blend` node. `mode` takes the blend modes of a layer, and an unknown one (`plus-lighter` included) is `normal` |
 | `feComponentTransfer` | A `component_transfer` node. `feFuncR`, `G`, `B` and `A` take `identity`, `table`, `discrete`, `linear` and `gamma`. The last function of a channel wins, and a table without values, with a token that is not a number, or an unknown `type` leaves the channel as it is |
 | `in`, `in2`, `result` | Names are read in order. A name no earlier primitive gave, or no `in`, reads the previous result, or the source graphic for the first. `SourceAlpha` is the layer alpha. `BackgroundImage`, `BackgroundAlpha`, `FillPaint` and `StrokePaint` read the source graphic, as resvg does. A result name used twice points at the latest |
-| `x`, `y`, `width`, `height` on a primitive | The region of the node. A value that is not given is the filter region's. In `objectBoundingBox` units `x` and `y` are fractions of the box from its corner and `width` and `height` fractions of its size. No attribute, no region. A region without area leaves the filter unsupported |
+| `x`, `y`, `width`, `height` on a primitive | The region of the node, cut to the filter region, and a node whose region lies outside it is transparent. A value that is not given is the filter region's. In `objectBoundingBox` units `x` and `y` are fractions of the box from its corner and `width` and `height` fractions of its size. No attribute, no region. A region without area leaves the filter unsupported |
 | `feDropShadow` in a graph | Five nodes and a merge: the alpha of the input, blurred, moved, colored with a flood and put under the input |
 | A filter on an empty group | Drawn when the region does not need a box (`userSpaceOnUse`), for example an `feFlood`. With box units there is nothing to measure and the element is not drawn |
 | `filterUnits`, `x`, `y`, `width`, `height` | The region, as a clip on the layer. Both units work, the default is minus 10 percent and 120 percent |
@@ -181,7 +184,7 @@ The element transform sits on the layer outside the filter layer, so distances a
 
 An element is not drawn when its only filter does not exist, is not a `filter`, has no primitives, has a region without area, or uses `objectBoundingBox` units on something without area (a vertical line). This follows resvg.
 
-What the graph cannot express is reported and the element is drawn without that filter: `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` and the lighting primitives. The region of a primitive under a transform that rotates or skews is the box that holds the transformed rectangle, and resvg draws that case differently.
+What the graph cannot express is reported and the element is drawn without that filter: `feImage`, `feTurbulence`, `feDisplacementMap` and the lighting primitives. The region of a primitive under a transform that rotates or skews is the box that holds the transformed rectangle, and resvg draws that case differently, which shows most in `feTile`.
 
 ## Encodings
 
@@ -191,7 +194,7 @@ What the graph cannot express is reported and the element is drawn without that 
 
 | SVG feature | Result |
 |---|---|
-| `filter` with `feImage`, `feTile`, `feMorphology`, `feTurbulence`, `feConvolveMatrix`, `feDisplacementMap` or a lighting primitive | Drawn without that filter |
+| `filter` with `feImage`, `feTurbulence`, `feDisplacementMap` or a lighting primitive | Drawn without that filter |
 | `filter` that points at a missing element, at something that is not a `filter`, or at a filter with no primitives or a region without area | The element is not drawn. A missing element or a non-`filter` inside a list that has other working filters is skipped instead |
 | `mask` that is not `url(#id)`, a mask in a reference cycle, or `color-interpolation: linearRGB` on a mask | Drawn without it, or read as sRGB |
 | `clip-path` that is not `url(#id)`, such as `circle()` | Drawn without it |

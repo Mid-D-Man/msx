@@ -9,10 +9,16 @@
 //! node `[u16 index]`. The reader checks the result with `FilterGraph::validate`,
 //! so a node that reads a later node, too many nodes and lists that are too
 //! long are refused here and not in the renderers.
+//!
+//! Ops 8 to 10 are `feMorphology` (`[input] [u8 operator, 0 erode 1 dilate]
+//! [f32 rx] [f32 ry]`), `feTile` (`[input]`) and `feConvolveMatrix` (`[input]
+//! [u16 columns] [u16 rows] [f32 x columns * rows kernel] [f32 divisor]
+//! [f32 bias] [u16 target x] [u16 target y] [u8 flags]`, flag bits 0 and 1 the
+//! edge mode, 0 duplicate 1 wrap 2 none, and bit 2 preserve alpha).
 
 use std::io;
 
-use msx_ast::{BlendMode, Color, CompositeOp, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn, MAX_FILTER_NODES, MAX_MERGE_INPUTS, MAX_TRANSFER_VALUES};
+use msx_ast::{BlendMode, Color, CompositeOp, ConvolveEdge, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn, MAX_FILTER_NODES, MAX_KERNEL_VALUES, MAX_MERGE_INPUTS, MAX_TRANSFER_VALUES};
 
 use crate::decoder::{read_f32, read_u16, read_u8};
 use crate::encoder::{write_f32, write_u16, write_u8};
@@ -25,6 +31,9 @@ const OP_OFFSET: u8 = 4;
 const OP_BLUR: u8 = 5;
 const OP_COLOR_MATRIX: u8 = 6;
 const OP_COMPONENT_TRANSFER: u8 = 7;
+const OP_MORPHOLOGY: u8 = 8;
+const OP_TILE: u8 = 9;
+const OP_CONVOLVE_MATRIX: u8 = 10;
 
 const FLAG_LINEAR: u8 = 1;
 const FLAG_REGION: u8 = 2;
@@ -109,6 +118,9 @@ pub fn write_graph(out: &mut Vec<u8>, graph: &FilterGraph) {
             FilterOp::Blur { .. } => OP_BLUR,
             FilterOp::ColorMatrix { .. } => OP_COLOR_MATRIX,
             FilterOp::ComponentTransfer { .. } => OP_COMPONENT_TRANSFER,
+            FilterOp::Morphology { .. } => OP_MORPHOLOGY,
+            FilterOp::Tile { .. } => OP_TILE,
+            FilterOp::ConvolveMatrix { .. } => OP_CONVOLVE_MATRIX,
         };
         write_u8(out, op);
         write_u8(out, if node.linear { FLAG_LINEAR } else { 0 } | if node.region.is_some() { FLAG_REGION } else { 0 });
@@ -168,6 +180,31 @@ pub fn write_graph(out: &mut Vec<u8>, graph: &FilterGraph) {
                 for f in funcs {
                     write_fn(out, f);
                 }
+            }
+            FilterOp::Morphology { input, dilate, rx, ry } => {
+                write_input(out, *input);
+                write_u8(out, u8::from(*dilate));
+                write_f32(out, *rx);
+                write_f32(out, *ry);
+            }
+            FilterOp::Tile { input } => write_input(out, *input),
+            FilterOp::ConvolveMatrix { input, columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha } => {
+                write_input(out, *input);
+                write_u16(out, *columns);
+                write_u16(out, *rows);
+                for v in kernel.iter().take(MAX_KERNEL_VALUES) {
+                    write_f32(out, *v);
+                }
+                write_f32(out, *divisor);
+                write_f32(out, *bias);
+                write_u16(out, *target_x);
+                write_u16(out, *target_y);
+                let edge = match edge {
+                    ConvolveEdge::Duplicate => 0,
+                    ConvolveEdge::Wrap => 1,
+                    ConvolveEdge::None => 2,
+                };
+                write_u8(out, edge | if *preserve_alpha { 4 } else { 0 });
             }
         }
     }
@@ -243,6 +280,44 @@ pub fn read_graph(data: &[u8], cursor: &mut usize) -> io::Result<FilterGraph> {
                 let funcs = [read_fn(data, cursor)?, read_fn(data, cursor)?, read_fn(data, cursor)?, read_fn(data, cursor)?];
                 FilterOp::ComponentTransfer { input, funcs }
             }
+            OP_MORPHOLOGY => {
+                let input = read_input(data, cursor)?;
+                let dilate = match read_u8(data, cursor)? {
+                    0 => false,
+                    1 => true,
+                    other => return Err(bad(format!("unknown morphology operator {other}"))),
+                };
+                FilterOp::Morphology { input, dilate, rx: read_f32(data, cursor)?, ry: read_f32(data, cursor)? }
+            }
+            OP_TILE => FilterOp::Tile { input: read_input(data, cursor)? },
+            OP_CONVOLVE_MATRIX => {
+                let input = read_input(data, cursor)?;
+                let columns = read_u16(data, cursor)?;
+                let rows = read_u16(data, cursor)?;
+                let n = usize::from(columns) * usize::from(rows);
+                if n == 0 || n > MAX_KERNEL_VALUES {
+                    return Err(bad(format!("a convolve matrix of {columns} by {rows} values is outside 1 to {MAX_KERNEL_VALUES}")));
+                }
+                let mut kernel = Vec::with_capacity(n);
+                for _ in 0..n {
+                    kernel.push(read_f32(data, cursor)?);
+                }
+                let divisor = read_f32(data, cursor)?;
+                let bias = read_f32(data, cursor)?;
+                let target_x = read_u16(data, cursor)?;
+                let target_y = read_u16(data, cursor)?;
+                let flags = read_u8(data, cursor)?;
+                let edge = match flags & 3 {
+                    0 => ConvolveEdge::Duplicate,
+                    1 => ConvolveEdge::Wrap,
+                    2 => ConvolveEdge::None,
+                    other => return Err(bad(format!("unknown convolve edge mode {other}"))),
+                };
+                if flags & !7 != 0 {
+                    return Err(bad(format!("unknown convolve flags 0x{flags:02x}")));
+                }
+                FilterOp::ConvolveMatrix { input, columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha: flags & 4 != 0 }
+            }
             other => return Err(bad(format!("unknown filter op {other}"))),
         };
         nodes.push(FilterNode { op, region, linear: flags & FLAG_LINEAR != 0 });
@@ -288,6 +363,33 @@ mod tests {
                     input: FilterInput::SourceGraphic,
                     funcs: [TransferFn::Gamma { amplitude: 1.0, exponent: 2.0, offset: 0.0 }, TransferFn::Identity, TransferFn::Identity, TransferFn::Identity],
                 }),
+                FilterNode::new(FilterOp::Morphology { input: FilterInput::Node(8), dilate: true, rx: 2.5, ry: 0.0 }),
+                FilterNode::new(FilterOp::Morphology { input: FilterInput::SourceAlpha, dilate: false, rx: 1.0, ry: 3.0 }),
+                FilterNode::new(FilterOp::Tile { input: FilterInput::Node(0) }),
+                FilterNode::new(FilterOp::ConvolveMatrix {
+                    input: FilterInput::Node(9),
+                    columns: 3,
+                    rows: 2,
+                    kernel: vec![0.5, -1.0, 0.25, 0.0, 2.0, 1.0],
+                    divisor: 2.0,
+                    bias: -0.5,
+                    target_x: 2,
+                    target_y: 1,
+                    edge: ConvolveEdge::Wrap,
+                    preserve_alpha: true,
+                }),
+                FilterNode::new(FilterOp::ConvolveMatrix {
+                    input: FilterInput::SourceGraphic,
+                    columns: 1,
+                    rows: 1,
+                    kernel: vec![1.0],
+                    divisor: 1.0,
+                    bias: 0.0,
+                    target_x: 0,
+                    target_y: 0,
+                    edge: ConvolveEdge::None,
+                    preserve_alpha: false,
+                }),
             ],
         }
     }
@@ -326,6 +428,32 @@ mod tests {
         let mut many = Vec::new();
         write_u16(&mut many, (MAX_FILTER_NODES + 1) as u16);
         assert!(read_graph(&many, &mut 0).is_err());
+        // A convolve matrix with no values, too many values, an unknown edge or flag.
+        let conv = |columns: u16, rows: u16, flags: u8| {
+            let mut b = Vec::new();
+            write_u16(&mut b, 1);
+            write_u8(&mut b, OP_CONVOLVE_MATRIX);
+            write_u8(&mut b, 0);
+            write_input(&mut b, FilterInput::SourceGraphic);
+            write_u16(&mut b, columns);
+            write_u16(&mut b, rows);
+            for _ in 0..(usize::from(columns) * usize::from(rows)).min(MAX_KERNEL_VALUES) {
+                write_f32(&mut b, 1.0);
+            }
+            write_f32(&mut b, 1.0);
+            write_f32(&mut b, 0.0);
+            write_u16(&mut b, 0);
+            write_u16(&mut b, 0);
+            write_u8(&mut b, flags);
+            b
+        };
+        assert!(read_graph(&conv(1, 1, 0), &mut 0).is_ok());
+        assert!(read_graph(&conv(0, 3, 0), &mut 0).is_err(), "no columns");
+        assert!(read_graph(&conv(33, 33, 0), &mut 0).is_err(), "over the limit");
+        assert!(read_graph(&conv(1, 1, 3), &mut 0).is_err(), "edge mode 3");
+        assert!(read_graph(&conv(1, 1, 8), &mut 0).is_err(), "an unknown flag");
+        // A morphology operator that is neither erode nor dilate.
+        assert!(read_graph(&[1, 0, OP_MORPHOLOGY, 0, 0, 7], &mut 0).is_err());
         // Unknown op, flags, input kind and transfer tag.
         assert!(read_graph(&[1, 0, 99, 0], &mut 0).is_err());
         assert!(read_graph(&[1, 0, OP_FLOOD, 0x80, 0, 0, 0, 0], &mut 0).is_err());

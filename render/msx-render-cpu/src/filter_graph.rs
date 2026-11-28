@@ -9,7 +9,7 @@
 //! keep the space of what they read or make, so the `linear` flag does not
 //! reach them. A node with a region clears everything outside it.
 
-use msx_ast::{BlendMode, CompositeOp, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn};
+use msx_ast::{BlendMode, CompositeOp, ConvolveEdge, FilterGraph, FilterInput, FilterNode, FilterOp, FilterRegion, TransferFn};
 use rayon::prelude::*;
 use tiny_skia::Pixmap;
 
@@ -70,10 +70,7 @@ impl Img {
 
     /// Clears everything outside the device rectangle of `region`.
     fn clip(&mut self, width: usize, height: usize, region: FilterRegion) {
-        let x0 = region.x.floor().clamp(0.0, width as f64) as usize;
-        let y0 = region.y.floor().clamp(0.0, height as f64) as usize;
-        let x1 = (region.x.floor() + region.width.ceil()).clamp(0.0, width as f64) as usize;
-        let y1 = (region.y.floor() + region.height.ceil()).clamp(0.0, height as f64) as usize;
+        let (x0, y0, x1, y1) = device_rect(width, height, Some(region));
         self.data.par_chunks_mut(width * 4).enumerate().for_each(|(y, row)| {
             for x in 0..width {
                 if y < y0 || y >= y1 || x < x0 || x >= x1 {
@@ -82,6 +79,17 @@ impl Img {
             }
         });
     }
+}
+
+/// The pixel rectangle `(x0, y0, x1, y1)` of a region on a `width` by `height`
+/// buffer, cut to the buffer. No region is the whole buffer.
+fn device_rect(width: usize, height: usize, region: Option<FilterRegion>) -> (usize, usize, usize, usize) {
+    let Some(region) = region else { return (0, 0, width, height) };
+    let x0 = region.x.floor().clamp(0.0, width as f64) as usize;
+    let y0 = region.y.floor().clamp(0.0, height as f64) as usize;
+    let x1 = (region.x.floor() + region.width.ceil()).clamp(0.0, width as f64) as usize;
+    let y1 = (region.y.floor() + region.height.ceil()).clamp(0.0, height as f64) as usize;
+    (x0, y0, x1.max(x0), y1.max(y0))
 }
 
 /// Runs the graph on `pixmap` and writes the result back. An empty graph
@@ -104,6 +112,7 @@ pub fn apply_graph(pixmap: &mut Pixmap, graph: &FilterGraph) {
         }
     }
 
+    let regions: Vec<Option<FilterRegion>> = graph.nodes.iter().map(|n| n.region).collect();
     let mut results: Vec<Option<Img>> = Vec::with_capacity(graph.nodes.len());
     for (i, node) in graph.nodes.iter().enumerate() {
         // `Some(space)` converts what is read to that space, `None` reads it as it is.
@@ -128,7 +137,7 @@ pub fn apply_graph(pixmap: &mut Pixmap, graph: &FilterGraph) {
                 None => img,
             }
         };
-        let mut out = evaluate(node, &mut get, width, height, source.data.len());
+        let mut out = evaluate(node, &mut get, &regions, width, height, source.data.len());
         if let Some(region) = node.region {
             out.clip(width, height, region);
         }
@@ -150,7 +159,7 @@ pub fn apply_graph(pixmap: &mut Pixmap, graph: &FilterGraph) {
     }
 }
 
-fn evaluate(node: &FilterNode, get: &mut impl FnMut(FilterInput, Option<bool>) -> Img, width: usize, height: usize, len: usize) -> Img {
+fn evaluate(node: &FilterNode, get: &mut impl FnMut(FilterInput, Option<bool>) -> Img, regions: &[Option<FilterRegion>], width: usize, height: usize, len: usize) -> Img {
     let linear = node.linear;
     match &node.op {
         FilterOp::Flood { color } => {
@@ -208,6 +217,32 @@ fn evaluate(node: &FilterNode, get: &mut impl FnMut(FilterInput, Option<bool>) -
                 [f(&funcs[0], r), f(&funcs[1], g), f(&funcs[2], b), f(&funcs[3], a)]
             });
             img
+        }
+        FilterOp::Morphology { input, dilate, rx, ry } => {
+            let img = get(*input, Some(linear));
+            morphology(img, device_rect(width, height, node.region), width, *dilate, *rx, *ry)
+        }
+        FilterOp::Tile { input } => {
+            // The tile is the region of the input node. The input is read as it is.
+            let tile = match input {
+                FilterInput::Node(j) => device_rect(width, height, regions.get(usize::from(*j)).copied().flatten()),
+                _ => (0, 0, width, height),
+            };
+            tile_image(get(*input, None), tile, width)
+        }
+        FilterOp::ConvolveMatrix { input, columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha } => {
+            let img = get(*input, Some(linear));
+            let spec = Convolve {
+                columns: usize::from(*columns),
+                rows: usize::from(*rows),
+                kernel,
+                divisor: *divisor as f32,
+                bias: *bias as f32,
+                target: (usize::from(*target_x), usize::from(*target_y)),
+                edge: *edge,
+                preserve_alpha: *preserve_alpha,
+            };
+            convolve(img, device_rect(width, height, node.region), width, &spec)
         }
     }
 }
@@ -273,6 +308,196 @@ fn offset(src: Img, width: usize, height: usize, dx: i32, dy: i32) -> Img {
     out
 }
 
+/// Copies the rectangle `(x0, y0, x1, y1)` of `img` into an image of its own.
+fn crop(img: &Img, width: usize, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> Vec<f32> {
+    let mut out = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
+    for y in y0..y1 {
+        out.extend_from_slice(&img.data[(y * width + x0) * 4..(y * width + x1) * 4]);
+    }
+    out
+}
+
+/// A copy of `img` that is transparent except for `cells` in the rectangle
+/// `(x0, y0, x1, y1)`, which takes the place of what was there.
+fn paste(img: &Img, width: usize, (x0, y0, x1, y1): (usize, usize, usize, usize), cells: &[f32]) -> Img {
+    let mut out = Img { data: vec![0.0; img.data.len()], linear: img.linear };
+    let w = x1 - x0;
+    for y in y0..y1 {
+        let from = (y - y0) * w * 4;
+        out.data[(y * width + x0) * 4..(y * width + x1) * 4].copy_from_slice(&cells[from..from + w * 4]);
+    }
+    out
+}
+
+/// One line of the min or max over a window of `len` cells that starts `back`
+/// cells before the cell, cut at both ends of the line. Every value of the
+/// line is entered once, so the cost does not grow with the window.
+fn extreme_line(line: &[f32], out: &mut [f32], len: usize, back: usize, dilate: bool) {
+    let n = line.len();
+    let better = |a: f32, b: f32| if dilate { a >= b } else { a <= b };
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut next = 0;
+    for (i, slot) in out.iter_mut().enumerate().take(n) {
+        let right = (i + len).saturating_sub(back + 1).min(n - 1);
+        while next <= right {
+            while queue.back().is_some_and(|&j| better(line[next], line[j])) {
+                queue.pop_back();
+            }
+            queue.push_back(next);
+            next += 1;
+        }
+        let left = i.saturating_sub(back);
+        while queue.front().is_some_and(|&j| j < left) {
+            queue.pop_front();
+        }
+        *slot = line[*queue.front().expect("the window holds the cell or a neighbor")];
+    }
+}
+
+/// The min (erode) or max (dilate) of each premultiplied channel over a
+/// window of `2 * ceil(r)` cells per axis, from `ceil(r)` before the pixel to
+/// `ceil(r) - 1` after it, as resvg does it. A window that reaches past the
+/// region covers the whole line from every pixel. The work is done on the
+/// pixels of `rect` alone, so what is outside counts for nothing, and nothing
+/// is left outside it. An axis with a radius of zero or less is left alone.
+fn morphology(img: Img, rect: (usize, usize, usize, usize), width: usize, dilate: bool, rx: f64, ry: f64) -> Img {
+    let (x0, y0, x1, y1) = rect;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let axis = |r: f64, n: usize| -> Option<(usize, usize)> {
+        if r.is_nan() || r <= 0.0 || n == 0 {
+            return None;
+        }
+        // Past the line length every pixel sees the whole line, so more is not needed.
+        let back = r.ceil().min(n as f64) as usize;
+        Some((back * 2, back))
+    };
+    let (ax, ay) = (axis(rx, w), axis(ry, h));
+    if w == 0 || h == 0 || (ax.is_none() && ay.is_none()) {
+        return img;
+    }
+    let mut cells = crop(&img, width, rect);
+    let pass = |cells: &mut [f32], line_len: usize, spec: (usize, usize)| {
+        cells.par_chunks_mut(line_len * 4).for_each(|row| {
+            let mut line = vec![0.0f32; line_len];
+            let mut out = vec![0.0f32; line_len];
+            for c in 0..4 {
+                for (i, v) in line.iter_mut().enumerate() {
+                    *v = row[i * 4 + c];
+                }
+                extreme_line(&line, &mut out, spec.0, spec.1, dilate);
+                for (i, v) in out.iter().enumerate() {
+                    row[i * 4 + c] = *v;
+                }
+            }
+        });
+    };
+    if let Some(spec) = ax {
+        pass(&mut cells, w, spec);
+    }
+    if let Some(spec) = ay {
+        let mut turned = transpose(&cells, w, h);
+        pass(&mut turned, h, spec);
+        cells = transpose(&turned, h, w);
+    }
+    paste(&img, width, rect, &cells)
+}
+
+/// Repeats the rectangle `tile` of `img` over the whole buffer, with the
+/// tile where it is. A tile with no area gives transparent black.
+fn tile_image(img: Img, tile: (usize, usize, usize, usize), width: usize) -> Img {
+    let (x0, y0, x1, y1) = tile;
+    let (tw, th) = (x1 - x0, y1 - y0);
+    let mut out = Img { data: vec![0.0; img.data.len()], linear: img.linear };
+    if tw == 0 || th == 0 {
+        return out;
+    }
+    out.data.par_chunks_mut(width * 4).enumerate().for_each(|(y, row)| {
+        let sy = y0 + (y as i64 - y0 as i64).rem_euclid(th as i64) as usize;
+        for x in 0..width {
+            let sx = x0 + (x as i64 - x0 as i64).rem_euclid(tw as i64) as usize;
+            row[x * 4..x * 4 + 4].copy_from_slice(&img.data[(sy * width + sx) * 4..(sy * width + sx) * 4 + 4]);
+        }
+    });
+    out
+}
+
+/// What `convolve` needs besides the pixels.
+struct Convolve<'a> {
+    columns: usize,
+    rows: usize,
+    kernel: &'a [f64],
+    divisor: f32,
+    bias: f32,
+    target: (usize, usize),
+    edge: ConvolveEdge,
+    preserve_alpha: bool,
+}
+
+/// `feConvolveMatrix` on the pixels of `rect`, with its edge mode deciding
+/// what lies beyond them. The kernel is turned half a turn, as in a
+/// convolution, so the first kernel value meets the last neighbor. With
+/// `preserve_alpha` the colors are convolved on straight values and keep the
+/// alpha of the pixel.
+fn convolve(img: Img, rect: (usize, usize, usize, usize), width: usize, spec: &Convolve) -> Img {
+    let (x0, y0, x1, y1) = rect;
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let mut src = crop(&img, width, rect);
+    if spec.preserve_alpha {
+        for px in src.chunks_exact_mut(4) {
+            let a = px[3];
+            if a > 0.0 {
+                for c in &mut px[..3] {
+                    *c = (*c / a).clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+    let (columns, rows) = (spec.columns as i64, spec.rows as i64);
+    let (tx, ty) = (spec.target.0 as i64, spec.target.1 as i64);
+    let mut out = vec![0.0f32; src.len()];
+    out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let mut sum = [0.0f32; 4];
+            for oy in 0..rows {
+                for ox in 0..columns {
+                    let (mut px, mut py) = (x as i64 - tx + ox, y as i64 - ty + oy);
+                    match spec.edge {
+                        ConvolveEdge::None => {
+                            if px < 0 || px >= w as i64 || py < 0 || py >= h as i64 {
+                                continue;
+                            }
+                        }
+                        ConvolveEdge::Duplicate => {
+                            px = px.clamp(0, w as i64 - 1);
+                            py = py.clamp(0, h as i64 - 1);
+                        }
+                        ConvolveEdge::Wrap => {
+                            px = px.rem_euclid(w as i64);
+                            py = py.rem_euclid(h as i64);
+                        }
+                    }
+                    let k = spec.kernel[((rows - 1 - oy) * columns + (columns - 1 - ox)) as usize] as f32;
+                    let p = &src[(py as usize * w + px as usize) * 4..][..4];
+                    for c in 0..4 {
+                        sum[c] += p[c] * k;
+                    }
+                }
+            }
+            let raw = if spec.preserve_alpha { src[(y * w + x) * 4 + 3] } else { sum[3] / spec.divisor + spec.bias };
+            let a = raw.clamp(0.0, 1.0);
+            for c in 0..3 {
+                let v = sum[c] / spec.divisor + spec.bias * raw;
+                row[x * 4 + c] = if spec.preserve_alpha { v.clamp(0.0, 1.0) * a } else { v.clamp(0.0, a) };
+            }
+            row[x * 4 + 3] = a;
+        }
+    });
+    paste(&img, width, rect, &out)
+}
+
 /// A Gaussian blur with a deviation per axis, as `gaussian_blur_xy` does it.
 fn blur(img: &mut Img, width: usize, height: usize, sigma_x: f32, sigma_y: f32) {
     let blurs = |s: f32| !s.is_nan() && s > 0.0;
@@ -317,6 +542,209 @@ mod tests {
     }
 
     use FilterInput::{Node, SourceAlpha, SourceGraphic};
+
+    fn opaque_red_at(width: u32, height: u32, cells: &[(usize, usize)]) -> Pixmap {
+        let mut p = pm(width, height);
+        for &(x, y) in cells {
+            set(&mut p, x, y, [255, 0, 0, 255]);
+        }
+        p
+    }
+
+    fn alphas(p: &Pixmap) -> Vec<u8> {
+        p.data().chunks_exact(4).map(|px| px[3]).collect()
+    }
+
+    fn reds(p: &Pixmap) -> Vec<u8> {
+        p.data().chunks_exact(4).map(|px| px[0]).collect()
+    }
+
+    fn morph(dilate: bool, rx: f64, ry: f64, region: Option<FilterRegion>) -> FilterGraph {
+        FilterGraph { nodes: vec![FilterNode { op: FilterOp::Morphology { input: SourceGraphic, dilate, rx, ry }, region, linear: false }] }
+    }
+
+    #[test]
+    fn erode_and_dilate_use_a_window_of_twice_the_radius_that_leans_back() {
+        // Opaque at x = 2 to 7 of 10. A radius of 1 is a window of two cells, the pixel and the one before.
+        let cells: Vec<(usize, usize)> = (2..8).map(|x| (x, 0)).collect();
+        let mut p = opaque_red_at(10, 1, &cells);
+        apply_graph(&mut p, &morph(false, 1.0, 0.0, None));
+        assert_eq!(alphas(&p), [0, 0, 0, 255, 255, 255, 255, 255, 0, 0], "erode");
+        let mut q = opaque_red_at(10, 1, &cells);
+        apply_graph(&mut q, &morph(true, 1.0, 0.0, None));
+        assert_eq!(alphas(&q), [0, 0, 255, 255, 255, 255, 255, 255, 255, 0], "dilate");
+        // A fraction rounds up, and a window over the whole row erases a shorter run.
+        let mut r = opaque_red_at(10, 1, &cells);
+        apply_graph(&mut r, &morph(false, 0.25, 0.0, None));
+        assert_eq!(alphas(&r), [0, 0, 0, 255, 255, 255, 255, 255, 0, 0], "0.25 is a radius of 1");
+        let mut s = opaque_red_at(10, 1, &cells);
+        apply_graph(&mut s, &morph(false, 9999.0, 0.0, None));
+        assert!(alphas(&s).iter().all(|&a| a == 0), "{:?}", alphas(&s));
+    }
+
+    #[test]
+    fn morphology_works_on_each_axis_alone_and_zero_leaves_the_axis() {
+        // A column of 1 by 8, opaque at y = 2 to 5.
+        let cells: Vec<(usize, usize)> = (2..6).map(|y| (0, y)).collect();
+        let mut p = opaque_red_at(1, 8, &cells);
+        apply_graph(&mut p, &morph(true, 0.0, 1.0, None));
+        assert_eq!(alphas(&p), [0, 0, 255, 255, 255, 255, 255, 0]);
+        let mut q = opaque_red_at(1, 8, &cells);
+        apply_graph(&mut q, &morph(false, 5.0, 0.0, None));
+        assert_eq!(alphas(&q), alphas(&opaque_red_at(1, 8, &cells)), "no vertical radius changes nothing in a column");
+        let mut z = opaque_red_at(1, 8, &cells);
+        apply_graph(&mut z, &morph(true, 0.0, 0.0, None));
+        assert_eq!(alphas(&z), alphas(&opaque_red_at(1, 8, &cells)));
+    }
+
+    #[test]
+    fn morphology_sees_nothing_outside_its_region() {
+        // Opaque at 0 to 5, region 2 to 7. Erode keeps what is inside, as the edge pixels do not count for the outside.
+        let cells: Vec<(usize, usize)> = (0..6).map(|x| (x, 0)).collect();
+        let region = Some(FilterRegion { x: 2.0, y: 0.0, width: 6.0, height: 1.0 });
+        let mut p = opaque_red_at(10, 1, &cells);
+        apply_graph(&mut p, &morph(false, 1.0, 0.0, region));
+        assert_eq!(alphas(&p), [0, 0, 255, 255, 255, 255, 0, 0, 0, 0]);
+        // A dilation at least as wide as the region fills it, and nothing spills out of it.
+        let one = vec![(3, 0)];
+        let mut q = opaque_red_at(10, 1, &one);
+        apply_graph(&mut q, &morph(true, 50.0, 0.0, region));
+        assert_eq!(alphas(&q), [0, 0, 255, 255, 255, 255, 255, 255, 0, 0]);
+        // A smaller one leans back: the window of a radius of 2 reaches 2 before and 1 after.
+        let mut r = opaque_red_at(10, 1, &one);
+        apply_graph(&mut r, &morph(true, 2.0, 0.0, region));
+        assert_eq!(alphas(&r), [0, 0, 255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    fn tile_graph(region: Option<FilterRegion>) -> FilterGraph {
+        FilterGraph {
+            nodes: vec![
+                FilterNode { op: FilterOp::Offset { input: SourceGraphic, dx: 0.0, dy: 0.0 }, region, linear: false },
+                FilterNode::new(FilterOp::Tile { input: Node(0) }),
+            ],
+        }
+    }
+
+    #[test]
+    fn tile_repeats_the_region_of_its_input_over_the_layer() {
+        let at = |region: FilterRegion, red: usize| {
+            let mut p = opaque_red_at(9, 1, &[(red, 0)]);
+            apply_graph(&mut p, &tile_graph(Some(region)));
+            alphas(&p).iter().enumerate().filter(|(_, &a)| a == 255).map(|(x, _)| x).collect::<Vec<_>>()
+        };
+        // A tile of two cells at the origin: [transparent, red].
+        assert_eq!(at(FilterRegion { x: 0.0, y: 0.0, width: 2.0, height: 1.0 }, 1), [1, 3, 5, 7]);
+        // A tile of three cells that starts at 2 and reaches back before it.
+        assert_eq!(at(FilterRegion { x: 2.0, y: 0.0, width: 3.0, height: 1.0 }, 3), [0, 3, 6]);
+        // What is outside the tile region is not in the tile.
+        assert!(at(FilterRegion { x: 0.0, y: 0.0, width: 2.0, height: 1.0 }, 5).is_empty());
+    }
+
+    #[test]
+    fn tile_of_the_whole_layer_is_the_layer_and_an_empty_region_is_nothing() {
+        let mut p = opaque_red_at(4, 1, &[(1, 0)]);
+        apply_graph(&mut p, &FilterGraph { nodes: vec![node(FilterOp::Tile { input: SourceGraphic })] });
+        assert_eq!(alphas(&p), [0, 255, 0, 0]);
+        let mut q = opaque_red_at(4, 1, &[(1, 0)]);
+        apply_graph(&mut q, &tile_graph(Some(FilterRegion { x: 9.0, y: 0.0, width: 2.0, height: 1.0 })));
+        assert!(alphas(&q).iter().all(|&a| a == 0));
+        // The tile node's own region cuts the result.
+        let mut r = opaque_red_at(8, 1, &[(1, 0)]);
+        let mut g = tile_graph(Some(FilterRegion { x: 0.0, y: 0.0, width: 2.0, height: 1.0 }));
+        g.nodes[1].region = Some(FilterRegion { x: 0.0, y: 0.0, width: 4.0, height: 1.0 });
+        apply_graph(&mut r, &g);
+        assert_eq!(alphas(&r), [0, 255, 0, 255, 0, 0, 0, 0]);
+    }
+
+    fn conv(columns: u16, rows: u16, kernel: &[f64], divisor: f64, edge: ConvolveEdge, preserve_alpha: bool, region: Option<FilterRegion>) -> FilterGraph {
+        FilterGraph {
+            nodes: vec![FilterNode {
+                op: FilterOp::ConvolveMatrix {
+                    input: SourceGraphic,
+                    columns,
+                    rows,
+                    kernel: kernel.to_vec(),
+                    divisor,
+                    bias: 0.0,
+                    target_x: columns / 2,
+                    target_y: rows / 2,
+                    edge,
+                    preserve_alpha,
+                },
+                region,
+                linear: false,
+            }],
+        }
+    }
+
+    /// An opaque strip where only the red channel varies.
+    fn red_strip(values: &[u8]) -> Pixmap {
+        let mut p = pm(values.len() as u32, 1);
+        for (x, v) in values.iter().enumerate() {
+            set(&mut p, x, 0, [*v, 0, 0, 255]);
+        }
+        p
+    }
+
+    #[test]
+    fn the_identity_kernel_changes_nothing_and_the_kernel_is_turned_half_a_turn() {
+        let mut p = red_strip(&[10, 200, 30, 40]);
+        apply_graph(&mut p, &conv(3, 3, &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0], 1.0, ConvolveEdge::Duplicate, false, None));
+        assert_eq!(reds(&p), [10, 200, 30, 40]);
+        // The first kernel value meets the neighbor on the right.
+        let mut q = red_strip(&[0, 0, 0, 255, 0, 0]);
+        apply_graph(&mut q, &conv(3, 1, &[1.0, 0.0, 0.0], 1.0, ConvolveEdge::None, false, None));
+        assert_eq!(reds(&q), [0, 0, 255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_edge_mode_decides_what_lies_beyond_the_region() {
+        let kernel = [1.0, 1.0, 1.0];
+        let run = |edge| {
+            let mut p = red_strip(&[255, 0, 0, 0, 0]);
+            apply_graph(&mut p, &conv(3, 1, &kernel, 3.0, edge, false, None));
+            (reds(&p)[0], alphas(&p)[0])
+        };
+        assert_eq!(run(ConvolveEdge::Duplicate), (170, 255), "the first pixel again");
+        assert_eq!(run(ConvolveEdge::None), (85, 170), "transparent black, which also thins the alpha");
+        assert_eq!(run(ConvolveEdge::Wrap), (85, 255), "the last pixel, which is dark");
+    }
+
+    #[test]
+    fn a_wrap_turns_around_inside_the_region_and_nothing_is_left_outside_it() {
+        let region = Some(FilterRegion { x: 2.0, y: 0.0, width: 4.0, height: 1.0 });
+        let mut p = red_strip(&[0, 0, 0, 0, 0, 255, 0, 0]);
+        // kernel [0, 0, 1] meets the left neighbor, so the picture moves right by one.
+        apply_graph(&mut p, &conv(3, 1, &[0.0, 0.0, 1.0], 1.0, ConvolveEdge::Wrap, false, region));
+        assert_eq!(reds(&p), [0, 0, 255, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn preserve_alpha_keeps_the_alpha_and_convolves_straight_colors() {
+        let mut p = pm(3, 1);
+        set(&mut p, 0, 0, [128, 0, 0, 128]);
+        set(&mut p, 1, 0, [0, 0, 0, 0]);
+        set(&mut p, 2, 0, [128, 0, 0, 128]);
+        apply_graph(&mut p, &conv(3, 1, &[0.0, 1.0, 0.0], 1.0, ConvolveEdge::Duplicate, true, None));
+        assert!(near(at(&p, 0, 0), [128, 0, 0, 128], 1), "{:?}", at(&p, 0, 0));
+        assert_eq!(at(&p, 1, 0)[3], 0, "an empty pixel keeps its alpha");
+        // A kernel that sums neighbors keeps the alpha of the pixel and averages the straight color.
+        let mut q = pm(3, 1);
+        set(&mut q, 0, 0, [255, 0, 0, 255]);
+        set(&mut q, 1, 0, [64, 0, 0, 64]);
+        set(&mut q, 2, 0, [255, 0, 0, 255]);
+        apply_graph(&mut q, &conv(3, 1, &[0.0, 1.0, 1.0], 2.0, ConvolveEdge::Duplicate, true, None));
+        assert_eq!(at(&q, 1, 0)[3], 64);
+        assert!(at(&q, 1, 0)[0] >= 62 && at(&q, 1, 0)[0] <= 64, "{:?}", at(&q, 1, 0));
+    }
+
+    #[test]
+    fn a_weak_alpha_pulls_the_color_down_with_it() {
+        // Premultiplied color cannot exceed the alpha, so a divisor of 4 on opaque red leaves a quarter.
+        let mut p = red_strip(&[255, 255, 255]);
+        apply_graph(&mut p, &conv(1, 1, &[1.0], 4.0, ConvolveEdge::Duplicate, false, None));
+        assert!(near(at(&p, 1, 0), [64, 0, 0, 64], 1), "{:?}", at(&p, 1, 0));
+    }
 
     /// A 6 by 1 strip: opaque red at x = 1 and x = 2, half transparent blue at 4.
     fn strip() -> Pixmap {

@@ -4,8 +4,9 @@
 //!
 //! NOTICE: see docs/guide/layers.md, section "Filter graph". A graph is the
 //! form of an SVG `<filter>` that a chain of single input effects cannot say:
-//! `feFlood`, `feComposite`, `feMerge`, `feBlend`, `feComponentTransfer`, named
-//! results and primitive regions. Wire version 3.
+//! `feFlood`, `feComposite`, `feMerge`, `feBlend`, `feComponentTransfer`,
+//! `feMorphology`, `feTile`, `feConvolveMatrix`, named results and primitive
+//! regions. Wire version 3.
 //!
 //! The result of the graph is the result of its last node. A node can only
 //! read nodes before it, so a graph has no cycles and is evaluated in order.
@@ -18,6 +19,8 @@ pub const MAX_FILTER_NODES: usize = 256;
 pub const MAX_TRANSFER_VALUES: usize = 1024;
 /// Most inputs of a `Merge`.
 pub const MAX_MERGE_INPUTS: usize = 64;
+/// Most values in the kernel of a `ConvolveMatrix`, which is `columns * rows`.
+pub const MAX_KERNEL_VALUES: usize = 1024;
 
 /// Where a primitive reads from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +79,37 @@ impl CompositeOp {
             CompositeOp::Atop => "atop",
             CompositeOp::Xor => "xor",
             CompositeOp::Arithmetic { .. } => "arithmetic",
+        }
+    }
+}
+
+/// What `feConvolveMatrix` reads for a pixel outside the region it works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvolveEdge {
+    /// The nearest pixel inside the region.
+    Duplicate,
+    /// The region repeated in every direction.
+    Wrap,
+    /// Transparent black.
+    None,
+}
+
+impl ConvolveEdge {
+    pub fn source_name(self) -> &'static str {
+        match self {
+            ConvolveEdge::Duplicate => "duplicate",
+            ConvolveEdge::Wrap => "wrap",
+            ConvolveEdge::None => "none",
+        }
+    }
+
+    /// The inverse of `source_name`.
+    pub fn from_source_name(s: &str) -> Option<ConvolveEdge> {
+        match s.trim() {
+            "duplicate" => Some(ConvolveEdge::Duplicate),
+            "wrap" => Some(ConvolveEdge::Wrap),
+            "none" => Some(ConvolveEdge::None),
+            _ => Option::None,
         }
     }
 }
@@ -150,6 +184,33 @@ pub enum FilterOp {
     ColorMatrix { input: FilterInput, values: [f64; 20] },
     /// One function each for red, green, blue and alpha.
     ComponentTransfer { input: FilterInput, funcs: [TransferFn; 4] },
+    /// `feMorphology`: every pixel takes the smallest (erode) or the largest
+    /// (dilate) value of each premultiplied channel in a window of the input,
+    /// `2 * ceil(r)` pixels wide and high from `r` before the pixel to `r - 1`
+    /// after it. A radius of zero or less leaves its axis alone. The window
+    /// stops at the edge of the region, and what is beyond it counts for nothing.
+    Morphology { input: FilterInput, dilate: bool, rx: f64, ry: f64 },
+    /// `feTile`: the region of the input node, repeated over the whole layer.
+    /// An input without a region is the whole layer, which tiles to itself.
+    Tile { input: FilterInput },
+    /// `feConvolveMatrix` on a kernel of `columns` by `rows` values, row major.
+    /// Each output channel is the sum of the kernel (turned half a turn, as in a
+    /// convolution) times the neighbors, divided by `divisor` plus `bias`.
+    /// `target_x` and `target_y` are the kernel cell that sits on the pixel.
+    /// With `preserve_alpha` the alpha is kept and the colors are convolved
+    /// on straight values.
+    ConvolveMatrix {
+        input: FilterInput,
+        columns: u16,
+        rows: u16,
+        kernel: Vec<f64>,
+        divisor: f64,
+        bias: f64,
+        target_x: u16,
+        target_y: u16,
+        edge: ConvolveEdge,
+        preserve_alpha: bool,
+    },
 }
 
 impl FilterOp {
@@ -162,7 +223,10 @@ impl FilterOp {
             FilterOp::Offset { input, .. }
             | FilterOp::Blur { input, .. }
             | FilterOp::ColorMatrix { input, .. }
-            | FilterOp::ComponentTransfer { input, .. } => vec![*input],
+            | FilterOp::ComponentTransfer { input, .. }
+            | FilterOp::Morphology { input, .. }
+            | FilterOp::Tile { input }
+            | FilterOp::ConvolveMatrix { input, .. } => vec![*input],
         }
     }
 
@@ -176,6 +240,9 @@ impl FilterOp {
             FilterOp::Blur { .. } => "blur",
             FilterOp::ColorMatrix { .. } => "color_matrix",
             FilterOp::ComponentTransfer { .. } => "component_transfer",
+            FilterOp::Morphology { .. } => "morphology",
+            FilterOp::Tile { .. } => "tile",
+            FilterOp::ConvolveMatrix { .. } => "convolve_matrix",
         }
     }
 }
@@ -263,6 +330,19 @@ impl FilterGraph {
                 FilterOp::Offset { dx, dy, .. } => finite(&[*dx, *dy]),
                 FilterOp::Blur { rx, ry, .. } => finite(&[*rx, *ry]),
                 FilterOp::ColorMatrix { values, .. } => finite(values),
+                FilterOp::Morphology { rx, ry, .. } => finite(&[*rx, *ry]) && *rx >= 0.0 && *ry >= 0.0,
+                FilterOp::Tile { .. } => true,
+                FilterOp::ConvolveMatrix { columns, rows, kernel, divisor, bias, target_x, target_y, .. } => {
+                    *columns >= 1
+                        && *rows >= 1
+                        && usize::from(*columns) * usize::from(*rows) <= MAX_KERNEL_VALUES
+                        && kernel.len() == usize::from(*columns) * usize::from(*rows)
+                        && finite(kernel)
+                        && finite(&[*divisor, *bias])
+                        && *divisor != 0.0
+                        && target_x < columns
+                        && target_y < rows
+                }
                 FilterOp::ComponentTransfer { funcs, .. } => funcs.iter().all(|f| match f {
                     TransferFn::Identity => true,
                     TransferFn::Table(t) | TransferFn::Discrete(t) => t.len() <= MAX_TRANSFER_VALUES && finite(t),
@@ -271,7 +351,7 @@ impl FilterGraph {
                 }),
             };
             if !ok {
-                return Err(format!("filter node {i} ({}) has a value that is not finite, or a list that is too long", node.op.source_name()));
+                return Err(format!("filter node {i} ({}) has a value that is not finite, a list that is too long, or a size that does not fit", node.op.source_name()));
             }
         }
         Ok(())
@@ -292,6 +372,10 @@ impl FilterGraph {
                         let (rx, ry) = scale_blur(*rx, *ry, m);
                         FilterOp::Blur { input: *input, rx, ry }
                     }
+                    FilterOp::Morphology { input, dilate, rx, ry } => {
+                        let (rx, ry) = scale_blur(*rx, *ry, m);
+                        FilterOp::Morphology { input: *input, dilate: *dilate, rx, ry }
+                    }
                     other => other.clone(),
                 };
                 FilterNode { op, region: node.region.map(|r| r.transformed(m)), linear: node.linear }
@@ -307,6 +391,8 @@ impl FilterGraph {
             .map(|n| match &n.op {
                 FilterOp::Blur { rx, ry, .. } => rx.max(*ry).max(0.0) * 3.0,
                 FilterOp::Offset { dx, dy, .. } => dx.abs().max(dy.abs()),
+                FilterOp::Morphology { dilate: true, rx, ry, .. } => rx.max(*ry).max(0.0),
+                FilterOp::ConvolveMatrix { columns, rows, .. } => f64::from(*columns.max(rows)),
                 _ => 0.0,
             })
             .sum()
@@ -405,6 +491,71 @@ mod tests {
         let steps = TransferFn::Discrete(vec![0.1, 0.5, 0.9]);
         assert!(close(steps.apply(0.0), 0.1) && close(steps.apply(0.34), 0.5) && close(steps.apply(0.67), 0.9) && close(steps.apply(1.0), 0.9));
         assert!(close(TransferFn::Discrete(vec![]).apply(0.2), 0.2));
+    }
+
+    fn convolve(columns: u16, rows: u16, kernel: Vec<f64>) -> FilterOp {
+        FilterOp::ConvolveMatrix {
+            input: FilterInput::SourceGraphic,
+            columns,
+            rows,
+            kernel,
+            divisor: 1.0,
+            bias: 0.0,
+            target_x: columns / 2,
+            target_y: rows / 2,
+            edge: ConvolveEdge::Duplicate,
+            preserve_alpha: false,
+        }
+    }
+
+    #[test]
+    fn a_convolve_matrix_needs_a_kernel_that_fits_its_order() {
+        let ok = |op: FilterOp| FilterGraph { nodes: vec![FilterNode::new(op)] }.validate();
+        assert!(ok(convolve(3, 3, vec![0.0; 9])).is_ok());
+        assert!(ok(convolve(4, 2, vec![0.0; 8])).is_ok());
+        assert!(ok(convolve(3, 3, vec![0.0; 8])).is_err(), "too few values");
+        assert!(ok(convolve(3, 3, vec![0.0; 10])).is_err(), "too many values");
+        assert!(ok(convolve(0, 3, vec![])).is_err(), "no columns");
+        assert!(ok(convolve(33, 33, vec![0.0; 33 * 33])).is_err(), "more than the limit");
+        assert!(ok(convolve(32, 32, vec![0.0; 1024])).is_ok());
+        assert!(ok(convolve(3, 3, vec![f64::NAN; 9])).is_err());
+        let FilterOp::ConvolveMatrix { columns, rows, kernel, edge, preserve_alpha, .. } = convolve(3, 3, vec![0.0; 9]) else { unreachable!() };
+        let with = |divisor: f64, bias: f64, target_x: u16, target_y: u16| FilterOp::ConvolveMatrix {
+            input: FilterInput::SourceGraphic, columns, rows, kernel: kernel.clone(), divisor, bias, target_x, target_y, edge, preserve_alpha,
+        };
+        assert!(ok(with(0.0, 0.0, 1, 1)).is_err(), "a divisor of zero");
+        assert!(ok(with(1.0, f64::INFINITY, 1, 1)).is_err());
+        assert!(ok(with(1.0, 0.0, 3, 1)).is_err(), "a target outside the kernel");
+        assert!(ok(with(1.0, 0.0, 1, 3)).is_err());
+        assert!(ok(with(1.0, 0.0, 2, 2)).is_ok());
+    }
+
+    #[test]
+    fn a_morphology_radius_is_finite_and_not_negative() {
+        let m = |rx: f64, ry: f64| FilterGraph { nodes: vec![FilterNode::new(FilterOp::Morphology { input: FilterInput::SourceGraphic, dilate: false, rx, ry })] }.validate();
+        assert!(m(0.0, 0.0).is_ok() && m(3.0, 0.5).is_ok());
+        assert!(m(-1.0, 1.0).is_err() && m(1.0, f64::NAN).is_err() && m(f64::INFINITY, 1.0).is_err());
+    }
+
+    #[test]
+    fn tile_reads_one_input_and_the_new_ops_have_names() {
+        let tile = FilterOp::Tile { input: FilterInput::Node(0) };
+        assert_eq!(tile.inputs(), vec![FilterInput::Node(0)]);
+        assert_eq!((tile.source_name(), convolve(3, 3, vec![0.0; 9]).source_name()), ("tile", "convolve_matrix"));
+        assert_eq!(FilterOp::Morphology { input: FilterInput::SourceGraphic, dilate: true, rx: 1.0, ry: 1.0 }.source_name(), "morphology");
+        for e in [ConvolveEdge::Duplicate, ConvolveEdge::Wrap, ConvolveEdge::None] {
+            assert_eq!(ConvolveEdge::from_source_name(e.source_name()), Some(e));
+        }
+        assert_eq!(ConvolveEdge::from_source_name("mirror"), None);
+    }
+
+    #[test]
+    fn scaling_moves_morphology_radii_by_axis() {
+        let g = FilterGraph { nodes: vec![FilterNode::new(FilterOp::Morphology { input: FilterInput::SourceGraphic, dilate: true, rx: 2.0, ry: 5.0 })] };
+        let s = g.scaled(&Matrix2D { a: 3.0, b: 0.0, c: 0.0, d: 2.0, e: 0.0, f: 0.0 });
+        let FilterOp::Morphology { rx, ry, dilate, .. } = &s.nodes[0].op else { unreachable!() };
+        assert!(*dilate && close(*rx, 6.0) && close(*ry, 10.0));
+        assert!(g.max_extent() >= 5.0);
     }
 
     #[test]

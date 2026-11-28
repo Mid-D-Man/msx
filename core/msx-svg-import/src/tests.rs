@@ -3523,11 +3523,8 @@ fn filters_inherit_attributes_and_primitives_through_href() {
 #[test]
 fn primitives_without_a_layer_effect_are_reported_and_the_element_drawn_plain() {
     for body in [
-        r#"<feTile/>"#,
         r#"<feImage/>"#,
         r#"<feTurbulence baseFrequency="0.1"/>"#,
-        r#"<feMorphology radius="2"/>"#,
-        r#"<feConvolveMatrix order="3" kernelMatrix="0 0 0 0 1 0 0 0 0"/>"#,
         r#"<feGaussianBlur stdDeviation="3"/><feDiffuseLighting><feDistantLight/></feDiffuseLighting>"#,
     ] {
         let i = filtered(&format!(r#"<filter id="f">{body}</filter>"#), SQUARE);
@@ -4287,6 +4284,178 @@ fn graph_of(i: &Imported) -> msx_ast::FilterGraph {
         [msx_ast::Effect::Graph(g)] => g.clone(),
         other => panic!("expected one filter graph, got {other:?}"),
     }
+}
+
+/// The nodes of the graph of the filter `body` (the inside of a `<filter id="f">`) on `SQUARE`.
+fn nodes_of(body: &str) -> Vec<msx_ast::FilterNode> {
+    let i = filtered(&format!(r#"<filter id="f">{body}</filter>"#), SQUARE);
+    assert!(i.warnings.is_empty(), "{body}: {:?}", i.warnings);
+    graph_of(&i).nodes
+}
+
+/// The filter region of the default filter on `SQUARE`: the box grown by a tenth on every side.
+fn square_region() -> msx_ast::FilterRegion {
+    msx_ast::FilterRegion { x: 14.0, y: 14.0, width: 72.0, height: 72.0 }
+}
+
+fn morphology_of(attrs: &str) -> (bool, f64, f64) {
+    let nodes = nodes_of(&format!("<feMorphology {attrs}/>"));
+    let msx_ast::FilterOp::Morphology { dilate, rx, ry, .. } = nodes[0].op else { panic!("{:?}", nodes[0].op) };
+    assert_eq!(nodes[0].region, Some(square_region()), "{attrs}");
+    (dilate, rx, ry)
+}
+
+#[test]
+fn a_morphology_reads_its_operator_and_one_or_two_radii() {
+    assert_eq!(morphology_of(r#"operator="dilate" radius="3 5""#), (true, 3.0, 5.0));
+    assert_eq!(morphology_of(r#"radius="4""#), (false, 4.0, 4.0));
+    assert_eq!(morphology_of(r#"radius="0.5""#), (false, 0.5, 0.5));
+    assert_eq!(morphology_of(r#"operator="open" radius="2""#), (false, 2.0, 2.0), "an unknown operator is erode");
+}
+
+#[test]
+fn a_radius_that_cannot_be_used_is_a_radius_of_one_like_resvg() {
+    for attrs in ["", r#"radius="""#, r#"radius="0""#, r#"radius="-5""#, r#"radius="10 20 30""#, r#"radius="qwe""#] {
+        assert_eq!(morphology_of(attrs), (false, 1.0, 1.0), "{attrs}");
+    }
+    assert_eq!(morphology_of(r#"radius="10 0""#), (false, 10.0, 1.0));
+    assert_eq!(morphology_of(r#"radius="0 10""#), (false, 1.0, 10.0));
+}
+
+#[test]
+fn a_morphology_radius_follows_primitive_units() {
+    let i = filtered(r#"<filter id="f" primitiveUnits="objectBoundingBox"><feMorphology radius="0.1 0.5"/></filter>"#, SQUARE);
+    let msx_ast::FilterOp::Morphology { rx, ry, .. } = graph_of(&i).nodes[0].op else { panic!() };
+    assert!((rx - 6.0).abs() < 1e-9 && (ry - 30.0).abs() < 1e-9, "{rx} {ry}");
+}
+
+#[test]
+fn a_tile_reads_the_region_of_the_node_it_follows() {
+    let nodes = nodes_of(r#"<feFlood flood-color="red" x="20" y="22" width="10" height="12"/><feOffset dx="5" dy="5"/><feTile/>"#);
+    assert_eq!(nodes.len(), 3);
+    let flood_region = msx_ast::FilterRegion { x: 20.0, y: 22.0, width: 10.0, height: 12.0 };
+    assert_eq!(nodes[0].region, Some(flood_region));
+    // An offset without a region of its own has the region of its input.
+    assert_eq!(nodes[1].region, Some(flood_region));
+    assert!(matches!(nodes[2].op, msx_ast::FilterOp::Tile { input: msx_ast::FilterInput::Node(1) }));
+    assert_eq!(nodes[2].region, None);
+}
+
+#[test]
+fn an_offset_keeps_its_own_region_and_one_after_a_plain_node_has_none() {
+    let own = nodes_of(r#"<feFlood x="20" y="22" width="10" height="12"/><feOffset dx="5" x="30" y="30" width="5" height="5"/>"#);
+    assert_eq!(own[1].region, Some(msx_ast::FilterRegion { x: 30.0, y: 30.0, width: 5.0, height: 5.0 }));
+    let plain = nodes_of(r#"<feFlood/><feOffset dx="5"/>"#);
+    assert_eq!(plain[1].region, None);
+    let from_source = nodes_of(r#"<feOffset dx="5" in="SourceGraphic"/><feFlood/>"#);
+    assert_eq!(from_source[0].region, None);
+}
+
+fn convolve_of(attrs: &str) -> Option<msx_ast::FilterOp> {
+    let nodes = nodes_of(&format!("<feConvolveMatrix {attrs}/>"));
+    match &nodes[0].op {
+        msx_ast::FilterOp::ConvolveMatrix { .. } => {
+            assert_eq!(nodes[0].region, Some(square_region()), "{attrs}");
+            Some(nodes[0].op.clone())
+        }
+        msx_ast::FilterOp::Offset { input: msx_ast::FilterInput::SourceGraphic, dx, dy } if (*dx, *dy) == (0.0, 0.0) => None,
+        other => panic!("{attrs}: {other:?}"),
+    }
+}
+
+#[test]
+fn a_convolve_matrix_takes_the_defaults_of_the_specification() {
+    let Some(msx_ast::FilterOp::ConvolveMatrix { columns, rows, kernel, divisor, bias, target_x, target_y, edge, preserve_alpha, .. }) =
+        convolve_of(r#"kernelMatrix="1 2 3 4 5 6 7 8 9""#)
+    else {
+        panic!("not a convolve matrix")
+    };
+    assert_eq!((columns, rows, kernel.len()), (3, 3, 9));
+    assert_eq!((divisor, bias, target_x, target_y, edge, preserve_alpha), (45.0, 0.0, 1, 1, msx_ast::ConvolveEdge::Duplicate, false));
+    // A kernel that sums to zero divides by one.
+    let Some(msx_ast::FilterOp::ConvolveMatrix { divisor, .. }) = convolve_of(r#"order="3 1" kernelMatrix="1 -2 1""#) else { panic!() };
+    assert_eq!(divisor, 1.0);
+}
+
+#[test]
+fn a_convolve_matrix_reads_order_target_edge_bias_and_alpha() {
+    let Some(msx_ast::FilterOp::ConvolveMatrix { columns, rows, divisor, bias, target_x, target_y, edge, preserve_alpha, .. }) =
+        convolve_of(r#"order="4 2" kernelMatrix="1 1 1 1 1 1 1 1" divisor="2" bias="0.25" targetX="0" targetY="1" edgeMode="wrap" preserveAlpha="true""#)
+    else {
+        panic!("not a convolve matrix")
+    };
+    assert_eq!((columns, rows, divisor, bias, target_x, target_y, edge, preserve_alpha), (4, 2, 2.0, 0.25, 0, 1, msx_ast::ConvolveEdge::Wrap, true));
+    let Some(msx_ast::FilterOp::ConvolveMatrix { edge, .. }) = convolve_of(r#"order="1" kernelMatrix="1" edgeMode="none""#) else { panic!() };
+    assert_eq!(edge, msx_ast::ConvolveEdge::None);
+    let Some(msx_ast::FilterOp::ConvolveMatrix { columns, rows, .. }) = convolve_of(r#"order="2" kernelMatrix="1 1 1 1""#) else { panic!() };
+    assert_eq!((columns, rows), (2, 2));
+}
+
+#[test]
+fn a_convolve_matrix_that_cannot_work_is_skipped_like_resvg() {
+    let kernel = r#"kernelMatrix="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1""#;
+    for attrs in [
+        r#"order="0" kernelMatrix="0.1 0.1""#.to_string(),
+        r#"order="-2" kernelMatrix="0.1 0.1 0.1 0.1""#.to_string(),
+        r#"order="4 -2" kernelMatrix="0.1 0.1 0.1 0.1""#.to_string(),
+        r#"order="3.5" kernelMatrix="0.1 0.1 0.1""#.to_string(),
+        r#"order="1 2 3" kernelMatrix="0.1""#.to_string(),
+        r#"order="40" kernelMatrix="1""#.to_string(),
+        String::new(),
+        r#"kernelMatrix="""#.to_string(),
+        r#"kernelMatrix="0.1 0.1""#.to_string(),
+        r#"kernelMatrix="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1""#.to_string(),
+    ] {
+        assert!(convolve_of(&attrs).is_none(), "{attrs}");
+    }
+    for attrs in [format!(r#"{kernel} targetX="0""#), format!(r#"{kernel} targetX="2" targetY="2""#)] {
+        assert!(convolve_of(&attrs).is_some(), "{attrs}");
+    }
+}
+
+#[test]
+fn a_divisor_of_zero_and_a_target_outside_the_kernel_fall_back_to_the_defaults() {
+    let kernel = r#"kernelMatrix="1 1 1 1 1 1 1 1 1""#;
+    let parts = |attrs: &str| match convolve_of(&format!("{kernel} {attrs}")) {
+        Some(msx_ast::FilterOp::ConvolveMatrix { divisor, target_x, target_y, .. }) => (divisor, target_x, target_y),
+        other => panic!("{attrs}: {other:?}"),
+    };
+    assert_eq!(parts(r#"divisor="0""#), (9.0, 1, 1));
+    assert_eq!(parts(r#"targetX="-1""#), (9.0, 1, 1));
+    assert_eq!(parts(r#"targetX="3" targetY="3""#), (9.0, 1, 1));
+    assert_eq!(parts(r#"targetX="2" targetY="0" divisor="3""#), (3.0, 2, 0));
+}
+
+#[test]
+fn a_primitive_region_is_cut_to_the_filter_region_and_an_empty_one_is_transparent() {
+    // The filter region of SQUARE is 14 to 86.
+    let nodes = nodes_of(r#"<feFlood x="0" y="10" width="30" height="20"/>"#);
+    assert_eq!(nodes[0].region, Some(msx_ast::FilterRegion { x: 14.0, y: 14.0, width: 16.0, height: 16.0 }));
+    let outside = nodes_of(r#"<feFlood flood-color="red" x="0" y="0" width="10" height="10"/><feOffset dx="5"/><feTile/>"#);
+    assert!(matches!(outside[0].op, msx_ast::FilterOp::Flood { color } if color.a == 0), "{:?}", outside[0].op);
+    assert_eq!((outside[0].region, outside[1].region), (None, None));
+}
+
+#[test]
+fn the_new_primitives_survive_import_write_and_parse() {
+    let i = filtered(
+        r#"<filter id="f"><feFlood x="20" y="20" width="8" height="8"/><feTile/><feMorphology operator="dilate" radius="2"/><feConvolveMatrix order="3" kernelMatrix="0 1 0 1 1 1 0 1 0" edgeMode="none"/></filter>"#,
+        SQUARE,
+    );
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+    let src = msx_parser::scene_to_msx(&i.scene).expect("written");
+    let back = msx_parser::parse_scene(&src).expect("parsed");
+    let inner = |e: &Element| match e {
+        Element::Layer(outer) => match &outer.children[0] {
+            Element::Layer(l) => l.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let msx_ast::Effect::Graph(before) = &filter_layer(&i).effects[0] else { panic!() };
+    let msx_ast::Effect::Graph(after) = &inner(&back.elements[0]).effects[0] else { panic!("{src}") };
+    assert_eq!(before.nodes.len(), 4);
+    assert_eq!(before, after);
 }
 
 #[test]
